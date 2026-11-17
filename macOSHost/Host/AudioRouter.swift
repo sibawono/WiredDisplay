@@ -13,16 +13,30 @@ import WDMacAudio
 /// fight manual choices. All work happens on its own serial queue.
 final class AudioRouter: @unchecked Sendable {
     static let enabledKey = "autoSwitchAudio"
+    static let microphoneKey = "autoSwitchMicrophone"
 
     private let queue = DispatchQueue(label: "wireddisplay.audio-router")
     private var known: [AudioDeviceID: AudioDeviceInfo] = [:]
     private var iPadSpeaker = false
     private var iPadMicrophone = false
     private var listening = false
+    /// When headphones last arrived; macOS may move the input to their mic
+    /// shortly after, which "output only" undoes within this window.
+    private var headphonesArrived = Date.distantPast
+    /// The last default input that was not a headset microphone.
+    private var lastOtherInput: AudioDeviceID?
 
     var isEnabled: Bool {
         get { UserDefaults.standard.object(forKey: Self.enabledKey) as? Bool ?? true }
         set { UserDefaults.standard.set(newValue, forKey: Self.enabledKey) }
+    }
+
+    /// Off = "output only": headphones get the sound, the microphone stays
+    /// on the iPad (or whatever it was). Keeps AirPods out of the lower-quality
+    /// Bluetooth headset mode.
+    var usesHeadsetMicrophone: Bool {
+        get { UserDefaults.standard.object(forKey: Self.microphoneKey) as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: Self.microphoneKey) }
     }
 
     func start() {
@@ -36,6 +50,13 @@ final class AudioRouter: @unchecked Sendable {
             AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &address, queue) { [weak self] _, _ in
                 self?.devicesChanged()
             }
+            var input = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultInputDevice,
+                                                   mScope: kAudioObjectPropertyScopeGlobal,
+                                                   mElement: kAudioObjectPropertyElementMain)
+            AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &input, queue) { [weak self] _, _ in
+                self?.defaultInputChanged()
+            }
+            defaultInputChanged()
         }
     }
 
@@ -52,7 +73,7 @@ final class AudioRouter: @unchecked Sendable {
             if speakerTurnedOn, !devices.contains(where: isHeadphoneOutput) {
                 select(.speaker, input: false, reason: "the iPad turned its speaker on")
             }
-            if microphoneTurnedOn, !devices.contains(where: { isHeadsetInput($0, among: devices) }) {
+            if microphoneTurnedOn, !usesHeadsetMicrophone || !devices.contains(where: { isHeadsetInput($0, among: devices) }) {
                 select(.microphone, input: true, reason: "the iPad turned its microphone on")
             }
         }
@@ -69,9 +90,15 @@ final class AudioRouter: @unchecked Sendable {
         guard isEnabled else { return }
 
         if let headphones = added.first(where: isHeadphoneOutput) {
+            headphonesArrived = Date()
             setDefault(headphones.id, input: false, reason: "\(headphones.name) connected")
+            if !usesHeadsetMicrophone {
+                // macOS may already have moved the input, or do it a moment later.
+                defaultInputChanged()
+                queue.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.defaultInputChanged() }
+            }
         }
-        if let headset = added.first(where: { isHeadsetInput($0, among: added + now) }) {
+        if usesHeadsetMicrophone, let headset = added.first(where: { isHeadsetInput($0, among: added + now) }) {
             setDefault(headset.id, input: true, reason: "\(headset.name) connected")
         }
         guard !removed.isEmpty else { return }
@@ -80,9 +107,28 @@ final class AudioRouter: @unchecked Sendable {
         if removed.contains(where: isHeadphoneOutput), iPadSpeaker, !now.contains(where: isHeadphoneOutput) {
             select(.speaker, input: false, reason: "\(gone) disconnected")
         }
-        if removed.contains(where: { isHeadsetInput($0, among: removed) }), iPadMicrophone,
+        if usesHeadsetMicrophone, removed.contains(where: { isHeadsetInput($0, among: removed) }), iPadMicrophone,
            !now.contains(where: { isHeadsetInput($0, among: now) }) {
             select(.microphone, input: true, reason: "\(gone) disconnected")
+        }
+    }
+
+    /// "Output only": macOS itself often makes the headset microphone the
+    /// input right after the headphones connect (AirPods always do). Undo that
+    /// within a few seconds of their arrival; later, a manual choice stands.
+    private func defaultInputChanged() {
+        let current = AudioDevices.defaultDevice(input: true)
+        let devices = AudioDevices.all()
+        guard let info = devices.first(where: { $0.id == current }) else { return }
+        guard isHeadsetInput(info, among: devices) else {
+            lastOtherInput = current
+            return
+        }
+        guard isEnabled, !usesHeadsetMicrophone, Date().timeIntervalSince(headphonesArrived) < 5 else { return }
+        if iPadMicrophone, let iPad = try? AudioDevices.find(.microphone) {
+            setDefault(iPad, input: true, reason: "output only: keeping the iPad microphone")
+        } else if let previous = lastOtherInput, devices.contains(where: { $0.id == previous }) {
+            setDefault(previous, input: true, reason: "output only: keeping the previous microphone")
         }
     }
 

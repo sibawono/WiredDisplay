@@ -27,6 +27,7 @@ struct PanelSnapshot {
     var speaker = false
     var microphone = false
     var autoSwitchAudio = true
+    var autoSwitchMicrophone = true
     var paired: [Paired] = []
     var connectionCode: String?
     var openAtLogin = false
@@ -40,6 +41,7 @@ struct PanelActions {
     var setInput: (Bool) -> Void = { _ in }
     var setOpenAtLogin: (Bool) -> Void = { _ in }
     var setAutoSwitchAudio: (Bool) -> Void = { _ in }
+    var setAutoSwitchMicrophone: (Bool) -> Void = { _ in }
     var openDisplaySettings: () -> Void = {}
     var openSoundSettings: () -> Void = {}
     var openAccessibility: () -> Void = {}
@@ -250,9 +252,18 @@ struct StatusPanelView: View {
             }
             Card {
                 ToggleLine(title: "Switch to headphones automatically",
-                           detail: "AirPods, Bluetooth, USB-C earphones: sound and mic move to them, and back to the iPad when they disconnect",
+                           detail: "AirPods, Bluetooth, USB-C earphones: sound moves to them, and back to the iPad when they disconnect",
                            isOn: Binding(get: { s.autoSwitchAudio },
                                          set: { model.snapshot.autoSwitchAudio = $0; model.actions.setAutoSwitchAudio($0) }))
+                if s.autoSwitchAudio {
+                    CardDivider()
+                    ToggleLine(title: "Use their microphone too",
+                               detail: s.autoSwitchMicrophone
+                                   ? "Off keeps the iPad microphone, and AirPods keep full sound quality"
+                                   : "Output only: the microphone stays on the iPad",
+                               isOn: Binding(get: { s.autoSwitchMicrophone },
+                                             set: { model.snapshot.autoSwitchMicrophone = $0; model.actions.setAutoSwitchMicrophone($0) }))
+                }
             }
             LinkRow(title: "Sound Settings…", symbol: "arrow.up.forward.app", action: model.actions.openSoundSettings)
         }
