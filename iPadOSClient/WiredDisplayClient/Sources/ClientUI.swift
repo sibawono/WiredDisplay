@@ -22,21 +22,31 @@ struct Backdrop: View {
     }
 }
 
-/// The app icon's motif as a tile: an iPad with a USB-C plug.
+/// A tile with a symbol, or (no symbol) the app icon itself, so the splash
+/// screen shows exactly the home screen icon.
 struct IconTile: View {
-    var symbol = "ipad.landscape"
+    var symbol: String?
     var size: CGFloat = 96
 
     var body: some View {
-        RoundedRectangle(cornerRadius: size * 0.24, style: .continuous)
-            .fill(Brand.tile)
-            .frame(width: size, height: size)
-            .overlay(
-                Image(systemName: symbol)
-                    .font(.system(size: size * 0.44, weight: .medium))
-                    .foregroundStyle(.white)
-            )
-            .shadow(color: Brand.blue.opacity(0.45), radius: 24, y: 10)
+        Group {
+            if let symbol {
+                RoundedRectangle(cornerRadius: size * 0.24, style: .continuous)
+                    .fill(Brand.tile)
+                    .overlay(
+                        Image(systemName: symbol)
+                            .font(.system(size: size * 0.44, weight: .medium))
+                            .foregroundStyle(.white)
+                    )
+            } else {
+                Image("AppIconArt")
+                    .resizable()
+                    .interpolation(.high)
+                    .clipShape(RoundedRectangle(cornerRadius: size * 0.225, style: .continuous))
+            }
+        }
+        .frame(width: size, height: size)
+        .shadow(color: Brand.blue.opacity(0.45), radius: 24, y: 10)
     }
 }
 
@@ -436,7 +446,7 @@ struct ControlsContent: View {
 
     private var header: some View {
         HStack(spacing: 14) {
-            IconTile(symbol: "ipad.landscape", size: 48)
+            IconTile(size: 48)
             VStack(alignment: .leading, spacing: 4) {
                 Text(summary.macName.isEmpty ? "WiredDisplay" : summary.macName)
                     .font(.title3.weight(.semibold))

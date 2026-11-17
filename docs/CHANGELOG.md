@@ -268,3 +268,11 @@
 **IMPLEMENTATION SUMMARY:** panel switch "Use their microphone too" (`autoSwitchMicrophone`). Off: headset microphones are not selected, and when macOS moves the default input to one within 5 s of the headphones connecting, the router restores the iPad microphone (or the previous input).
 
 **VERIFIED (hardware):** option off, iPad mic on, AirPods 4 connected → output AirPods 4, input moved back to iPad Microphone 50 ms later.
+
+## CHANGE ID: P1-023 — One Sidecar-style icon everywhere
+
+**FILES CHANGED:** `scripts/{make-icons.swift,make-icons.sh}`; `macOSHost/Resources/AppIcon.icns`; `iPadOSClient/WiredDisplayClient/Assets.xcassets/{AppIcon.appiconset,AppIconArt.imageset}`; `iPadOSClient/WiredDisplayClient/Sources/ClientUI.swift`; `docs/CHANGELOG.md`.
+
+**IMPLEMENTATION SUMMARY:** the icon is now just a white iPad in landscape on the blue gradient, like the Sidecar icon (no plug or cable, user request). The Mac icon uses the same artwork inside the macOS squircle (it was still the older screen-and-cable design). The iPad splash/status screen and the Controls header show the icon itself (`AppIconArt` image, written by `make-icons.sh`) instead of an SF Symbol. The menu bar glyph is now an iPad in landscape with its home bar (screen filled while streaming), no plug.
+
+**VERIFIED:** icons rendered and reviewed; iPad build contains `AppIconArt`; host smoke-tested and relaunched.

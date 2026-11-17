@@ -1,8 +1,8 @@
-// Renders the WiredDisplay icons: a screen with a USB-C plug.
+// Renders the WiredDisplay icons: an iPad in the style of the Sidecar icon.
 //
 // usage: swift scripts/make-icons.swift <output-dir>
 // writes: AppIcon-iPad-1024.png (full bleed, Continuity style; iPadOS applies the mask),
-//         AppIcon.iconset/ (macOS squircle sizes, for iconutil),
+//         AppIcon.iconset/ (the same artwork in the macOS squircle, for iconutil),
 //         MenuBar-preview.png (the menu bar glyph at 8x, both states).
 import AppKit
 
@@ -83,20 +83,19 @@ func drawIcon(squircle: Bool) {
     NSGraphicsContext.restoreGraphicsState()
 }
 
-/// iPad icon, in the style of Apple's Sidecar / Continuity icons: white line
-/// art with round caps on a vivid blue gradient, no bevels or glow. An iPad
-/// in landscape with a USB-C plug in its side port (no cable).
+/// iPad icon, in the style of Apple's Sidecar icon: white line art on a
+/// vivid blue gradient, no bevels or glow. Just an iPad in landscape,
+/// centred; no plug or cable (user request).
 func drawContinuityIcon() {
     let tile = NSRect(x: 0, y: 0, width: 1024, height: 1024)
     NSGradient(colors: [color(0x5AB8FF), color(0x1F7BFF), color(0x0A52E0)],
                atLocations: [0, 0.55, 1], colorSpace: .sRGB)!.draw(in: tile, angle: -90)
     let white = NSColor.white
-    let stroke: CGFloat = 40
+    let stroke: CGFloat = 46
 
     // iPad, landscape: thick rounded outline (the bezel), translucent screen.
-    // The iPad + plug group is centred horizontally (no cable, by request).
-    let device = NSRect(x: 140, y: 342, width: 540, height: 390)
-    let outline = NSBezierPath(roundedRect: device.insetBy(dx: stroke / 2, dy: stroke / 2), xRadius: 62, yRadius: 62)
+    let device = NSRect(x: 512 - 330, y: 512 - 236, width: 660, height: 472)
+    let outline = NSBezierPath(roundedRect: device.insetBy(dx: stroke / 2, dy: stroke / 2), xRadius: 72, yRadius: 72)
     outline.lineWidth = stroke
     white.setStroke()
     outline.stroke()
@@ -108,32 +107,43 @@ func drawContinuityIcon() {
     NSBezierPath(roundedRect: screen, xRadius: 26, yRadius: 26).addClip()
     let sheen = NSBezierPath()
     sheen.move(to: NSPoint(x: screen.minX, y: screen.minY + 70))
-    sheen.line(to: NSPoint(x: screen.minX + 230, y: screen.maxY))
-    sheen.line(to: NSPoint(x: screen.minX + 330, y: screen.maxY))
+    sheen.line(to: NSPoint(x: screen.minX + 280, y: screen.maxY))
+    sheen.line(to: NSPoint(x: screen.minX + 400, y: screen.maxY))
     sheen.line(to: NSPoint(x: screen.minX, y: screen.minY - 30))
     sheen.close()
     white.withAlphaComponent(0.14).setFill()
     sheen.fill()
     NSGraphicsContext.restoreGraphicsState()
     // Front camera dot on the long (top) edge, as on iPad Air in landscape.
-    let camera = NSRect(x: device.midX - 9, y: device.maxY - stroke / 2 - 9, width: 18, height: 18)
+    let camera = NSRect(x: device.midX - 10, y: device.maxY - stroke / 2 - 10, width: 20, height: 20)
     color(0x2A86FF).setFill()
     NSBezierPath(ovalIn: camera).fill()
 
-    // USB-C plug in the right-hand port, pointing at the iPad: a thin metal
-    // tip (stadium) joined to a rounded body.
-    let midY = device.midY
-    white.setFill()
-    let tip = NSRect(x: device.maxX + 12, y: midY - 23, width: 62, height: 46)
-    NSBezierPath(roundedRect: tip, xRadius: 15, yRadius: 15).fill()
-    let body = NSRect(x: tip.maxX - 12, y: midY - 50, width: 152, height: 100)
-    NSBezierPath(roundedRect: body, xRadius: 30, yRadius: 30).fill()
-    // two grip lines along the body, cut in the background blue
-    color(0x2A7FFF).setFill()
-    for dy: CGFloat in [-20, 10] {
-        NSBezierPath(roundedRect: NSRect(x: body.minX + 34, y: midY + dy, width: body.width - 68, height: 10),
-                     xRadius: 5, yRadius: 5).fill()
-    }
+}
+
+/// macOS icon: the same Continuity artwork as the iPad icon, inside the
+/// macOS squircle (inset tile with a soft drop shadow), so the Mac app, the
+/// iPad home screen and the iPad splash screen all show one icon.
+func drawMacContinuityIcon() {
+    let tile = NSRect(x: 100, y: 100, width: 824, height: 824)
+    let shape = NSBezierPath(roundedRect: tile, xRadius: 185, yRadius: 185)
+    NSGraphicsContext.saveGraphicsState()
+    let shadow = NSShadow()
+    shadow.shadowColor = NSColor.black.withAlphaComponent(0.3)
+    shadow.shadowBlurRadius = 28
+    shadow.shadowOffset = NSSize(width: 0, height: -12)
+    shadow.set()
+    color(0x1F7BFF).setFill()
+    shape.fill()
+    NSGraphicsContext.restoreGraphicsState()
+    NSGraphicsContext.saveGraphicsState()
+    shape.addClip()
+    let transform = NSAffineTransform()
+    transform.translateX(by: tile.minX, yBy: tile.minY)
+    transform.scale(by: tile.width / 1024)
+    transform.concat()
+    drawContinuityIcon()
+    NSGraphicsContext.restoreGraphicsState()
 }
 
 func png(size: Int, scale: CGFloat = 1, draw: () -> Void) -> Data {
@@ -172,7 +182,7 @@ try FileManager.default.createDirectory(at: iconset, withIntermediateDirectories
 for base in [16, 32, 128, 256, 512] {
     for scale in [1, 2] {
         let name = scale == 1 ? "icon_\(base)x\(base).png" : "icon_\(base)x\(base)@2x.png"
-        try png(size: base * scale) { drawIcon(squircle: true) }.write(to: iconset.appendingPathComponent(name))
+        try png(size: base * scale) { drawMacContinuityIcon() }.write(to: iconset.appendingPathComponent(name))
     }
 }
 
