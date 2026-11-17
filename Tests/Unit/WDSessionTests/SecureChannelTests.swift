@@ -345,3 +345,21 @@ final class DecodeLimitTests: XCTestCase {
         XCTAssertThrowsError(try SessionCodec.decodeControl(SessionCodec.encode(.hello(bad))))
     }
 }
+
+final class BrightnessTests: XCTestCase {
+    func testStepsSnapToGridAndClamp() {
+        XCTAssertEqual(BrightnessStep.next(from: 0.5, up: true, fine: false), 0.5625)
+        XCTAssertEqual(BrightnessStep.next(from: 0.5, up: false, fine: false), 0.4375)
+        XCTAssertEqual(BrightnessStep.next(from: 0.53, up: true, fine: false), 0.5625)
+        XCTAssertEqual(BrightnessStep.next(from: 0.53, up: false, fine: false), 0.5)
+        XCTAssertEqual(BrightnessStep.next(from: 1, up: true, fine: false), 1)
+        XCTAssertEqual(BrightnessStep.next(from: 0.02, up: false, fine: false), 0)
+        XCTAssertEqual(BrightnessStep.next(from: 0.5, up: true, fine: true), 0.515625)
+    }
+
+    func testBrightnessMessageRoundTripsAndIsBounded() throws {
+        XCTAssertEqual(try SessionCodec.decodeControl(SessionCodec.encode(.brightness(0.75))), .brightness(0.75))
+        XCTAssertThrowsError(try SessionCodec.decodeControl(SessionCodec.encode(.brightness(1.5))))
+        XCTAssertThrowsError(try SessionCodec.decodeControl(SessionCodec.encode(.brightness(.nan))))
+    }
+}

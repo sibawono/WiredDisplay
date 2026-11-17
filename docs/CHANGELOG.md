@@ -234,3 +234,21 @@
 **IMPLEMENTATION SUMMARY:** the driver's ring buffer and timing move into a shared `LoopbackChannel`; four devices (two visible one-way, two hidden one-way) point at the two channels. `AudioDevices.find` translates UIDs (works for hidden devices). The host records "iPad Speaker Tap" and plays into "iPad Microphone Feed". The probe tests each channel end to end.
 
 **VERIFIED:** both loopback probes pass; device list correct; host bridges start on the taps. Diagnosis before the change: measured on hardware that the Mac side delivered the iPad microphone at −8 dBFS into "iPad Microphone" and nothing leaked into "iPad Speaker". Google Meet call (browser on iPad Microphone / iPad Speaker) confirmed working both ways by the user.
+
+## CHANGE ID: P1-019 — iPad brightness from the Mac (D-033)
+
+**FILES CHANGED:** `Shared/Session/{Messages,BrightnessStep}.swift`; `macOSHost/Host/{BrightnessKeys,HostController,main}.swift`; `iPadOSClient/WiredDisplayClient/Sources/{ClientSession,ClientApp,ClientUI}.swift`; `Tests/Unit/WDSessionTests/SecureChannelTests.swift`; `docs/{DECISIONS,CHANGELOG}.md`.
+
+**IMPLEMENTATION SUMMARY:** `ControlMessage.brightness` both ways (protocol 4); host keeps the iPad's last value, steps it from the brightness keys (`BrightnessKeys` event tap) and a menu slider; iPad applies it to `UIScreen.brightness`, reports Control Center changes, shows a HUD.
+
+**VERIFIED:** 2 new unit tests pass; host builds and its key tap starts ("brightness keys: listening"). On hardware: brightness keys and the menu slider change the real iPad brightness (user confirmed).
+
+## CHANGE ID: P1-020 — Menu bar panel redesign; brightness keys on any keyboard
+
+**OBJECTIVE:** A tidier, more detailed menu bar UI (user request, styled after a tabbed popover the user showed), and the brightness keys of a third-party keyboard reaching the iPad instead of BetterDisplay's software dimming.
+
+**FILES CHANGED:** `macOSHost/Host/{StatusPanel,main,BrightnessKeys,HostController}.swift`; `docs/{DECISIONS,CHANGELOG}.md`.
+
+**IMPLEMENTATION SUMMARY:** the NSMenu becomes an NSPopover with a SwiftUI panel: header (icon, status dot, connected time), icon tab bar (Display, Input, Audio, Security, General) over cards: resolution and codec, a full-width brightness slider, quality chips with descriptions, the input switch and shortcut list, audio status, the connection code and paired iPads, permissions with Grant buttons, Open at Login; footer Show Log and Quit. The host keeps a `SessionStatus` snapshot for it. `--render-panel <dir>` renders every tab (light and dark) to PNG for review. The brightness key tap moved to the HID level and also handles key codes 144/145; `--trace-keys` logs system-defined events and function keys (never letters or digits) for 10 minutes.
+
+**VERIFIED:** panel rendered and reviewed in light and dark; on hardware the user confirmed the panel and that the ProtoArc K90 brightness keys now change the iPad's real brightness. **Incident:** while adding `--trace-keys` the host briefly rejected the new flag at launch (unknown option) and the iPad display was down for about 6 minutes; the parser now accepts it.

@@ -555,6 +555,28 @@ private struct ShortcutRow: View {
     }
 }
 
+/// Brief indicator when the Mac changes the iPad's brightness (D-033).
+struct BrightnessHUD: View {
+    let value: Float
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: value < 0.5 ? "sun.min.fill" : "sun.max.fill")
+                .foregroundStyle(.white)
+            GeometryReader { proxy in
+                Capsule().fill(.white.opacity(0.2))
+                    .overlay(alignment: .leading) {
+                        Capsule().fill(.white).frame(width: proxy.size.width * CGFloat(value))
+                    }
+            }
+            .frame(width: 180, height: 6)
+        }
+        .padding(.horizontal, 18).padding(.vertical, 12)
+        .background(.ultraThinMaterial, in: Capsule())
+        .environment(\.colorScheme, .dark)
+    }
+}
+
 /// The small round button that opens the controls; faint while streaming.
 struct ControlsButton: View {
     let streaming: Bool

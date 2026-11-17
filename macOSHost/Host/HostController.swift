@@ -157,6 +157,56 @@ final class HostController: @unchecked Sendable {
         return QualityPreset(chroma: current.chroma, tenBit: current.tenBit)
     }
 
+    // MARK: status for the menu
+
+    /// What the menu shows about the session; updated as things change.
+    struct SessionStatus: Sendable {
+        var iPadName: String?
+        var pixelSize: String?
+        var pointSize: String?
+        var refreshHz: Int?
+        var codec: String?
+        var encoding: String?
+        var speaker = false
+        var microphone = false
+        var streamingSince: Date?
+    }
+
+    private let sessionStatus = OSAllocatedUnfairLock(initialState: SessionStatus())
+    var status: SessionStatus { sessionStatus.withLock { $0 } }
+
+    // MARK: iPad brightness (D-033)
+
+    /// Last brightness the iPad reported (0...1); nil = no iPad connected.
+    private let iPadBrightness = OSAllocatedUnfairLock<Float?>(initialState: nil)
+    /// Called on the main queue when the iPad's brightness changes (for the menu slider).
+    var onBrightnessChange: (@Sendable (Float?) -> Void)?
+
+    var brightness: Float? { iPadBrightness.withLock { $0 } }
+
+    /// Sets the iPad's real screen brightness. False if no iPad is connected.
+    @discardableResult
+    func setBrightness(_ value: Float) -> Bool {
+        let value = min(max(value, 0), 1)
+        guard iPadBrightness.withLock({ current -> Bool in
+            guard current != nil else { return false }
+            current = value
+            return true
+        }) else { return false }
+        queue.async { [self] in
+            guard trusted, let socket, !socket.isClosed else { return }
+            send(.brightness(value), on: socket)
+        }
+        return true
+    }
+
+    /// A brightness key: one macOS step. False if no iPad is connected (the
+    /// key then goes on to macOS as usual).
+    func stepBrightness(up: Bool, fine: Bool) -> Bool {
+        guard let current = brightness else { return false }
+        return setBrightness(BrightnessStep.next(from: current, up: up, fine: fine))
+    }
+
     // MARK: decode limits (D-031)
 
     static let decodeLimitsKey = "decodeLimits"
@@ -389,6 +439,8 @@ final class HostController: @unchecked Sendable {
             trusted = false
             pendingControl = []
             lastHeard = Date()
+            iPadBrightness.withLock { $0 = nil }
+            sessionStatus.withLock { $0 = SessionStatus() }
         }
         while helloArrived.wait(timeout: .now()) == .success {} // drain stale signals
         socket.start()
@@ -542,6 +594,14 @@ final class HostController: @unchecked Sendable {
         send(.streamConfig(pipeline.config), on: socket)
         let codec = pipeline.config.codec
         onState(.streaming("\(hello.deviceName) · \(config.pixelWidth)×\(config.pixelHeight) \(codec)"))
+        let streamed = pipeline.config
+        sessionStatus.withLock {
+            $0.iPadName = hello.deviceName
+            $0.pixelSize = "\(streamed.pixelWidth) × \(streamed.pixelHeight)"
+            $0.pointSize = "\(streamed.pointWidth) × \(streamed.pointHeight)"
+            $0.refreshHz = Int(streamed.refreshHz)
+            $0.streamingSince = Date()
+        }
         Log.info("streaming to \(hello.deviceName): \(pipeline.config) input \(isInputEnabled ? "enabled" : "disabled")")
         if options.testDecodeFallback {
             queue.asyncAfter(deadline: .now() + 8) { [weak self, weak socket] in
@@ -593,6 +653,12 @@ final class HostController: @unchecked Sendable {
                                        encoder.encode(buffer, presentationTime: time, dirtyFraction: dirty)
                                    },
                                    onStop: { reason in socket.close("capture stopped: \(reason)") })
+        let chroma = current.chroma == .c420 ? "4:2:0" : current.chroma == .c444 ? "4:4:4" : "4:2:0 + 4:4:4"
+        let codecName = codec == .hevc ? "HEVC" : "H.264"
+        sessionStatus.withLock {
+            $0.codec = codecName
+            $0.encoding = "\(chroma) · \(current.tenBit ? 10 : 8)-bit"
+        }
         Log.info("encoding \(codec) \(current.chroma.rawValue) \(current.tenBit ? 10 : 8)-bit")
     }
 
@@ -607,6 +673,7 @@ final class HostController: @unchecked Sendable {
               width != pipeline.config.pointWidth || height != pipeline.config.pointHeight else { return }
         pipeline.config.pointWidth = width
         pipeline.config.pointHeight = height
+        sessionStatus.withLock { $0.pointSize = "\(width) × \(height)" }
         Log.info("display mode changed: now looks like \(width)x\(height) pt; telling the iPad")
         send(.streamConfig(pipeline.config), on: socket)
     }
@@ -637,6 +704,10 @@ final class HostController: @unchecked Sendable {
             encoder = nil
         }
         pipeline.display.destroy()
+        sessionStatus.withLock {
+            $0.pixelSize = nil; $0.pointSize = nil; $0.refreshHz = nil; $0.codec = nil; $0.encoding = nil
+            $0.streamingSince = nil
+        }
         Log.info("video stopped")
     }
 
@@ -706,12 +777,17 @@ final class HostController: @unchecked Sendable {
             }
         case .bye(let reason):
             socket.close("client said bye: \(reason)")
+        case .brightness(let value):
+            iPadBrightness.withLock { $0 = value }
+            let notify = onBrightnessChange
+            DispatchQueue.main.async { notify?(value) }
         case .decodeFailed:
             Log.warn("iPad reports it cannot decode the video stream")
             handleDecodeFailure(socket: socket)
         case .streamConfig, .authHello, .authProof:
             socket.close("protocol error: unexpected \(message) from client")
         case .audioRoute(let speaker, let microphone):
+            sessionStatus.withLock { $0.speaker = speaker; $0.microphone = microphone }
             guard let audio else { return }
             Log.info("audio route from iPad: speaker \(speaker), microphone \(microphone)")
             audioQueue.async {

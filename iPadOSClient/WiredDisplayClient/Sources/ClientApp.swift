@@ -32,11 +32,17 @@ final class AppModel {
                 connection.microphoneOn = microphone
                 session?.setAudioRoute(speaker: speaker, microphone: microphone)
             }
+            session.onBrightness = { [weak self] value in self?.applyBrightness(value) }
+            NotificationCenter.default.addObserver(forName: UIScreen.brightnessDidChangeNotification, object: nil,
+                                                   queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.reportBrightness() }
+            }
             self.session = session
             // Mac audio on the iPad speaker is on by default; the microphone is not.
             setAudio(speaker: true, microphone: false)
         }
         session?.setVideoActive(true)
+        reportBrightness()
         session?.start()
         echo.start()
         UIApplication.shared.isIdleTimerDisabled = true
@@ -54,6 +60,37 @@ final class AppModel {
             session?.stop(reason: reason)
         }
         UIApplication.shared.isIdleTimerDisabled = false
+    }
+
+    // MARK: brightness (D-033)
+
+    private var screen: UIScreen? {
+        UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.screen }.first
+    }
+    /// The last value the Mac set, so applying it is not reported back as a
+    /// user change (that echo made quick key presses jump back).
+    private var appliedBrightness: Float?
+    private var hudToken = 0
+
+    private func applyBrightness(_ value: Float) {
+        guard let screen else { return }
+        appliedBrightness = value
+        screen.brightness = CGFloat(value)
+        hudToken += 1
+        let token = hudToken
+        connection.brightnessHUD = (value, token)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+            guard let self, connection.brightnessHUD?.token == token else { return }
+            connection.brightnessHUD = nil
+        }
+    }
+
+    private func reportBrightness() {
+        guard let screen else { return }
+        let value = Float(screen.brightness)
+        if let applied = appliedBrightness, abs(applied - value) < 0.01 { return }
+        appliedBrightness = nil
+        session?.sendBrightness(min(max(value, 0), 1))
     }
 
     func setAudio(speaker: Bool, microphone: Bool) {
@@ -163,6 +200,15 @@ struct RootView: View {
             }
             .animation(.smooth(duration: 0.35), value: connection.pairingCode)
             .animation(.smooth(duration: 0.35), value: connection.phase)
+            .animation(.easeOut(duration: 0.2), value: connection.brightnessHUD?.token)
+
+            if let hud = connection.brightnessHUD {
+                BrightnessHUD(value: hud.value)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .padding(.top, 28)
+                    .transition(.opacity)
+                    .allowsHitTesting(false)
+            }
 
             ControlsButton(streaming: connection.phase == .streaming) { showControls.toggle() }
                 .popover(isPresented: $showControls) {

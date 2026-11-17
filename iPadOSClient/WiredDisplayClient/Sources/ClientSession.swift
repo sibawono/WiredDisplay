@@ -30,6 +30,9 @@ final class ConnectionModel {
     /// Set while an unknown Mac waits for the user to confirm pairing (D-023).
     var pairingCode: String?
     var pairedMacs: [TrustStore.TrustedPeer] = []
+    /// Brightness indicator (D-033): the value and a token that changes on
+    /// every Mac-driven change, so the overlay can hide after a moment.
+    var brightnessHUD: (value: Float, token: Int)?
 }
 
 /// Client side of a session (iPad). Listens on 127.0.0.1:9100; the Mac dials in
@@ -111,6 +114,19 @@ final class ClientSession: @unchecked Sendable {
     private func refreshPairedMacs() {
         let peers = trust.peers
         ui { $0.pairedMacs = peers }
+    }
+
+    /// The Mac set the iPad's brightness (keys or menu slider, D-033). Main actor.
+    var onBrightness: (@MainActor @Sendable (Float) -> Void)?
+    private var reportedBrightness: Float?
+
+    /// Tell the Mac the iPad's current brightness (connect, Control Center).
+    func sendBrightness(_ value: Float) {
+        queue.async { [self] in
+            reportedBrightness = value
+            guard let connection, peerHello != nil else { return }
+            send(stream: .control, payload: SessionCodec.encode(.brightness(value)), on: connection)
+        }
     }
 
     func setAudioRoute(speaker: Bool, microphone: Bool) {
@@ -417,6 +433,8 @@ final class ClientSession: @unchecked Sendable {
                 }
             case .ping(let value):
                 send(stream: .control, payload: SessionCodec.encode(.pong(value)), on: current)
+            case .brightness(let value):
+                if let apply = onBrightness { Task { @MainActor in apply(value) } }
             case .pong, .requestKeyframe, .audioRoute, .videoActive, .decodeFailed:
                 break
             case .authHello, .authProof:
@@ -455,6 +473,9 @@ final class ClientSession: @unchecked Sendable {
              on: current)
         if !videoActive {
             send(stream: .control, payload: SessionCodec.encode(.videoActive(false)), on: current)
+        }
+        if let reportedBrightness {
+            send(stream: .control, payload: SessionCodec.encode(.brightness(reportedBrightness)), on: current)
         }
         if let peer = trustedPeer { trust.rename(peer.identityKey, to: host.deviceName); refreshPairedMacs() }
     }

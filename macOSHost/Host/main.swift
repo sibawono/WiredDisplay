@@ -3,6 +3,7 @@ import ApplicationServices
 import AVFoundation
 import CoreGraphics
 import ServiceManagement
+import SwiftUI
 import WDSession
 
 // WiredDisplay host: a menu-bar app (no Dock icon). Run it as an app bundle
@@ -19,112 +20,148 @@ import WDSession
 //        --fps N              default 60 (24...120)
 //        --space native|more|most  default more: "looks like" one step larger than native
 
+/// The menu bar item and its panel (a popover with tabs and cards).
 @MainActor
-final class StatusMenu: NSObject {
+final class StatusMenu: NSObject, NSPopoverDelegate {
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-    private let stateLine = NSMenuItem(title: "Starting…", action: nil, keyEquivalent: "")
-    private let inputToggle = NSMenuItem(title: "Allow Input from iPad (touch, keyboard, trackpad)", action: #selector(toggleInput), keyEquivalent: "")
-    private let permissions = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-    private let loginToggle = NSMenuItem(title: "Open at Login", action: #selector(toggleLogin), keyEquivalent: "")
-    private let pairedLine = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-    private let qualityItem = NSMenuItem(title: "Quality", action: nil, keyEquivalent: "")
-    private var qualityItems: [QualityPreset: NSMenuItem] = [:]
-    private let forgetItem = NSMenuItem(title: "Forget Paired iPads…", action: #selector(forgetPaired), keyEquivalent: "")
+    private let popover = NSPopover()
+    private let model = PanelModel()
     private var controller: HostController?
+    private var state: HostController.State = .waitingForDevice
+    private var ticker: Timer?
+    private var brightnessKeys: BrightnessKeys?
 
     func attach(_ controller: HostController) {
         self.controller = controller
         item.button?.image = MenuBarGlyph.image(streaming: false)
-        item.button?.toolTip = "WiredDisplay host"
-        let menu = NSMenu()
-        stateLine.isEnabled = false
-        permissions.isEnabled = false
-        menu.addItem(stateLine)
-        menu.addItem(permissions)
-        menu.addItem(.separator())
-        let qualityMenu = NSMenu()
-        for preset in QualityPreset.allCases {
-            let entry = NSMenuItem(title: preset.title, action: #selector(chooseQuality(_:)), keyEquivalent: "")
-            entry.target = self
-            entry.representedObject = preset.rawValue
-            if #available(macOS 14.4, *) { entry.subtitle = preset.detail } else { entry.toolTip = preset.detail }
-            qualityMenu.addItem(entry)
-            qualityItems[preset] = entry
+        item.button?.toolTip = "WiredDisplay"
+        item.button?.target = self
+        item.button?.action = #selector(togglePanel)
+        model.actions = makeActions(controller)
+        popover.behavior = .transient
+        popover.animates = true
+        popover.delegate = self
+        popover.contentViewController = NSHostingController(rootView: StatusPanelView(model: model))
+        controller.onBrightnessChange = { [weak self] value in
+            MainActor.assumeIsolated { self?.model.snapshot.brightness = value }
         }
-        qualityItem.submenu = qualityMenu
-        menu.addItem(qualityItem)
-        inputToggle.target = self
-        menu.addItem(inputToggle)
-        loginToggle.target = self
-        menu.addItem(loginToggle)
-        menu.addItem(.separator())
-        pairedLine.isEnabled = false
-        menu.addItem(pairedLine)
-        forgetItem.target = self
-        menu.addItem(forgetItem)
-        menu.addItem(.separator())
-        let quit = NSMenuItem(title: "Quit WiredDisplay", action: #selector(quit), keyEquivalent: "q")
-        quit.target = self
-        menu.addItem(quit)
-        item.menu = menu
+        let keys = BrightnessKeys(controller: controller)
+        keys.start()
+        brightnessKeys = keys
         refresh()
     }
 
     func show(_ state: HostController.State) {
-        switch state {
-        case .waitingForDevice: stateLine.title = "Waiting for iPad on USB (open the app on the iPad)"
-        case .connecting: stateLine.title = "Connecting…"
-        case .streaming(let detail): stateLine.title = "Streaming: \(detail)"
-        case .audioOnly(let device): stateLine.title = "Audio only: \(device) (iPad app in background)"
-        case .backingOff(let reason): stateLine.title = "Retrying: \(reason.prefix(80))"
-        case .pairing(let code): stateLine.title = "Pairing a new iPad: code \(code)"
-        case .stopped: stateLine.title = "Stopped"
-        }
+        self.state = state
         let streaming: Bool
         if case .streaming = state { streaming = true } else { streaming = false }
         item.button?.image = MenuBarGlyph.image(streaming: streaming)
         refresh()
     }
 
-    private func refresh() {
-        inputToggle.state = (controller?.isInputEnabled ?? false) ? .on : .off
-        let screen = CGPreflightScreenCaptureAccess() ? "granted" : "MISSING"
-        let accessibility = AXIsProcessTrusted() ? "granted" : "MISSING"
-        let currentQuality = controller?.qualityPreset
-        for (preset, entry) in qualityItems { entry.state = preset == currentQuality ? .on : .off }
-        qualityItem.title = "Quality: " + (currentQuality.map { $0.title.components(separatedBy: " — ").first ?? $0.title } ?? "Custom")
-        if let note = controller?.decodeLimitNote { qualityItem.title += " (this iPad: \(note))" }
-        loginToggle.state = LoginItem.isEnabled ? .on : .off
-        let paired = controller?.trust.peers ?? []
-        pairedLine.title = paired.isEmpty ? "Paired iPads: none (the next iPad pairs automatically)"
-            : "Paired: " + paired.map { "\($0.name) (\($0.fingerprint.prefix(8)))" }.joined(separator: ", ")
-        forgetItem.isEnabled = !paired.isEmpty
-        if let code = controller?.connectionCode.withLock({ $0 }) { pairedLine.title += " · connection code \(code)" }
-        loginToggle.title = LoginItem.needsApproval ? "Open at Login (approve in Login Items)" : "Open at Login"
-        permissions.title = "Screen Recording: \(screen) · Accessibility: \(accessibility)"
-    }
-
-    @objc private func toggleInput() {
-        guard let controller else { return }
-        let enable = !controller.isInputEnabled
-        if enable && !AXIsProcessTrusted() {
-            // Shows the system prompt that leads to Privacy & Security > Accessibility.
-            // Literal value of kAXTrustedCheckOptionPrompt (the C global is not
-            // concurrency-safe to reference under Swift 6).
-            let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
-            _ = AXIsProcessTrustedWithOptions(options)
+    @objc private func togglePanel() {
+        if popover.isShown {
+            popover.performClose(nil)
+            return
         }
-        controller.setInputEnabled(enable)
+        guard let button = item.button else { return }
         refresh()
+        NSApp.activate(ignoringOtherApps: true)
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        ticker = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refresh() }
+        }
     }
 
-    @objc private func chooseQuality(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String, let preset = QualityPreset(rawValue: raw) else { return }
-        controller?.setQuality(preset)
-        refresh()
+    nonisolated func popoverDidClose(_ notification: Notification) {
+        MainActor.assumeIsolated {
+            ticker?.invalidate()
+            ticker = nil
+        }
     }
 
-    @objc private func forgetPaired() {
+    private func refresh() {
+        guard let controller else { return }
+        model.snapshot = Self.snapshot(controller: controller, state: state)
+    }
+
+    static func snapshot(controller: HostController, state: HostController.State) -> PanelSnapshot {
+        let status = controller.status
+        var s = PanelSnapshot()
+        switch state {
+        case .streaming: (s.stateText, s.stateColor) = ("Streaming to \(status.iPadName ?? "iPad")", .green)
+        case .waitingForDevice: (s.stateText, s.stateColor) = ("Waiting for the iPad on USB", .orange)
+        case .connecting: (s.stateText, s.stateColor) = ("Connecting…", .orange)
+        case .pairing(let code): (s.stateText, s.stateColor) = ("Pairing: confirm code \(code)", .blue)
+        case .audioOnly(let device): (s.stateText, s.stateColor) = ("Audio only: \(device)", .teal)
+        case .backingOff(let reason): (s.stateText, s.stateColor) = ("Retrying: \(reason.prefix(50))", .red)
+        case .stopped: (s.stateText, s.stateColor) = ("Stopped", .gray)
+        }
+        if let since = status.streamingSince {
+            let minutes = Int(Date().timeIntervalSince(since) / 60)
+            s.connectedFor = minutes < 1 ? "Connected just now"
+                : "Connected for " + (minutes >= 60 ? "\(minutes / 60) h \(minutes % 60) min" : "\(minutes) min")
+        }
+        s.looksLike = status.pointSize
+        s.pixels = [status.pixelSize.map { "\($0) px" }, status.refreshHz.map { "\($0) Hz" }]
+            .compactMap { $0 }.joined(separator: " · ")
+        if let codec = status.codec, let encoding = status.encoding { s.encoding = "\(codec) · \(encoding)" }
+        s.limitNote = controller.decodeLimitNote.map { "Limited for this iPad: \($0)" }
+        s.brightness = controller.brightness
+        s.quality = controller.qualityPreset
+        s.inputEnabled = controller.isInputEnabled
+        s.accessibility = AXIsProcessTrusted()
+        s.screenRecording = CGPreflightScreenCaptureAccess()
+        s.speaker = status.speaker
+        s.microphone = status.microphone
+        s.paired = controller.trust.peers.map { .init(name: $0.name, key: String($0.fingerprint.prefix(8))) }
+        if status.iPadName != nil { s.connectionCode = controller.connectionCode.withLock { $0 } }
+        s.openAtLogin = LoginItem.isEnabled
+        s.loginNeedsApproval = LoginItem.needsApproval
+        s.version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
+        return s
+    }
+
+    private func makeActions(_ controller: HostController) -> PanelActions {
+        var a = PanelActions()
+        a.setBrightness = { controller.setBrightness($0) }
+        a.setQuality = { controller.setQuality($0) }
+        a.setInput = { [weak self] enable in
+            if enable && !AXIsProcessTrusted() {
+                // Shows the system prompt that leads to Privacy & Security > Accessibility.
+                // Literal value of kAXTrustedCheckOptionPrompt (the C global is not
+                // concurrency-safe to reference under Swift 6).
+                let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
+                _ = AXIsProcessTrustedWithOptions(options)
+            }
+            controller.setInputEnabled(enable)
+            self?.refresh()
+        }
+        a.setOpenAtLogin = { [weak self] enable in
+            LoginItem.set(enable)
+            if LoginItem.needsApproval { SMAppService.openSystemSettingsLoginItems() }
+            self?.refresh()
+        }
+        a.openDisplaySettings = { Self.open("x-apple.systempreferences:com.apple.Displays-Settings.extension") }
+        a.openSoundSettings = { Self.open("x-apple.systempreferences:com.apple.Sound-Settings.extension") }
+        a.openAccessibility = { Self.open("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") }
+        a.openScreenRecording = { Self.open("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") }
+        a.forgetPaired = { [weak self] in self?.forgetPaired() }
+        a.showLog = {
+            let log = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/WiredDisplayHost.log")
+            NSWorkspace.shared.open([log], withApplicationAt: URL(fileURLWithPath: "/System/Applications/Utilities/Console.app"),
+                                    configuration: NSWorkspace.OpenConfiguration())
+        }
+        a.quit = { [weak self] in self?.quit() }
+        return a
+    }
+
+    private static func open(_ url: String) {
+        if let url = URL(string: url) { NSWorkspace.shared.open(url) }
+    }
+
+    private func forgetPaired() {
+        popover.performClose(nil)
         let alert = NSAlert()
         alert.messageText = "Forget all paired iPads?"
         alert.informativeText = "The next iPad that connects is paired automatically. The current session keeps running until it disconnects."
@@ -156,16 +193,50 @@ final class StatusMenu: NSObject {
         }
     }
 
-    @objc private func toggleLogin() {
-        LoginItem.set(!LoginItem.isEnabled)
-        if LoginItem.needsApproval { SMAppService.openSystemSettingsLoginItems() }
-        refresh()
-    }
-
-    @objc private func quit() {
+    private func quit() {
+        popover.performClose(nil)
         controller?.stop()
         // Give teardown (release buttons, stop capture, remove display) a moment.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { NSApp.terminate(nil) }
+    }
+}
+
+/// `--render-panel <dir>`: renders every panel tab with sample data to PNGs
+/// (light and dark) for design review, then exits. No session is started.
+@MainActor
+func renderPanelPreviews(to directory: String) {
+    var sample = PanelSnapshot()
+    sample.stateText = "Streaming to iPad"
+    sample.stateColor = .green
+    sample.connectedFor = "Connected for 12 min"
+    sample.looksLike = "1590 × 1192"
+    sample.pixels = "3180 × 2384 px · 60 Hz"
+    sample.encoding = "HEVC · 4:2:0 · 10-bit"
+    sample.brightness = 0.7
+    sample.quality = .pro
+    sample.inputEnabled = true
+    sample.accessibility = true
+    sample.screenRecording = true
+    sample.speaker = true
+    sample.paired = [.init(name: "iPad", key: "0d7238ca")]
+    sample.connectionCode = "190 333"
+    sample.openAtLogin = true
+    sample.version = "0.2.0"
+    for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+        for tab in PanelModel.Tab.allCases {
+            let model = PanelModel()
+            model.snapshot = sample
+            model.tab = tab
+            let host = NSHostingView(rootView: StatusPanelView(model: model)
+                .background(Color(nsColor: .windowBackgroundColor)))
+            host.appearance = NSAppearance(named: appearance)
+            host.frame.size = host.fittingSize
+            host.layoutSubtreeIfNeeded()
+            guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { continue }
+            host.cacheDisplay(in: host.bounds, to: rep)
+            let name = "\(directory)/panel-\(tab.rawValue)-\(appearance == .aqua ? "light" : "dark").png"
+            try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: name))
+        }
     }
 }
 
@@ -193,6 +264,7 @@ func parseOptions() -> HostController.Options {
         switch flag {
         case "--allow-input": options.allowInput = true
         case "--test-decode-fallback": options.testDecodeFallback = true
+        case "--trace-keys": continue // read by BrightnessKeys
         case "--codec":
             switch value() {
             case "h264": options.codec = .h264
@@ -230,6 +302,13 @@ func parseOptions() -> HostController.Options {
         }
     }
     return options
+}
+
+if let index = CommandLine.arguments.firstIndex(of: "--render-panel"), index + 1 < CommandLine.arguments.count {
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+    MainActor.assumeIsolated { renderPanelPreviews(to: CommandLine.arguments[index + 1]) }
+    exit(0)
 }
 
 let options = parseOptions()

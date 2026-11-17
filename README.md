@@ -68,6 +68,15 @@ monitor attached.
   refresh rate and hardware HEVC support, and the Mac builds the display to
   match. The iPad's Controls panel shows the same details under **This iPad**,
   including the model identifier.
+- **Real iPad brightness.** The Mac's brightness keys and a slider in the menu
+  bar panel set the iPad's actual backlight instead of dimming the picture.
+  This works with Apple keyboards and third-party keyboards.
+- **Menu bar panel.** A tabbed popover with the following tabs:
+  - Display: resolution, brightness and quality.
+  - Input
+  - Audio
+  - Security: connection code and paired iPads.
+  - General: permissions and login.
 - **Opens at login**, so the Mac's screen appears on the iPad after a restart.
 
 ## Requirements
@@ -124,8 +133,8 @@ the keychain and uses the first iPad connected over USB. Set `TEAM_ID`,
 3. Connect the iPad and open the WiredDisplay app on it.
 4. Check that the 6-digit code is the same on both screens, then accept it on
    both.
-5. Optional: in the Mac menu, turn on **Allow Input from iPad (touch,
-   keyboard, trackpad)**.
+5. Optional: in the menu bar panel, Input tab, turn on **Allow Input from
+   iPad**.
 6. Optional: choose a **Quality** preset.
 
 For audio, run `Audio Driver/Install Audio Driver.command` from the DMG. It

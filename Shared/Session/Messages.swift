@@ -3,7 +3,7 @@ import Foundation
 public enum SessionConstants {
     /// Bumped on any incompatible change to the messages below.
     /// 2: authenticated, encrypted channel (D-023).
-    public static let protocolVersion: UInt16 = 3
+    public static let protocolVersion: UInt16 = 4
     /// Product transport port on the iPad's loopback (D-014).
     public static let clientPort: UInt16 = 9100
     public static let maxNameBytes = 64
@@ -131,6 +131,10 @@ public enum ControlMessage: Sendable, Equatable {
     /// Client -> host: the iPad cannot decode the stream it is getting (its
     /// renderer keeps failing); the host steps the format down (D-031).
     case decodeFailed
+    /// iPad screen brightness, 0...1 (D-033). Host -> client: set it.
+    /// Client -> host: the current value (on connect and whenever it changes,
+    /// also from Control Center), so the Mac's slider and keys follow.
+    case brightness(Float)
 }
 
 /// 16-bit PCM, interleaved, little-endian on the wire, 48 kHz.
@@ -223,7 +227,7 @@ public enum InputEvent: Sendable, Equatable {
 
 public enum SessionCodec {
     private enum ControlTag: UInt8 {
-        case hello = 1, streamConfig, requestKeyframe, ping, pong, bye, audioRoute, videoActive, authHello, authProof, decodeFailed
+        case hello = 1, streamConfig, requestKeyframe, ping, pong, bye, audioRoute, videoActive, authHello, authProof, decodeFailed, brightness
     }
 
     private enum InputTag: UInt8 {
@@ -279,6 +283,9 @@ public enum SessionCodec {
             writer.u8(active ? 1 : 0)
         case .decodeFailed:
             writer.u8(ControlTag.decodeFailed.rawValue)
+        case .brightness(let value):
+            writer.u8(ControlTag.brightness.rawValue)
+            writer.f32(value)
         case .authHello(let hello):
             writer.u8(ControlTag.authHello.rawValue)
             writer.u16(hello.protocolVersion)
@@ -346,6 +353,10 @@ public enum SessionCodec {
             message = .videoActive(value == 1)
         case .decodeFailed:
             message = .decodeFailed
+        case .brightness:
+            let value = try reader.f32()
+            guard value.isFinite, (0...1).contains(value) else { throw WireError.invalidValue("brightness \(value)") }
+            message = .brightness(value)
         case .authHello:
             let version = try reader.u16()
             let rawRole = try reader.u8()
