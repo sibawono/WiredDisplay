@@ -181,6 +181,13 @@ CGEvent injection ◄── touch · keys · trackpad · gestures ──┤  enc
   automatically, and shows the limit in the Quality menu. Only an iPad Air
   13″ (M2) has been tested.
 
+## License
+
+WiredDisplay is free software, released under the
+[GNU General Public License v3.0](LICENSE). You may use, study, share and
+modify it. If you distribute a modified version, it must also be under the
+GPL-3.0, with its source available.
+
 ## Status
 
 This is a personal project, tested on one Mac mini with an iPad Air 13″ (M2).
