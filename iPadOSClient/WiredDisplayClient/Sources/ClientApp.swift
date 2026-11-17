@@ -1,6 +1,7 @@
 import AVFoundation
 import SwiftUI
 import UIKit
+import VideoToolbox
 import WDSession
 
 /// Owns the long-lived objects. Created once; the session is built on first
@@ -75,6 +76,14 @@ final class AppModel {
         }
     }
 
+    /// For the controls panel: what this iPad tells the Mac.
+    var deviceInfo: DeviceInfo {
+        let hello = makeHello()
+        return DeviceInfo(model: Self.modelIdentifier(), panel: "\(hello.pixelWidth) × \(hello.pixelHeight) px",
+                          pixelsPerInch: Int(hello.pixelsPerInch), maxRefreshHz: Int(hello.maxRefreshHz),
+                          hevcHardware: hello.codecs.contains(VideoCodec.hevc))
+    }
+
     private func makeHello() -> Hello {
         let screen = UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.screen }.first
         let native = screen?.nativeBounds.size ?? CGSize(width: 2048, height: 2732)
@@ -83,8 +92,26 @@ final class AppModel {
         let height = UInt32(min(native.width, native.height))
         let scale = UInt8(clamping: Int((screen?.nativeScale ?? 2).rounded()))
         let refresh = UInt16(clamping: screen?.maximumFramesPerSecond ?? 60)
+        // HEVC only where it is decoded in hardware (D-031); H.264 always.
+        let codecs: CodecSet = VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC) ? [.h264, .hevc] : [.h264]
         return Hello(role: .client, deviceName: UIDevice.current.name, pixelWidth: width, pixelHeight: height,
-                     scale: max(scale, 1), maxRefreshHz: max(refresh, 1), codecs: [.h264, .hevc])
+                     scale: max(scale, 1), maxRefreshHz: max(refresh, 1), codecs: codecs,
+                     pixelsPerInch: Self.pixelsPerInch())
+    }
+
+    /// iPad mini panels are 326 ppi; every other iPad on iPadOS 17+ is 264.
+    /// Hardware model identifier, e.g. "iPad14,10".
+    static func modelIdentifier() -> String {
+        var info = utsname()
+        uname(&info)
+        return withUnsafeBytes(of: &info.machine) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
+    }
+
+    private static func pixelsPerInch() -> UInt16 {
+        let model = modelIdentifier()
+        // mini 5 (iPad11,1/2), mini 6 (iPad14,1/2), mini A17 Pro (iPad16,1/2).
+        let minis: Set<String> = ["iPad11,1", "iPad11,2", "iPad14,1", "iPad14,2", "iPad16,1", "iPad16,2"]
+        return minis.contains(model) ? 326 : 264
     }
 }
 
@@ -194,7 +221,8 @@ struct ControlsPanel: View {
             reconnect: {
                 app.deactivate(reason: "user reconnect")
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { app.activate() }
-            })
+            },
+            device: app.deviceInfo)
     }
 
     private var summary: SessionSummary {

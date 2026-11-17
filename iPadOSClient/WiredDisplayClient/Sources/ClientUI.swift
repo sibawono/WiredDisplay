@@ -297,6 +297,15 @@ struct PairedMacRow: Identifiable, Equatable {
     var fingerprint: String
 }
 
+/// What this iPad reports to the Mac (D-031), shown under "This iPad".
+struct DeviceInfo: Equatable {
+    var model: String
+    var panel: String
+    var pixelsPerInch: Int
+    var maxRefreshHz: Int
+    var hevcHardware: Bool
+}
+
 struct ControlsContent: View {
     let summary: SessionSummary
     @Binding var speaker: Bool
@@ -305,6 +314,7 @@ struct ControlsContent: View {
     let pairedMacs: [PairedMacRow]
     let forgetPaired: () -> Void
     let reconnect: () -> Void
+    var device: DeviceInfo? = nil
     @State private var confirmForget = false
     @State private var showGestures = false
     @State private var showShortcuts = false
@@ -385,6 +395,15 @@ struct ControlsContent: View {
                             .font(.body)
                     }
                     .tint(.primary)
+                }
+                if let device {
+                    section("This iPad") {
+                        InfoRow(symbol: "ipad.landscape", title: "Model", value: device.model)
+                        InfoRow(symbol: "square.resize", title: "Panel", value: device.panel)
+                        InfoRow(symbol: "circle.grid.3x3", title: "Density", value: "\(device.pixelsPerInch) ppi")
+                        InfoRow(symbol: "gauge.with.dots.needle.67percent", title: "Refresh", value: "up to \(device.maxRefreshHz) Hz")
+                        InfoRow(symbol: "film", title: "HEVC hardware decode", value: device.hevcHardware ? "Yes" : "No (H.264)")
+                    }
                 }
                 section("Security") {
                     if pairedMacs.isEmpty {

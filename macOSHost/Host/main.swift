@@ -93,6 +93,7 @@ final class StatusMenu: NSObject {
         let currentQuality = controller?.qualityPreset
         for (preset, entry) in qualityItems { entry.state = preset == currentQuality ? .on : .off }
         qualityItem.title = "Quality: " + (currentQuality.map { $0.title.components(separatedBy: " — ").first ?? $0.title } ?? "Custom")
+        if let note = controller?.decodeLimitNote { qualityItem.title += " (this iPad: \(note))" }
         loginToggle.state = LoginItem.isEnabled ? .on : .off
         let paired = controller?.trust.peers ?? []
         pairedLine.title = paired.isEmpty ? "Paired iPads: none (the next iPad pairs automatically)"
@@ -132,6 +133,7 @@ final class StatusMenu: NSObject {
         NSApp.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         controller?.trust.forgetAllPeers()
+        controller?.forgetDecodeLimits()
         Log.info("paired iPads forgotten by the user")
         refresh()
     }
@@ -190,6 +192,7 @@ func parseOptions() -> HostController.Options {
         }
         switch flag {
         case "--allow-input": options.allowInput = true
+        case "--test-decode-fallback": options.testDecodeFallback = true
         case "--codec":
             switch value() {
             case "h264": options.codec = .h264

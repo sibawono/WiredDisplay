@@ -64,8 +64,10 @@ final class VirtualDisplayController {
         config.name = "WiredDisplay (\(hello.deviceName.isEmpty ? "iPad" : hello.deviceName))"
         config.pixelsWide = width
         config.pixelsHigh = height
-        // Physical size from iPad pixel density (264 ppi) so macOS picks sane UI scaling.
-        config.sizeInMillimeters = CGSize(width: Double(width) / 264 * 25.4, height: Double(height) / 264 * 25.4)
+        // Physical size from the iPad's pixel density (264 ppi for Air/Pro/iPad,
+        // 326 for mini; older clients send 0) so macOS picks sane UI scaling.
+        let ppi = Double(hello.pixelsPerInch == 0 ? 264 : hello.pixelsPerInch)
+        config.sizeInMillimeters = CGSize(width: Double(width) / ppi * 25.4, height: Double(height) / ppi * 25.4)
         config.hiDPI = hiDPI
         config.refreshRate = refreshHz
         config.wideColor = wideColor // only with --color p3 (BUG-033)

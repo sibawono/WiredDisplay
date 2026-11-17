@@ -214,3 +214,13 @@
 **IMPLEMENTATION SUMMARY:** the menu's input choice is saved and reapplied at launch (D-028; menu item renamed "Allow Input from iPad (touch, keyboard, trackpad)"). New `magnify` / `rotate` input events, fed by UIKit pinch and rotation recognizers (touch and trackpad) through `TransformTracker`, posted on the Mac as undocumented type-29 gesture CGEvents, with the Command-plus/minus fallback (D-029). `ShortcutRemapper` sends Control-Tab, Control-Shift-Tab, Control-`, Control-Space and Control-Shift-3/4/5 as Command shortcuts, Control acting as Command until released (D-030); the iPad Controls panel lists them. `build-ipa.sh` builds an unsigned Release IPA for AltStore/SideStore; the shared DMG is signed ad hoc so it carries no Apple ID.
 
 **VERIFIED:** unit tests pass (5 new). On hardware: input remembered across relaunch; pinch zoom and rotate work in Mac apps; Control-Tab (repeated while held), Control-Space, Control-Shift-4, Control-arrows work; Command-Tab/Space/Shift-3 with key-command priority did not reach the Mac (iPadOS keeps them). Not verified: AltStore install on another iPad; ad-hoc-signed audio driver on another Mac.
+
+## CHANGE ID: P1-017 — Decode fallback per iPad; panel density
+
+**OBJECTIVE:** Make WiredDisplay safe on iPads that cannot decode every format, and size the display right on iPad mini.
+
+**FILES CHANGED:** `Shared/Session/{Messages,DecodeLimits}.swift`; `macOSHost/Host/{HostController,VirtualDisplayController,main}.swift`; `iPadOSClient/WiredDisplayClient/Sources/{ClientApp,ClientSession}.swift`; `Tests/Unit/WDSessionTests/SecureChannelTests.swift`; `docs/{DECISIONS,CHANGELOG}.md`; `README.md`.
+
+**IMPLEMENTATION SUMMARY:** D-031. Protocol 3: `Hello.pixelsPerInch`, `ControlMessage.decodeFailed`. iPad: HEVC advertised only with hardware decode; renderer failures counted and reported. Host: per-iPad `DecodeLimits`, effective quality = preset within limits, live encoder restart, menu note, `--test-decode-fallback` diagnostic flag; display physical size from the reported ppi.
+
+**VERIFIED:** 3 new unit tests pass. On hardware, `--test-decode-fallback` stepped 4:2:0 10-bit down to 8-bit with video continuing; limits reset and normal launch back at 10-bit. Not verified: an iPad that really fails to decode; iPad mini sizing.

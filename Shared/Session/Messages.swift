@@ -3,7 +3,7 @@ import Foundation
 public enum SessionConstants {
     /// Bumped on any incompatible change to the messages below.
     /// 2: authenticated, encrypted channel (D-023).
-    public static let protocolVersion: UInt16 = 2
+    public static let protocolVersion: UInt16 = 3
     /// Product transport port on the iPad's loopback (D-014).
     public static let clientPort: UInt16 = 9100
     public static let maxNameBytes = 64
@@ -55,9 +55,13 @@ public struct Hello: Sendable, Equatable {
     public var scale: UInt8
     public var maxRefreshHz: UInt16
     public var codecs: CodecSet
+    /// Panel pixel density (pixels per inch); 0 = unknown. The host derives
+    /// the display's physical size from it so macOS picks sane UI scaling.
+    public var pixelsPerInch: UInt16
 
     public init(protocolVersion: UInt16 = SessionConstants.protocolVersion, role: PeerRole, deviceName: String,
-                pixelWidth: UInt32, pixelHeight: UInt32, scale: UInt8, maxRefreshHz: UInt16, codecs: CodecSet) {
+                pixelWidth: UInt32, pixelHeight: UInt32, scale: UInt8, maxRefreshHz: UInt16, codecs: CodecSet,
+                pixelsPerInch: UInt16 = 0) {
         self.protocolVersion = protocolVersion
         self.role = role
         self.deviceName = deviceName
@@ -66,6 +70,7 @@ public struct Hello: Sendable, Equatable {
         self.scale = scale
         self.maxRefreshHz = maxRefreshHz
         self.codecs = codecs
+        self.pixelsPerInch = pixelsPerInch
     }
 }
 
@@ -123,6 +128,9 @@ public enum ControlMessage: Sendable, Equatable {
     case authHello(AuthHello)
     /// Handshake: Ed25519 signature over the transcript; first encrypted frame.
     case authProof([UInt8])
+    /// Client -> host: the iPad cannot decode the stream it is getting (its
+    /// renderer keeps failing); the host steps the format down (D-031).
+    case decodeFailed
 }
 
 /// 16-bit PCM, interleaved, little-endian on the wire, 48 kHz.
@@ -215,7 +223,7 @@ public enum InputEvent: Sendable, Equatable {
 
 public enum SessionCodec {
     private enum ControlTag: UInt8 {
-        case hello = 1, streamConfig, requestKeyframe, ping, pong, bye, audioRoute, videoActive, authHello, authProof
+        case hello = 1, streamConfig, requestKeyframe, ping, pong, bye, audioRoute, videoActive, authHello, authProof, decodeFailed
     }
 
     private enum InputTag: UInt8 {
@@ -243,6 +251,7 @@ public enum SessionCodec {
             writer.u8(hello.scale)
             writer.u16(hello.maxRefreshHz)
             writer.u8(hello.codecs.rawValue)
+            writer.u16(hello.pixelsPerInch)
         case .streamConfig(let config):
             writer.u8(ControlTag.streamConfig.rawValue)
             writer.u32(config.pixelWidth)
@@ -268,6 +277,8 @@ public enum SessionCodec {
         case .videoActive(let active):
             writer.u8(ControlTag.videoActive.rawValue)
             writer.u8(active ? 1 : 0)
+        case .decodeFailed:
+            writer.u8(ControlTag.decodeFailed.rawValue)
         case .authHello(let hello):
             writer.u8(ControlTag.authHello.rawValue)
             writer.u16(hello.protocolVersion)
@@ -297,13 +308,16 @@ public enum SessionCodec {
             let scale = try reader.u8()
             let refresh = try reader.u16()
             let codecs = CodecSet(rawValue: try reader.u8())
+            let ppi = try reader.u16()
+            guard ppi == 0 || (100...1000).contains(ppi) else { throw WireError.invalidValue("ppi \(ppi)") }
             guard (1...16384).contains(width), (1...16384).contains(height) else {
                 throw WireError.invalidValue("panel \(width)x\(height)")
             }
             guard (1...4).contains(scale) else { throw WireError.invalidValue("scale \(scale)") }
             guard (1...240).contains(refresh) else { throw WireError.invalidValue("refresh \(refresh)") }
             message = .hello(Hello(protocolVersion: version, role: role, deviceName: name, pixelWidth: width,
-                                   pixelHeight: height, scale: scale, maxRefreshHz: refresh, codecs: codecs))
+                                   pixelHeight: height, scale: scale, maxRefreshHz: refresh, codecs: codecs,
+                                   pixelsPerInch: ppi))
         case .streamConfig:
             let config = StreamConfig(pixelWidth: try reader.u32(), pixelHeight: try reader.u32(),
                                       pointWidth: try reader.u32(), pointHeight: try reader.u32(),
@@ -330,6 +344,8 @@ public enum SessionCodec {
             let value = try reader.u8()
             guard value <= 1 else { throw WireError.invalidValue("videoActive \(value)") }
             message = .videoActive(value == 1)
+        case .decodeFailed:
+            message = .decodeFailed
         case .authHello:
             let version = try reader.u16()
             let rawRole = try reader.u8()

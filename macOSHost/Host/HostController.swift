@@ -67,6 +67,9 @@ enum QualityPreset: String, CaseIterable, Sendable {
 final class HostController: @unchecked Sendable {
     struct Options: Sendable {
         var allowInput = false
+        /// Diagnostics (D-031): act as if the iPad reported a decode failure
+        /// 8 s into each session, to exercise the automatic step-down.
+        var testDecodeFallback = false
         /// HEVC by default (D-019: user A/B test); used only when the client
         /// advertises it, with automatic H.264 fallback. `--codec h264` forces H.264.
         var codec: VideoCodec? = .hevc
@@ -129,6 +132,9 @@ final class HostController: @unchecked Sendable {
     /// The client's proven identity, and whether WE trust it yet. Until then,
     /// control messages wait in `pendingControl` and media/input are dropped.
     private var verifiedPeer: SecureChannel.Peer?
+    /// Formats the connected iPad cannot decode (D-031), from `decodeLimitsKey`.
+    private let peerLimits = OSAllocatedUnfairLock<(fingerprint: String?, limits: DecodeLimits)>(initialState: (nil, []))
+    private var lastDecodeStepDown = Date.distantPast
     private var trusted = false
     private var pendingControl: [ControlMessage] = []
 
@@ -149,6 +155,60 @@ final class HostController: @unchecked Sendable {
     var qualityPreset: QualityPreset? {
         let current = quality.withLock { $0 }
         return QualityPreset(chroma: current.chroma, tenBit: current.tenBit)
+    }
+
+    // MARK: decode limits (D-031)
+
+    static let decodeLimitsKey = "decodeLimits"
+
+    private static func savedLimits() -> [String: Int] {
+        UserDefaults.standard.dictionary(forKey: decodeLimitsKey) as? [String: Int] ?? [:]
+    }
+
+    /// What the connected iPad cannot decode, for the menu; nil if nothing.
+    var decodeLimitNote: String? {
+        let limits = peerLimits.withLock { $0.limits }
+        return limits.isEmpty ? nil : limits.summary
+    }
+
+    func forgetDecodeLimits() {
+        UserDefaults.standard.removeObject(forKey: Self.decodeLimitsKey)
+        peerLimits.withLock { $0.limits = [] }
+    }
+
+    /// The quality actually encoded: the user's preset, within the iPad's limits.
+    private func effectiveQuality() -> (chroma: ChromaMode, tenBit: Bool) {
+        var current = quality.withLock { $0 }
+        let limits = peerLimits.withLock { $0.limits }
+        if limits.contains(.no444) { current.chroma = .c420 }
+        if limits.contains(.no10Bit) { current.tenBit = false }
+        return current
+    }
+
+    /// The iPad says it cannot decode the stream: drop 4:4:4, then 10-bit,
+    /// remember it for this iPad, and restart the encoder. On `queue`.
+    private func handleDecodeFailure(socket: FramedSocket) {
+        guard Date().timeIntervalSince(lastDecodeStepDown) > 3 else { return } // a switch is under way
+        let current = effectiveQuality()
+        let (fingerprint, limits) = peerLimits.withLock { $0 }
+        guard let next = DecodeLimits.next(after: limits, uses444: current.chroma != .c420, tenBit: current.tenBit) else {
+            Log.warn("iPad cannot decode 4:2:0 8-bit either; nothing left to step down to")
+            return
+        }
+        lastDecodeStepDown = Date()
+        peerLimits.withLock { $0.limits = next }
+        if let fingerprint {
+            var saved = Self.savedLimits()
+            saved[fingerprint] = next.rawValue
+            UserDefaults.standard.set(saved, forKey: Self.decodeLimitsKey)
+        }
+        Log.warn("iPad cannot decode \(current.chroma.rawValue) \(current.tenBit ? 10 : 8)-bit; limiting it to \(next.summary)")
+        videoQueue.async { [self] in
+            do { try restartEncoding() } catch {
+                Log.warn("format step-down failed: \(error)")
+                queue.async { socket.close("format step-down failed: \(error)") }
+            }
+        }
     }
 
     /// Switches the encoder live (the display and the session stay up) and
@@ -359,6 +419,9 @@ final class HostController: @unchecked Sendable {
         if isStopping || socket.isClosed { throw SessionError.closedDuringSetup }
         guard let peer = queue.sync(execute: { verifiedPeer }) else { throw SessionError.notAuthenticated }
         Log.info("iPad authenticated: key \(peer.fingerprint), pairing code \(peer.pairingCode)")
+        let known = DecodeLimits(rawValue: Self.savedLimits()[peer.fingerprint] ?? 0)
+        peerLimits.withLock { $0 = (peer.fingerprint, known) }
+        if !known.isEmpty { Log.info("this iPad's decode limits: \(known.summary)") }
         connectionCode.withLock { $0 = peer.pairingCode }
 
         // Pings from here on keep both watchdogs fed while someone confirms
@@ -480,6 +543,13 @@ final class HostController: @unchecked Sendable {
         let codec = pipeline.config.codec
         onState(.streaming("\(hello.deviceName) · \(config.pixelWidth)×\(config.pixelHeight) \(codec)"))
         Log.info("streaming to \(hello.deviceName): \(pipeline.config) input \(isInputEnabled ? "enabled" : "disabled")")
+        if options.testDecodeFallback {
+            queue.asyncAfter(deadline: .now() + 8) { [weak self, weak socket] in
+                guard let self, let socket, !socket.isClosed else { return }
+                Log.warn("--test-decode-fallback: simulating an iPad decode failure")
+                self.handleDecodeFailure(socket: socket)
+            }
+        }
     }
 
     /// Encoder + capture for the pipeline's display, at the current quality.
@@ -487,7 +557,7 @@ final class HostController: @unchecked Sendable {
     private func startEncoding(_ pipeline: VideoPipeline) throws {
         guard let socket = pipeline.socket, let hello = pipeline.hello else { return }
         let config = pipeline.config, fps = pipeline.fps
-        let current = quality.withLock { $0 }
+        let current = effectiveQuality()
         // Diagnostics for stutter: capture cadence vs encoded output.
         let captureMeter = FrameRateMeter(), encodeMeter = FrameRateMeter()
         let onUnit: @Sendable (AccessUnit) -> Void = { [weak self, weak socket] unit in
@@ -636,6 +706,9 @@ final class HostController: @unchecked Sendable {
             }
         case .bye(let reason):
             socket.close("client said bye: \(reason)")
+        case .decodeFailed:
+            Log.warn("iPad reports it cannot decode the video stream")
+            handleDecodeFailure(socket: socket)
         case .streamConfig, .authHello, .authProof:
             socket.close("protocol error: unexpected \(message) from client")
         case .audioRoute(let speaker, let microphone):

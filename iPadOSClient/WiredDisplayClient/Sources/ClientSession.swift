@@ -41,6 +41,7 @@ final class ClientSession: @unchecked Sendable {
     private let queue = DispatchQueue(label: "wireddisplay.client.session", qos: .userInteractive)
     private let model: ConnectionModel
     private let renderer: AVSampleBufferVideoRenderer
+    private var decodeFailures = DecodeFailureDetector()
     private let hello: Hello
 
     private var listener: NWListener?
@@ -416,7 +417,7 @@ final class ClientSession: @unchecked Sendable {
                 }
             case .ping(let value):
                 send(stream: .control, payload: SessionCodec.encode(.pong(value)), on: current)
-            case .pong, .requestKeyframe, .audioRoute, .videoActive:
+            case .pong, .requestKeyframe, .audioRoute, .videoActive, .decodeFailed:
                 break
             case .authHello, .authProof:
                 throw WireError.invalidValue("handshake message after handshake")
@@ -468,7 +469,20 @@ final class ClientSession: @unchecked Sendable {
                 } catch {
                     format = nil
                     NSLog("WiredDisplay: bad keyframe: \(error)")
+                    if decodeFailures.failed(at: ProcessInfo.processInfo.systemUptime) {
+                        ClientLog.write("keyframes keep failing; asking the Mac for a simpler format")
+                        send(stream: .control, payload: SessionCodec.encode(.decodeFailed), on: current)
+                    }
                 }
+            }
+        }
+        if renderer.status == .failed {
+            // Repeated failures = this iPad cannot decode the format (D-031):
+            // ask the Mac to step down (no 4:4:4, then 8-bit).
+            ClientLog.write("renderer failed: \(renderer.error.map { "\($0)" } ?? "no error")")
+            if decodeFailures.failed(at: ProcessInfo.processInfo.systemUptime) {
+                ClientLog.write("decode keeps failing; asking the Mac for a simpler format")
+                send(stream: .control, payload: SessionCodec.encode(.decodeFailed), on: current)
             }
         }
         if renderer.status == .failed || renderer.requiresFlushToResumeDecoding {

@@ -31,7 +31,8 @@ monitor attached.
   - **Ultra:** 4:4:4, 10-bit
   - **High Color:** 4:4:4, 8-bit
 
-  You can switch presets live from the menu bar.
+  You can switch presets live from the menu bar. If an iPad can't decode a
+  format, the Mac steps down for that iPad automatically.
 - **Audio both ways.** Mac sound plays on the iPad speakers, and the iPad
   microphone can be used on the Mac. Both are optional and use an included
   audio driver.
@@ -63,6 +64,10 @@ monitor attached.
     encryption.
   - You pair once with a 6-digit code shown on both screens.
   - Input from the iPad is off until you allow it in the menu.
+- **Adapts to each iPad.** The iPad reports its panel size, pixel density,
+  refresh rate and hardware HEVC support, and the Mac builds the display to
+  match. The iPad's Controls panel shows the same details under **This iPad**,
+  including the model identifier.
 - **Opens at login**, so the Mac's screen appears on the iPad after a restart.
 
 ## Requirements
@@ -158,6 +163,10 @@ CGEvent injection ◄── touch · keys · trackpad · gestures ──┤  enc
   cable is unplugged for about 10 seconds and plugged back in. This is
   platform behaviour (BUG‑037).
 - **Free Apple ID signing** expires after 7 days. AltStore renews it.
+- **Older iPads** may not decode 4:4:4 or 10-bit video. If an iPad keeps
+  failing, the Mac drops to 4:2:0 and then to 8-bit for that iPad
+  automatically, and shows the limit in the Quality menu. Only an iPad Air
+  13″ (M2) has been tested.
 
 ## Status
 

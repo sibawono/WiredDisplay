@@ -312,3 +312,36 @@ final class ShortcutRemapperTests: XCTestCase {
         XCTAssertFalse(remapper.isRemapping)
     }
 }
+
+final class DecodeLimitTests: XCTestCase {
+    func testStepDownDrops444FirstThenTenBit() {
+        XCTAssertEqual(DecodeLimits.next(after: [], uses444: true, tenBit: true), .no444)
+        XCTAssertEqual(DecodeLimits.next(after: .no444, uses444: false, tenBit: true), [.no444, .no10Bit])
+        XCTAssertEqual(DecodeLimits.next(after: [], uses444: false, tenBit: true), .no10Bit)
+        XCTAssertNil(DecodeLimits.next(after: [.no444, .no10Bit], uses444: false, tenBit: false))
+        XCTAssertNil(DecodeLimits.next(after: [], uses444: false, tenBit: false))
+    }
+
+    func testDetectorNeedsRepeatedFailuresAndCoolsDown() {
+        var detector = DecodeFailureDetector()
+        XCTAssertFalse(detector.failed(at: 0))
+        XCTAssertFalse(detector.failed(at: 20)) // the first one fell out of the window
+        XCTAssertFalse(detector.failed(at: 21))
+        XCTAssertTrue(detector.failed(at: 22))
+        // Cooling down while the Mac switches format.
+        for t in [23.0, 24, 25, 26] { XCTAssertFalse(detector.failed(at: t)) }
+        XCTAssertFalse(detector.failed(at: 31))
+        XCTAssertFalse(detector.failed(at: 31.5))
+        XCTAssertTrue(detector.failed(at: 32))
+    }
+
+    func testHelloCarriesPixelDensityAndDecodeFailedRoundTrips() throws {
+        let hello = Hello(role: .client, deviceName: "Test iPad", pixelWidth: 2266, pixelHeight: 1488, scale: 2,
+                          maxRefreshHz: 60, codecs: [.h264], pixelsPerInch: 326)
+        XCTAssertEqual(try SessionCodec.decodeControl(SessionCodec.encode(.hello(hello))), .hello(hello))
+        XCTAssertEqual(try SessionCodec.decodeControl(SessionCodec.encode(.decodeFailed)), .decodeFailed)
+        var bad = hello
+        bad.pixelsPerInch = 5000
+        XCTAssertThrowsError(try SessionCodec.decodeControl(SessionCodec.encode(.hello(bad))))
+    }
+}
