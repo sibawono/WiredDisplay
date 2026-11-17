@@ -1,9 +1,9 @@
-WiredDisplay 0.3.3 — Panduan Instalasi
+WiredDisplay 0.4.0 — Panduan Instalasi
 iPad jadi layar Mac lewat kabel USB-C (dengan suara dan input sentuh)
 
 Isi paket
-- WiredDisplay-0.3.3.dmg   → app untuk Mac (host)
-- WiredDisplay-0.3.3.ipa   → app untuk iPad (dipasang lewat AltStore)
+- WiredDisplay-0.4.0.dmg   → app untuk Mac (host)
+- WiredDisplay-0.4.0.ipa   → app untuk iPad (dipasang lewat AltStore)
 - PANDUAN-INSTALASI.txt    → file ini
 
 Yang dibutuhkan
@@ -33,7 +33,7 @@ BAGIAN A — Pasang app iPad lewat AltStore
 5. Nyalakan Developer Mode: Settings › Privacy & Security › Developer Mode → On.
    iPad akan restart; setelah menyala, konfirmasi "Turn On".
 
-6. Kirim file WiredDisplay-0.3.3.ipa ke iPad (AirDrop, atau simpan di app Files).
+6. Kirim file WiredDisplay-0.4.0.ipa ke iPad (AirDrop, atau simpan di app Files).
    Buka AltStore › My Apps › tombol + di kiri atas → pilih file .ipa itu.
    Tunggu sampai WiredDisplay muncul di layar utama.
 
@@ -51,7 +51,7 @@ Perpanjangan 7 hari (penting)
 
 BAGIAN B — Pasang app Mac (host)
 
-1. Buka WiredDisplay-0.3.3.dmg. Seret WiredDisplayHost ke folder Applications.
+1. Buka WiredDisplay-0.4.0.dmg. Seret WiredDisplayHost ke folder Applications.
 
 2. Buka WiredDisplayHost. Karena app ini tidak dinotarisasi Apple, macOS akan
    menolak saat pertama dibuka. Buka System Settings › Privacy & Security,
@@ -119,6 +119,18 @@ Magic Keyboard & trackpad di iPad
   Ctrl+Shift+Tab, Ctrl+` , Ctrl+Space = Spotlight, Ctrl+Shift+3/4/5 = screenshot
 - Ctrl+↑ = Mission Control, Ctrl+←/→ = pindah Space.
 - Daftar lengkap ada di app iPad: tombol Controls › Keyboard & trackpad.
+
+Fitur lain
+- Putar iPad ke portrait: layar Mac ikut menjadi vertikal (layar hilang
+  sebentar saat dibangun ulang).
+- Kursor digambar langsung di iPad (lebih responsif). Matikan di panel Mac,
+  tab Display, "Draw the cursor on the iPad", bila ingin seperti dulu.
+- Renderer Metal menyala secara default (Controls iPad › Display).
+- iPad Pro: sampai 120 Hz. Panel Mac › Display › "Match the iPad's refresh rate".
+- Beberapa iPad bisa dicolok sekaligus, masing-masing jadi layar sendiri.
+- macOS menyembunyikan notifikasi selama ada app yang merekam layar. Supaya
+  tetap muncul: System Settings › Notifications › "Allow notifications when
+  mirroring or sharing the display".
 
 Bila tidak tersambung
 - Layar iPad menunjukkan langkah yang sedang ditunggu.

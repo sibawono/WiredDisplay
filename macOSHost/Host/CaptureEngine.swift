@@ -28,6 +28,7 @@ final class CaptureEngine: @unchecked Sendable {
     private var output: Output?
 
     func start(displayID: CGDirectDisplayID, pixelWidth: Int, pixelHeight: Int, fps: Int, displayP3: Bool, bgra: Bool = false,
+               showsCursor: Bool = true,
                onFrame: @escaping @Sendable (CVPixelBuffer, CMTime, Double) -> Void,
                onStop: @escaping @Sendable (String) -> Void) throws {
         let display = try findDisplay(displayID, timeout: 3)
@@ -44,7 +45,8 @@ final class CaptureEngine: @unchecked Sendable {
         configuration.colorSpaceName = displayP3 ? CGColorSpace.displayP3 : CGColorSpace.sRGB
         configuration.colorMatrix = CGDisplayStream.yCbCrMatrix_ITU_R_709_2
         configuration.queueDepth = 4
-        configuration.showsCursor = true
+        // Off with the local cursor (D-038): the iPad draws it.
+        configuration.showsCursor = showsCursor
         // The display's framebuffer can be larger than the panel ("more space"
         // modes): scale it to the panel size (same aspect ratio).
         configuration.scalesToFit = true

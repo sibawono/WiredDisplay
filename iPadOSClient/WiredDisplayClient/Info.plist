@@ -2,8 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- Keeps Mac audio and the iPad microphone running while the app is in
-	     the background (e.g. while using Sidecar). Video pauses (D-018). -->
+	<key>CADisableMinimumFrameDurationOnPhone</key>
+	<true/>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>

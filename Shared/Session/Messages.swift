@@ -3,7 +3,7 @@ import Foundation
 public enum SessionConstants {
     /// Bumped on any incompatible change to the messages below.
     /// 2: authenticated, encrypted channel (D-023).
-    public static let protocolVersion: UInt16 = 4
+    public static let protocolVersion: UInt16 = 6
     /// Product transport port on the iPad's loopback (D-014).
     public static let clientPort: UInt16 = 9100
     public static let maxNameBytes = 64
@@ -135,6 +135,34 @@ public enum ControlMessage: Sendable, Equatable {
     /// Client -> host: the current value (on connect and whenever it changes,
     /// also from Control Center), so the Mac's slider and keys follow.
     case brightness(Float)
+    /// Host -> client (D-038, local cursor): where the Mac pointer is on the
+    /// WiredDisplay screen, normalized 0...1, or hidden. The video carries no
+    /// cursor; the iPad draws it from these, ~1 ms instead of ~16 ms behind.
+    case cursor(x: Float, y: Float, visible: Bool)
+    /// Host -> client: the cursor's look (PNG), its size as a fraction of the
+    /// display, and its hot spot as a fraction of the image (top-left origin).
+    case cursorImage(CursorImage)
+    /// Client -> host (D-039): the iPad rotated; its panel is now this many
+    /// pixels wide and high (portrait: taller than wide). The host rebuilds
+    /// the display to match.
+    case panelSize(width: UInt32, height: UInt32)
+}
+
+public struct CursorImage: Sendable, Equatable {
+    public static let maxPNGBytes = 32 * 1024
+    public var png: [UInt8]
+    public var width: Float
+    public var height: Float
+    public var hotX: Float
+    public var hotY: Float
+
+    public init(png: [UInt8], width: Float, height: Float, hotX: Float, hotY: Float) {
+        self.png = png
+        self.width = width
+        self.height = height
+        self.hotX = hotX
+        self.hotY = hotY
+    }
 }
 
 /// 16-bit PCM, interleaved, little-endian on the wire, 48 kHz.
@@ -227,7 +255,7 @@ public enum InputEvent: Sendable, Equatable {
 
 public enum SessionCodec {
     private enum ControlTag: UInt8 {
-        case hello = 1, streamConfig, requestKeyframe, ping, pong, bye, audioRoute, videoActive, authHello, authProof, decodeFailed, brightness
+        case hello = 1, streamConfig, requestKeyframe, ping, pong, bye, audioRoute, videoActive, authHello, authProof, decodeFailed, brightness, cursor, cursorImage, panelSize
     }
 
     private enum InputTag: UInt8 {
@@ -286,6 +314,23 @@ public enum SessionCodec {
         case .brightness(let value):
             writer.u8(ControlTag.brightness.rawValue)
             writer.f32(value)
+        case .cursor(let x, let y, let visible):
+            writer.u8(ControlTag.cursor.rawValue)
+            writer.f32(x)
+            writer.f32(y)
+            writer.u8(visible ? 1 : 0)
+        case .panelSize(let width, let height):
+            writer.u8(ControlTag.panelSize.rawValue)
+            writer.u32(width)
+            writer.u32(height)
+        case .cursorImage(let image):
+            writer.u8(ControlTag.cursorImage.rawValue)
+            writer.f32(image.width)
+            writer.f32(image.height)
+            writer.f32(image.hotX)
+            writer.f32(image.hotY)
+            writer.u16(UInt16(clamping: image.png.count))
+            writer.raw(image.png)
         case .authHello(let hello):
             writer.u8(ControlTag.authHello.rawValue)
             writer.u16(hello.protocolVersion)
@@ -357,6 +402,29 @@ public enum SessionCodec {
             let value = try reader.f32()
             guard value.isFinite, (0...1).contains(value) else { throw WireError.invalidValue("brightness \(value)") }
             message = .brightness(value)
+        case .cursor:
+            let x = try reader.f32(), y = try reader.f32()
+            let visible = try reader.u8()
+            guard x.isFinite, y.isFinite, (0...1).contains(x), (0...1).contains(y), visible <= 1 else {
+                throw WireError.invalidValue("cursor \(x),\(y)")
+            }
+            message = .cursor(x: x, y: y, visible: visible == 1)
+        case .panelSize:
+            let width = try reader.u32(), height = try reader.u32()
+            guard (1...16384).contains(width), (1...16384).contains(height) else {
+                throw WireError.invalidValue("panel \(width)x\(height)")
+            }
+            message = .panelSize(width: width, height: height)
+        case .cursorImage:
+            let width = try reader.f32(), height = try reader.f32()
+            let hotX = try reader.f32(), hotY = try reader.f32()
+            let count = Int(try reader.u16())
+            guard [width, height, hotX, hotY].allSatisfy({ $0.isFinite }), (0...0.5).contains(width), (0...0.5).contains(height),
+                  (0...1).contains(hotX), (0...1).contains(hotY), count <= CursorImage.maxPNGBytes else {
+                throw WireError.invalidValue("cursor image")
+            }
+            message = .cursorImage(CursorImage(png: try reader.raw(count: count), width: width, height: height,
+                                               hotX: hotX, hotY: hotY))
         case .authHello:
             let version = try reader.u16()
             let rawRole = try reader.u8()

@@ -81,6 +81,17 @@ monitor attached.
   - Audio
   - Security: connection code and paired iPads.
   - General: permissions and login.
+- **Local cursor.** The pointer is drawn on the iPad from a separate position
+  stream, about 1 ms behind the Mac, instead of travelling inside the video.
+- **Metal renderer.** The iPad decodes and shows each frame the moment it is
+  ready. The system video layer is available as an option.
+- **Portrait.** Rotate the iPad, and the Mac display becomes a vertical
+  monitor.
+- **ProMotion.** Up to 120 Hz on iPad Pro, or a fixed 60 Hz.
+- **Several iPads at once.** Each iPad is its own display (not yet tested
+  with two iPads). Audio goes to the first iPad that turns it on.
+- **Works next to Sidecar and DisplayLink.** Another iPad on Sidecar, an
+  iPhone on the cable, or a DisplayLink monitor does not get in the way.
 - **Opens at login**, so the Mac's screen appears on the iPad after a restart.
 
 ## Requirements

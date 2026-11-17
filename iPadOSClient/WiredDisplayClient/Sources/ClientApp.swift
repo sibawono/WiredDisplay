@@ -12,6 +12,16 @@ final class AppModel {
     let videoView = VideoView(frame: .zero)
     let audio = ClientAudio()
     private(set) var session: ClientSession?
+    private var sink: SwitchableSink?
+
+    /// Experimental Metal renderer (D-040), remembered.
+    func setMetalRenderer(_ on: Bool) {
+        UserDefaults.standard.set(on, forKey: VideoView.metalRendererKey)
+        let usable = on && videoView.metalRenderer != nil
+        videoView.usesMetal = usable
+        sink?.select(metal: usable)
+        ClientLog.write("renderer: \(usable ? "Metal (experimental)" : "system display layer")")
+    }
     /// Diagnostics: the E-05 loopback echo on 127.0.0.1:9000, so cable
     /// throughput can be measured with `wd-usbmux-probe echo` without swapping
     /// apps (free teams cannot register more App IDs). Foreground only.
@@ -21,7 +31,12 @@ final class AppModel {
     func activate() {
         ClientLog.write("app active")
         if session == nil {
-            let session = ClientSession(model: connection, renderer: videoView.displayLayer.sampleBufferRenderer,
+            let sink = SwitchableSink(standard: DisplayLayerSink(videoView.displayLayer.sampleBufferRenderer),
+                                      metal: videoView.metalRenderer)
+            self.sink = sink
+            // Metal is the default since the user found it better (D-040).
+            setMetalRenderer(UserDefaults.standard.object(forKey: VideoView.metalRendererKey) as? Bool ?? true)
+            let session = ClientSession(model: connection, renderer: sink,
                                         hello: makeHello(), speakerSink: audio.speakerBuffer)
             videoView.onInput = { [weak session] event in session?.send(event) }
             audio.onMicrophone = { [weak session] packet in session?.sendMicrophone(packet) }
@@ -33,6 +48,12 @@ final class AppModel {
                 session?.setAudioRoute(speaker: speaker, microphone: microphone)
             }
             session.onBrightness = { [weak self] value in self?.applyBrightness(value) }
+            videoView.onShapeChange = { [weak self] portrait in self?.viewShapeChanged(portrait: portrait) }
+            session.onCursor = { [weak self] x, y, visible in self?.videoView.setCursor(x: x, y: y, visible: visible) }
+            session.onCursorImage = { [weak self] image in
+                self?.videoView.setCursorImage(png: image.png, width: image.width, height: image.height,
+                                               hotX: image.hotX, hotY: image.hotY)
+            }
             NotificationCenter.default.addObserver(forName: UIScreen.brightnessDidChangeNotification, object: nil,
                                                    queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated { self?.reportBrightness() }
@@ -123,10 +144,7 @@ final class AppModel {
 
     private func makeHello() -> Hello {
         let screen = UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.screen }.first
-        let native = screen?.nativeBounds.size ?? CGSize(width: 2048, height: 2732)
-        // Landscape-first: the long side is the width.
-        let width = UInt32(max(native.width, native.height))
-        let height = UInt32(min(native.width, native.height))
+        let (width, height) = Self.panelPixels(portrait: Self.isPortrait)
         let scale = UInt8(clamping: Int((screen?.nativeScale ?? 2).rounded()))
         let refresh = UInt16(clamping: screen?.maximumFramesPerSecond ?? 60)
         // HEVC only where it is decoded in hardware (D-031); H.264 always.
@@ -134,6 +152,36 @@ final class AppModel {
         return Hello(role: .client, deviceName: UIDevice.current.name, pixelWidth: width, pixelHeight: height,
                      scale: max(scale, 1), maxRefreshHz: max(refresh, 1), codecs: codecs,
                      pixelsPerInch: Self.pixelsPerInch())
+    }
+
+    // MARK: orientation (D-039)
+
+    static var isPortrait: Bool {
+        let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+        return scene?.effectiveGeometry.interfaceOrientation.isPortrait ?? false
+    }
+
+    /// Panel pixels in the given orientation (nativeBounds is portrait-up).
+    static func panelPixels(portrait: Bool) -> (UInt32, UInt32) {
+        let screen = UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.screen }.first
+        let native = screen?.nativeBounds.size ?? CGSize(width: 2048, height: 2732)
+        let long = UInt32(max(native.width, native.height)), short = UInt32(min(native.width, native.height))
+        return portrait ? (short, long) : (long, short)
+    }
+
+    private var orientationWork: DispatchWorkItem?
+
+    /// The view changed shape: after it settles, tell the Mac (rotation).
+    func viewShapeChanged(portrait: Bool) {
+        orientationWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                let (width, height) = Self.panelPixels(portrait: portrait)
+                self?.session?.setPanelSize(width: width, height: height)
+            }
+        }
+        orientationWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
     }
 
     /// iPad mini panels are 326 ppi; every other iPad on iPadOS 17+ is 264.
@@ -243,6 +291,7 @@ struct VideoSurface: UIViewRepresentable {
 
     func updateUIView(_ uiView: VideoView, context: Context) {
         uiView.streamSize = streamConfig.map { CGSize(width: Int($0.pointWidth), height: Int($0.pointHeight)) }
+        uiView.streamRefreshHz = streamConfig.map { Int($0.refreshHz) } ?? 0
     }
 }
 
@@ -253,6 +302,7 @@ struct ControlsPanel: View {
     /// BUG-035: on = video composited by the GPU (dithered) instead of a
     /// hardware overlay plane, which showed rings in smooth gradients.
     @AppStorage(VideoView.smoothGradientsKey) private var smoothGradients = true
+    @AppStorage(VideoView.metalRendererKey) private var metalRenderer = true
 
     var body: some View {
         ControlsContent(
@@ -262,6 +312,8 @@ struct ControlsPanel: View {
             microphone: Binding(get: { connection.microphoneOn }, set: { app.setMicrophone($0) }),
             smoothGradients: Binding(get: { smoothGradients },
                                      set: { smoothGradients = $0; app.videoView.smoothGradients = $0 }),
+            metalRenderer: app.videoView.metalRenderer == nil ? nil
+                : Binding(get: { metalRenderer }, set: { metalRenderer = $0; app.setMetalRenderer($0) }),
             pairedMacs: connection.pairedMacs.map { PairedMacRow(name: $0.name, fingerprint: $0.fingerprint) },
             forgetPaired: { app.session?.forgetPairedMacs() },
             reconnect: {

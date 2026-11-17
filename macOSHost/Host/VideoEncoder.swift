@@ -58,6 +58,10 @@ final class VideoEncoder: @unchecked Sendable {
         }
     }
 
+    /// Encoder tuning (D-037); command-line switches for A/B tests.
+    nonisolated(unsafe) static var powerEfficient = false
+    nonisolated(unsafe) static var periodicKeyframes = false
+
     let codec: VideoCodec
     let chroma: ChromaMode
     /// True when the capture must deliver BGRA (any 4:4:4 use).
@@ -123,7 +127,9 @@ final class VideoEncoder: @unchecked Sendable {
             still = try Self.makeLane(common, full444: true, convertFromBGRA: true)
         }
         Log.info("encoder ready: \(codec) \(width)x\(height) \(fps) fps \(bitrateMbps) Mbit/s, " +
-                 "\(displayP3 ? "P3" : "sRGB") tags, chroma \(chroma.rawValue), \(tenBit ? 10 : 8)-bit")
+                 "\(displayP3 ? "P3" : "sRGB") tags, chroma \(chroma.rawValue), \(tenBit ? 10 : 8)-bit, " +
+                 "rate control \(fps > 60 ? "standard (high refresh)" : "low-latency"), " +
+                 "periodic keyframes \(Self.periodicKeyframes)")
     }
 
     private static func makeLane(_ c: (codec: VideoCodec, width: Int, height: Int, fps: Int, bitrateMbps: Int, displayP3: Bool, tenBit: Bool),
@@ -131,7 +137,12 @@ final class VideoEncoder: @unchecked Sendable {
         // Low-latency rate control only produces 4:2:0 (measured: it silently
         // falls back to Main 4:2:0), so the 4:4:4 lane uses the standard one.
         var specification: [CFString: Any] = [kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: true]
-        if !full444 { specification[kVTVideoEncoderSpecification_EnableLowLatencyRateControl] = true }
+        // Above 60 fps (ProMotion, D-036) the low-latency rate controller is
+        // the bottleneck: measured on this Mac it dropped every frame at
+        // 2752x2064 and reached ~83 fps (57 ms latency) at 2420x1668, while
+        // the standard one sustained 120 fps at 7-9 ms. So use it there.
+        let lowLatency = !full444 && c.fps <= 60
+        if lowLatency { specification[kVTVideoEncoderSpecification_EnableLowLatencyRateControl] = true }
         var created: VTCompressionSession?
         let status = VTCompressionSessionCreate(
             allocator: nil, width: Int32(c.width), height: Int32(c.height),
@@ -148,7 +159,13 @@ final class VideoEncoder: @unchecked Sendable {
             // Cap bursts at 1.5x the average over one second.
             kVTCompressionPropertyKey_DataRateLimits: [bitsPerSecond * 3 / 2 / 8, 1] as CFArray,
             kVTCompressionPropertyKey_ExpectedFrameRate: c.fps,
-            kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration: 2,
+            // Latency over battery: do not let the media engine slow down to
+            // just meet the frame rate (D-037).
+            kVTCompressionPropertyKey_MaximizePowerEfficiency: VideoEncoder.powerEfficient,
+            // No periodic keyframes (D-037): each one is a large frame and a
+            // visible hitch; the iPad asks for one when it needs it.
+            kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration: VideoEncoder.periodicKeyframes ? 2 : 3600,
+            kVTCompressionPropertyKey_MaxKeyFrameInterval: VideoEncoder.periodicKeyframes ? 120 : 216_000,
             // Display P3 primaries only with --color p3 (BUG-033).
             kVTCompressionPropertyKey_ColorPrimaries: c.displayP3
                 ? kCVImageBufferColorPrimaries_P3_D65 : kCVImageBufferColorPrimaries_ITU_R_709_2,

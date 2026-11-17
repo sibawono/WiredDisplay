@@ -55,7 +55,8 @@ final class VirtualDisplayController {
     /// Creates a display matching the client's panel. Pixel dimensions are
     /// rounded down to even values (required for @2x modes). `space` picks the
     /// default mode; the others stay selectable in System Settings.
-    func create(for hello: Hello, refreshHz: Double, wideColor: Bool, space: Space = .more) throws -> StreamConfig {
+    func create(for hello: Hello, refreshHz: Double, wideColor: Bool, space: Space = .more,
+                serialNumber: UInt32 = 1) throws -> StreamConfig {
         if let error = WDVirtualDisplayCheckAvailability() { throw Error.unavailable(error.localizedDescription) }
         let width = UInt32(min(hello.pixelWidth, 8192)) & ~1
         let height = UInt32(min(hello.pixelHeight, 8192)) & ~1
@@ -71,6 +72,7 @@ final class VirtualDisplayController {
         config.hiDPI = hiDPI
         config.refreshRate = refreshHz
         config.wideColor = wideColor // only with --color p3 (BUG-033)
+        config.serialNumber = serialNumber
         let sizes = Self.modeSizes(panelWidth: width, panelHeight: height, hiDPI: hiDPI)
         let ordered = [space] + Space.allCases.filter { $0 != space }
         config.modeSizes = ordered.compactMap { sizes[$0] }.map { NSValue(size: $0) }

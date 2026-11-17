@@ -76,7 +76,13 @@ final class HostController: @unchecked Sendable {
         /// 80 Mbit/s: the measured link carries >1 Gbit/s per direction
         /// (BUG-032 correction); higher bitrate keeps desktop text crisp.
         var bitrateMbps = 80
-        var fps = 60
+        /// Highest refresh the host offers; `--fps N` fixes it instead of
+        /// following the iPad (ProMotion, D-036).
+        var fps = 120
+        var fpsOverride: Int?
+        /// Diagnostics (D-036): run at this rate even above the iPad's own
+        /// maximum, to test the high-refresh path on a 60 Hz iPad.
+        var forceRefresh: Int?
         /// sRGB by default (BUG-033): the iPad renders P3-tagged frames as if
         /// sRGB (measured 29 % less saturation). `--color p3` stays experimental.
         var displayP3 = false
@@ -112,7 +118,14 @@ final class HostController: @unchecked Sendable {
     private let inputEnabled: OSAllocatedUnfairLock<Bool>
     /// Chroma path and bit depth used by the next encoder (live-switchable).
     private let quality: OSAllocatedUnfairLock<(chroma: ChromaMode, tenBit: Bool)>
-    private let onState: @Sendable (State) -> Void
+    private let stateHandler: @Sendable (State) -> Void
+    /// The fleet's record of this controller's state (D-041).
+    var onStateRecorded: (@Sendable (State) -> Void)?
+
+    private func onState(_ state: State) {
+        stateHandler(state)
+        onStateRecorded?(state)
+    }
     /// Identity and paired iPads (D-023), in the login Keychain.
     let trust = TrustStore(keychainService: "dev.wireddisplay.host")
     /// Asks the user to pair an unknown iPad when one is already paired.
@@ -141,11 +154,14 @@ final class HostController: @unchecked Sendable {
     // Owned by `videoQueue`.
     private var video: VideoPipeline?
 
-    init(options: Options, confirmPairing: @escaping @Sendable (SecureChannel.Peer) -> Bool,
+    init(options: Options, deviceSerial: String? = nil, audioRouter: AudioRouter = AudioRouter(),
+         confirmPairing: @escaping @Sendable (SecureChannel.Peer) -> Bool,
          onState: @escaping @Sendable (State) -> Void) {
         self.options = options
+        self.deviceSerial = deviceSerial
+        self.audioRouter = audioRouter
         self.confirmPairing = confirmPairing
-        self.onState = onState
+        self.stateHandler = onState
         inputEnabled = OSAllocatedUnfairLock(initialState: options.allowInput)
         quality = OSAllocatedUnfairLock(initialState: (options.chroma, options.tenBit))
     }
@@ -174,6 +190,118 @@ final class HostController: @unchecked Sendable {
 
     private let sessionStatus = OSAllocatedUnfairLock(initialState: SessionStatus())
     var status: SessionStatus { sessionStatus.withLock { $0 } }
+
+    /// The WiredDisplay screen while video runs (for brightness keys).
+    private let currentDisplay = OSAllocatedUnfairLock<CGDirectDisplayID?>(initialState: nil)
+
+    /// Brightness keys belong to the iPad when it is the only display, or
+    /// when the pointer is on it; otherwise they go to the display they are
+    /// meant for (a DisplayLink monitor, a Sidecar iPad, …), D-036.
+    var brightnessKeysTargetIPad: Bool {
+        guard brightness != nil, let display = currentDisplay.withLock({ $0 }) else { return false }
+        var count: UInt32 = 0
+        CGGetActiveDisplayList(0, nil, &count)
+        if count <= 1 { return true }
+        let pointer = CGEvent(source: nil)?.location ?? .zero
+        return CGDisplayBounds(display).contains(pointer)
+    }
+
+    // MARK: several iPads (D-041)
+
+    /// A stable display serial per iPad: the first iPad ever seen keeps 1 (the
+    /// identity WiredDisplay always used, so its arrangement and mode stay),
+    /// later ones get 2, 3, …
+    static func displaySerial(for device: String?) -> UInt32 {
+        guard let device else { return 1 }
+        let key = "displaySerials"
+        var map = UserDefaults.standard.dictionary(forKey: key) as? [String: Int] ?? [:]
+        if let known = map[device] { return UInt32(known) }
+        let next = (map.values.max() ?? 0) + 1
+        map[device] = next
+        UserDefaults.standard.set(map, forKey: key)
+        return UInt32(next)
+    }
+
+    /// Only one iPad can carry audio (one driver): the first to ask keeps it.
+    private static let audioOwner = OSAllocatedUnfairLock<ObjectIdentifier?>(initialState: nil)
+    private var ownsAudio: Bool { Self.audioOwner.withLock { $0 == ObjectIdentifier(self) } }
+
+    private func claimAudio() -> Bool {
+        Self.audioOwner.withLock { owner in
+            if owner == nil { owner = ObjectIdentifier(self) }
+            return owner == ObjectIdentifier(self)
+        }
+    }
+
+    private func releaseAudio() {
+        Self.audioOwner.withLock { if $0 == ObjectIdentifier(self) { $0 = nil } }
+    }
+
+    // MARK: local cursor (D-038)
+
+    static let localCursorKey = "localCursor"
+    private let localCursorEnabled = OSAllocatedUnfairLock(
+        initialState: UserDefaults.standard.object(forKey: HostController.localCursorKey) as? Bool ?? true)
+    var localCursor: Bool { localCursorEnabled.withLock { $0 } }
+    private var cursorEcho: CursorEcho?
+
+    /// On: the iPad draws the cursor (lower latency); off: it is in the video.
+    func setLocalCursor(_ enabled: Bool) {
+        localCursorEnabled.withLock { $0 = enabled }
+        UserDefaults.standard.set(enabled, forKey: Self.localCursorKey)
+        videoQueue.async { [self] in
+            do { try restartEncoding() } catch {
+                Log.warn("cursor mode switch failed: \(error)")
+                queue.async { [self] in socket?.close("cursor mode switch failed: \(error)") }
+            }
+        }
+    }
+
+    /// Starts or stops the cursor stream to match the setting. On `videoQueue`.
+    private func updateCursorEcho(_ pipeline: VideoPipeline) {
+        cursorEcho?.stop()
+        cursorEcho = nil
+        guard localCursor, let socket = pipeline.socket, let display = currentDisplay.withLock({ $0 }) else { return }
+        let echo = CursorEcho(displayID: display) { [weak self, weak socket] message in
+            guard let self, let socket, !socket.isClosed else { return }
+            self.send(message, on: socket)
+        }
+        echo.start()
+        cursorEcho = echo
+    }
+
+    // MARK: refresh rate (D-036)
+
+    static let refreshKey = "refreshFollowsIPad"
+    private let followsIPadRefresh = OSAllocatedUnfairLock(
+        initialState: UserDefaults.standard.object(forKey: HostController.refreshKey) as? Bool ?? true)
+    var refreshFollowsIPad: Bool { followsIPadRefresh.withLock { $0 } }
+
+    /// On: up to 120 Hz on ProMotion iPads; off: 60 Hz. Recreates the
+    /// display (its refresh rate is part of its modes).
+    func setRefreshFollowsIPad(_ follow: Bool) {
+        let changed = followsIPadRefresh.withLock { current -> Bool in
+            defer { current = follow }
+            return current != follow
+        }
+        UserDefaults.standard.set(follow, forKey: Self.refreshKey)
+        guard changed else { return }
+        videoQueue.async { [self] in
+            do { try restartVideo() } catch {
+                Log.warn("refresh change failed: \(error)")
+                queue.async { [self] in socket?.close("refresh change failed: \(error)") }
+            }
+        }
+    }
+
+    /// Recreates the display with the current settings; the session stays
+    /// up and the iPad gets a new stream config. On `videoQueue`.
+    private func restartVideo(hello newHello: Hello? = nil) throws {
+        guard let pipeline = video, let hello = newHello ?? pipeline.hello, let socket = pipeline.socket else { return }
+        Log.info("recreating the display")
+        stopVideo()
+        try startVideo(hello: hello, socket: socket)
+    }
 
     // MARK: iPad brightness (D-033)
 
@@ -275,11 +403,17 @@ final class HostController: @unchecked Sendable {
         }
     }
 
-    /// Headphones in, iPad out (D-034).
-    let audioRouter = AudioRouter()
+    /// Headphones in, iPad out (D-034). Shared by every iPad's controller;
+    /// the fleet starts it.
+    let audioRouter: AudioRouter
+    /// The one cabled device this controller serves (several iPads, D-041);
+    /// nil = any (single-iPad behaviour).
+    let deviceSerial: String?
+    /// The device of the current session (its display serial is derived from it).
+    private var sessionDeviceSerial: String?
 
     func start() {
-        audioRouter.start()
+        if deviceSerial == nil { audioRouter.start() }
         Thread.detachNewThread { [self] in runLoop() }
     }
 
@@ -308,20 +442,40 @@ final class HostController: @unchecked Sendable {
     private func runLoop() {
         var backoff: TimeInterval = 1
         while !isStopping {
-            guard let device = waitForWiredDevice() else { break }
+            guard let wired = waitForWiredDevices() else { break }
+            // Several cabled devices can be present (another iPad on Sidecar,
+            // an iPhone): try each, the one that worked last time first, and
+            // use the one where the WiredDisplay app answers.
+            let mine = deviceSerial.map { serial in wired.filter { $0.serialNumber == serial } } ?? wired
+            guard !mine.isEmpty else {
+                noteWait("waiting for device \(deviceSerial ?? "?") on USB")
+                Thread.sleep(forTimeInterval: 1)
+                continue
+            }
+            let devices = UsbmuxDevice.preferring(serial: lastGoodSerial, in: mine)
             onState(.connecting)
             let started = Date()
-            do {
-                try runSession(device)
-                onState(.backingOff("session ended"))
-            } catch SessionError.notListening {
-                noteWait("iPad on USB, but nothing listens on port \(SessionConstants.clientPort) (WiredDisplay app not open or not in front?)")
+            var sessionRan = false
+            for device in devices where !isStopping {
+                do {
+                    try runSession(device)
+                    sessionRan = true
+                    onState(.backingOff("session ended"))
+                } catch SessionError.notListening {
+                    continue // not this device: WiredDisplay is not running there
+                } catch {
+                    sessionRan = true
+                    Log.warn("session ended with error: \(error)")
+                    onState(.backingOff("\(error)"))
+                }
+                break
+            }
+            if !sessionRan {
+                let which = devices.count == 1 ? "the iPad" : "any of the \(devices.count) cabled devices"
+                noteWait("nothing listens on port \(SessionConstants.clientPort) on \(which) (WiredDisplay app not open or not in front?)")
                 onState(.waitingForDevice)
                 Thread.sleep(forTimeInterval: 1)
                 continue
-            } catch {
-                Log.warn("session ended with error: \(error)")
-                onState(.backingOff("\(error)"))
             }
             // Never reconnect in a tight loop (review finding 9).
             if Date().timeIntervalSince(started) > 10 { backoff = 1 }
@@ -353,16 +507,20 @@ final class HostController: @unchecked Sendable {
     /// Only USB-attached devices (Wired Only, D-003). Returns nil when stopping.
     /// Logs what it sees whenever that changes (BUG-037: after a reboot the
     /// host waited silently until the cable was re-plugged).
-    private func waitForWiredDevice() -> UsbmuxDevice? {
+    /// Serial of the device the last session ran on (tried first next time).
+    private var lastGoodSerial: String?
+
+    private func waitForWiredDevices() -> [UsbmuxDevice]? {
         onState(.waitingForDevice)
         while !isStopping {
             let seen: String
             do {
                 let connection = try UsbmuxConnection()
                 let devices = try connection.listDevices()
-                if let device = UsbmuxDevice.wiredOnly(devices).first {
-                    noteWait("iPad on USB: device \(device.deviceID)")
-                    return device
+                let wired = UsbmuxDevice.wiredOnly(devices)
+                if !wired.isEmpty {
+                    noteWait("on USB: " + wired.map { "device \($0.deviceID)" }.joined(separator: ", "))
+                    return wired
                 }
                 let listed = devices.isEmpty ? "usbmuxd lists no device"
                     : "usbmuxd lists only non-USB devices: " + devices.map { "\($0.deviceID) \($0.connectionType)" }.joined(separator: ", ")
@@ -400,6 +558,8 @@ final class HostController: @unchecked Sendable {
         }
         let descriptor = try connection.detachTunnel()
         Log.info("connected to device \(device.deviceID) over USB, port \(SessionConstants.clientPort)")
+        lastGoodSerial = device.serialNumber
+        sessionDeviceSerial = device.serialNumber
 
         var generator = SystemRandomNumberGenerator()
         let ended = DispatchSemaphore(value: 0)
@@ -445,7 +605,8 @@ final class HostController: @unchecked Sendable {
             lastHeard = Date()
             iPadBrightness.withLock { $0 = nil }
             sessionStatus.withLock { $0 = SessionStatus() }
-            audioRouter.iPadRoute(speaker: false, microphone: false)
+            if ownsAudio { audioRouter.iPadRoute(speaker: false, microphone: false) }
+            releaseAudio()
         }
         while helloArrived.wait(timeout: .now()) == .success {} // drain stale signals
         socket.start()
@@ -560,13 +721,19 @@ final class HostController: @unchecked Sendable {
     private func startVideo(hello: Hello, socket: FramedSocket) throws {
         guard video == nil, !socket.isClosed else { return }
         let pipeline = VideoPipeline()
-        let fps = min(options.fps, Int(hello.maxRefreshHz))
+        // ProMotion (D-036): follow the iPad (120 Hz on iPad Pro) unless the
+        // user chose 60 Hz or the command line fixed a rate.
+        let cap = options.fpsOverride ?? (refreshFollowsIPad ? 120 : 60)
+        let fps = options.forceRefresh ?? max(min(cap, Int(hello.maxRefreshHz)), 24)
+        Log.info("refresh: iPad up to \(hello.maxRefreshHz) Hz, \(options.fpsOverride != nil ? "fixed" : refreshFollowsIPad ? "following the iPad" : "60 Hz chosen") -> \(fps) Hz")
         var config = try pipeline.display.create(for: hello, refreshHz: Double(fps), wideColor: options.displayP3,
-                                                 space: options.space)
+                                                 space: options.space,
+                                                 serialNumber: Self.displaySerial(for: sessionDeviceSerial))
         guard let displayID = pipeline.display.displayID else {
             pipeline.display.destroy()
             throw SessionError.incompatible("display vanished")
         }
+        currentDisplay.withLock { $0 = displayID }
         // Follow mirroring (user decision): if macOS or another tool put our
         // display in a mirror set, ScreenCaptureKit does not offer it; capture
         // the set's primary display instead, which is exactly what is shown.
@@ -652,7 +819,7 @@ final class HostController: @unchecked Sendable {
         queue.sync { self.encoder = encoder }
         try pipeline.capture.start(displayID: pipeline.captureID, pixelWidth: Int(config.pixelWidth),
                                    pixelHeight: Int(config.pixelHeight), fps: fps, displayP3: options.displayP3,
-                                   bgra: encoder.wantsBGRA,
+                                   bgra: encoder.wantsBGRA, showsCursor: !localCursor,
                                    onFrame: { buffer, time, dirty in
                                        if let report = captureMeter.tick() { Log.info("video captured: \(report)") }
                                        encoder.encode(buffer, presentationTime: time, dirtyFraction: dirty)
@@ -664,7 +831,8 @@ final class HostController: @unchecked Sendable {
             $0.codec = codecName
             $0.encoding = "\(chroma) · \(current.tenBit ? 10 : 8)-bit"
         }
-        Log.info("encoding \(codec) \(current.chroma.rawValue) \(current.tenBit ? 10 : 8)-bit")
+        updateCursorEcho(pipeline)
+        Log.info("encoding \(codec) \(current.chroma.rawValue) \(current.tenBit ? 10 : 8)-bit, cursor \(localCursor ? "drawn on the iPad" : "in the video")")
     }
 
     /// The user can pick another "looks like" size in System Settings during a
@@ -709,6 +877,9 @@ final class HostController: @unchecked Sendable {
             encoder = nil
         }
         pipeline.display.destroy()
+        cursorEcho?.stop()
+        cursorEcho = nil
+        currentDisplay.withLock { $0 = nil }
         sessionStatus.withLock {
             $0.pixelSize = nil; $0.pointSize = nil; $0.refreshHz = nil; $0.codec = nil; $0.encoding = nil
             $0.streamingSince = nil
@@ -782,6 +953,21 @@ final class HostController: @unchecked Sendable {
             }
         case .bye(let reason):
             socket.close("client said bye: \(reason)")
+        case .cursor, .cursorImage:
+            socket.close("protocol error: unexpected \(message) from client")
+        case .panelSize(let width, let height):
+            // Portrait / landscape (D-039): rebuild the display for the new shape.
+            guard var hello = peerHello, hello.pixelWidth != width || hello.pixelHeight != height else { return }
+            hello.pixelWidth = width
+            hello.pixelHeight = height
+            peerHello = hello
+            Log.info("iPad rotated: panel now \(width)x\(height) (\(height > width ? "portrait" : "landscape"))")
+            videoQueue.async { [self] in
+                do { try restartVideo(hello: hello) } catch {
+                    Log.warn("rotation rebuild failed: \(error)")
+                    queue.async { socket.close("rotation rebuild failed: \(error)") }
+                }
+            }
         case .brightness(let value):
             iPadBrightness.withLock { $0 = value }
             let notify = onBrightnessChange
@@ -792,8 +978,15 @@ final class HostController: @unchecked Sendable {
         case .streamConfig, .authHello, .authProof:
             socket.close("protocol error: unexpected \(message) from client")
         case .audioRoute(let speaker, let microphone):
+            if speaker || microphone {
+                guard claimAudio() else {
+                    Log.info("audio stays with the other iPad; ignoring this one's audio route")
+                    return
+                }
+            }
             sessionStatus.withLock { $0.speaker = speaker; $0.microphone = microphone }
             audioRouter.iPadRoute(speaker: speaker, microphone: microphone)
+            if !speaker && !microphone { releaseAudio() }
             guard let audio else { return }
             Log.info("audio route from iPad: speaker \(speaker), microphone \(microphone)")
             audioQueue.async {

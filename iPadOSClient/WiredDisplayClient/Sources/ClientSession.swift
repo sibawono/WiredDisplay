@@ -43,9 +43,9 @@ final class ConnectionModel {
 final class ClientSession: @unchecked Sendable {
     private let queue = DispatchQueue(label: "wireddisplay.client.session", qos: .userInteractive)
     private let model: ConnectionModel
-    private let renderer: AVSampleBufferVideoRenderer
+    private let renderer: SwitchableSink
     private var decodeFailures = DecodeFailureDetector()
-    private let hello: Hello
+    private var hello: Hello
 
     private var listener: NWListener?
     private var connection: NWConnection?
@@ -76,9 +76,13 @@ final class ClientSession: @unchecked Sendable {
     private let speakerSink: AudioJitterBuffer
     private var speakerPackets = 0
     private let presentMeter = FrameRateMeter()
+    /// Latency diagnostics: host clock minus iPad clock, estimated from pings
+    /// (the largest sample is closest, since one-way delay only lowers it).
+    private var clockOffset: Int64?
+    private var transitSamples: [Double] = []
     private var droppedMicrophone = 0
 
-    init(model: ConnectionModel, renderer: AVSampleBufferVideoRenderer, hello: Hello, speakerSink: AudioJitterBuffer) {
+    init(model: ConnectionModel, renderer: SwitchableSink, hello: Hello, speakerSink: AudioJitterBuffer) {
         self.model = model
         self.renderer = renderer
         self.hello = hello
@@ -118,7 +122,23 @@ final class ClientSession: @unchecked Sendable {
 
     /// The Mac set the iPad's brightness (keys or menu slider, D-033). Main actor.
     var onBrightness: (@MainActor @Sendable (Float) -> Void)?
+    /// Local cursor (D-038), delivered on the main queue.
+    var onCursor: (@MainActor @Sendable (Float, Float, Bool) -> Void)?
+    var onCursorImage: (@MainActor @Sendable (CursorImage) -> Void)?
     private var reportedBrightness: Float?
+
+    /// The iPad rotated (D-039): the next hello carries the new shape, and a
+    /// live session tells the Mac now so it rebuilds the display.
+    func setPanelSize(width: UInt32, height: UInt32) {
+        queue.async { [self] in
+            guard hello.pixelWidth != width || hello.pixelHeight != height else { return }
+            hello.pixelWidth = width
+            hello.pixelHeight = height
+            ClientLog.write("panel now \(width)x\(height) (\(height > width ? "portrait" : "landscape"))")
+            guard let connection, peerHello != nil else { return }
+            send(stream: .control, payload: SessionCodec.encode(.panelSize(width: width, height: height)), on: connection)
+        }
+    }
 
     /// Tell the Mac the iPad's current brightness (connect, Control Center).
     func sendBrightness(_ value: Float) {
@@ -146,7 +166,7 @@ final class ClientSession: @unchecked Sendable {
             if !active {
                 config = nil
                 format = nil
-                renderer.flush(removingDisplayedImage: true, completionHandler: nil)
+                renderer.flush(removingImage: true)
             }
             guard let connection, peerHello != nil else { return }
             send(stream: .control, payload: SessionCodec.encode(.videoActive(active)), on: connection)
@@ -329,7 +349,7 @@ final class ClientSession: @unchecked Sendable {
         } else {
             current.cancel()
         }
-        renderer.flush(removingDisplayedImage: true, completionHandler: nil)
+        renderer.flush(removingImage: true)
         let wasStreaming = config != nil
         config = nil
         let stillRunning = running // read on `queue`, not on the main actor
@@ -433,9 +453,15 @@ final class ClientSession: @unchecked Sendable {
                 }
             case .ping(let value):
                 send(stream: .control, payload: SessionCodec.encode(.pong(value)), on: current)
+                let estimate = Int64(bitPattern: value) &- Int64(bitPattern: clock_gettime_nsec_np(CLOCK_UPTIME_RAW))
+                clockOffset = max(clockOffset ?? estimate, estimate)
             case .brightness(let value):
                 if let apply = onBrightness { Task { @MainActor in apply(value) } }
-            case .pong, .requestKeyframe, .audioRoute, .videoActive, .decodeFailed:
+            case .cursor(let x, let y, let visible):
+                if let apply = onCursor { DispatchQueue.main.async { MainActor.assumeIsolated { apply(x, y, visible) } } }
+            case .cursorImage(let image):
+                if let apply = onCursorImage { DispatchQueue.main.async { MainActor.assumeIsolated { apply(image) } } }
+            case .pong, .requestKeyframe, .audioRoute, .videoActive, .decodeFailed, .panelSize:
                 break
             case .authHello, .authProof:
                 throw WireError.invalidValue("handshake message after handshake")
@@ -497,20 +523,27 @@ final class ClientSession: @unchecked Sendable {
                 }
             }
         }
-        if renderer.status == .failed {
+        if renderer.takeSwitch() {
+            // Renderer switched (D-040): start the new path at a keyframe.
+            renderer.flush(removingImage: false)
+            format = nil
+            if !unit.isKeyframe { requestKeyframe(on: current); return }
+            format = try? SampleBuffers.formatDescription(for: unit)
+        }
+        if renderer.isFailed {
             // Repeated failures = this iPad cannot decode the format (D-031):
             // ask the Mac to step down (no 4:4:4, then 8-bit).
-            ClientLog.write("renderer failed: \(renderer.error.map { "\($0)" } ?? "no error")")
+            ClientLog.write("renderer failed: \(renderer.failureDescription ?? "no error")")
             if decodeFailures.failed(at: ProcessInfo.processInfo.systemUptime) {
                 ClientLog.write("decode keeps failing; asking the Mac for a simpler format")
                 send(stream: .control, payload: SessionCodec.encode(.decodeFailed), on: current)
             }
         }
-        if renderer.status == .failed || renderer.requiresFlushToResumeDecoding {
+        if renderer.needsFlush {
             // The flag only clears after a flush; without one video froze for
             // good (review finding 4). Resume at the next keyframe.
-            NSLog("WiredDisplay: renderer needs flush (status \(renderer.status.rawValue)); flushing")
-            renderer.flush(removingDisplayedImage: false, completionHandler: nil)
+            NSLog("WiredDisplay: renderer needs flush; flushing")
+            renderer.flush(removingImage: false)
             if !unit.isKeyframe { format = nil }
         }
         guard let format else {
@@ -522,7 +555,21 @@ final class ClientSession: @unchecked Sendable {
             let time = CMTime(value: CMTimeValue(timestamp), timescale: 1_000_000_000)
             renderer.enqueue(try SampleBuffers.sampleBuffer(for: unit, format: format, presentationTime: time))
             ui { $0.framesShown += 1 }
-            if let report = presentMeter.tick(bytes: unit.annexB.count) { ClientLog.write("video presented: \(report)") }
+            if let offset = clockOffset {
+                // Mac sent it -> iPad hands it to the display layer (transport,
+                // decryption, parsing); excludes encode and the final vsync.
+                let local = Int64(bitPattern: clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) &+ offset
+                transitSamples.append(Double(local &- Int64(bitPattern: timestamp)) / 1_000_000)
+            }
+            if let report = presentMeter.tick(bytes: unit.annexB.count) {
+                var line = "video presented: \(report)"
+                if !transitSamples.isEmpty {
+                    let sorted = transitSamples.sorted()
+                    line += String(format: ", sent->enqueued p50 %.1f p95 %.1f ms", sorted[sorted.count / 2], sorted[sorted.count * 95 / 100])
+                    transitSamples.removeAll(keepingCapacity: true)
+                }
+                ClientLog.write(line)
+            }
         } catch {
             requestKeyframe(on: current)
             ui { $0.framesDropped += 1 }

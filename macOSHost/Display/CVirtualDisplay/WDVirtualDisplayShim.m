@@ -131,7 +131,7 @@ static id<WDPrivateDisplayDescriptor> WDMakeDescriptor(WDVirtualDisplayConfig *c
     // ui/display/mac/test/virtual_display_util_mac.mm). 0x5744 = "WD".
     [descriptor setVendorID:0x5744];
     [descriptor setProductID:0x0001];
-    [descriptor setSerialNum:0x0001];
+    [descriptor setSerialNum:config.serialNumber == 0 ? 0x0001 : config.serialNumber];
     [descriptor setQueue:queue];
     if (config.wideColor && WDHasPrimarySetters()) {
         // Display P3 (CIE 1931 xy), D65 white point.

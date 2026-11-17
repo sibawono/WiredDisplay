@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		B10000000000000000000011 /* ClientApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000001 /* ClientApp.swift */; };
 		B10000000000000000000020 /* ClientUI.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000010 /* ClientUI.swift */; };
+		B100000000000000000000A2 /* MetalVideoRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100000000000000000000A1 /* MetalVideoRenderer.swift */; };
 		B10000000000000000000012 /* ClientSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000002 /* ClientSession.swift */; };
 		B10000000000000000000013 /* VideoView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000003 /* VideoView.swift */; };
 		B10000000000000000000014 /* ClientAudio.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000004 /* ClientAudio.swift */; };
@@ -25,6 +26,7 @@
 /* Begin PBXFileReference section */
 		B10000000000000000000001 /* ClientApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClientApp.swift; sourceTree = "<group>"; };
 		B10000000000000000000010 /* ClientUI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClientUI.swift; sourceTree = "<group>"; };
+		B100000000000000000000A1 /* MetalVideoRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalVideoRenderer.swift; sourceTree = "<group>"; };
 		B10000000000000000000002 /* ClientSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClientSession.swift; sourceTree = "<group>"; };
 		B10000000000000000000003 /* VideoView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoView.swift; sourceTree = "<group>"; };
 		B10000000000000000000004 /* ClientAudio.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClientAudio.swift; sourceTree = "<group>"; };
@@ -64,6 +66,7 @@
 			children = (
 				B10000000000000000000001 /* ClientApp.swift */,
 				B10000000000000000000010 /* ClientUI.swift */,
+				B100000000000000000000A1 /* MetalVideoRenderer.swift */,
 				B10000000000000000000002 /* ClientSession.swift */,
 				B10000000000000000000003 /* VideoView.swift */,
 				B10000000000000000000004 /* ClientAudio.swift */,
@@ -156,6 +159,7 @@
 			files = (
 				B10000000000000000000011 /* ClientApp.swift in Sources */,
 				B10000000000000000000020 /* ClientUI.swift in Sources */,
+				B100000000000000000000A2 /* MetalVideoRenderer.swift in Sources */,
 				B10000000000000000000012 /* ClientSession.swift in Sources */,
 				B10000000000000000000013 /* VideoView.swift in Sources */,
 				B10000000000000000000014 /* ClientAudio.swift in Sources */,
@@ -202,7 +206,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 6;
+				CURRENT_PROJECT_VERSION = 7;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = WiredDisplay;
@@ -211,9 +215,9 @@
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UIRequiresFullScreen = YES;
 				INFOPLIST_KEY_UIStatusBarHidden = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
-				MARKETING_VERSION = 0.3.3;
+				MARKETING_VERSION = 0.4.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(WD_BUNDLE_PREFIX).client";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -227,7 +231,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 6;
+				CURRENT_PROJECT_VERSION = 7;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = WiredDisplay;
@@ -236,9 +240,9 @@
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UIRequiresFullScreen = YES;
 				INFOPLIST_KEY_UIStatusBarHidden = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
-				MARKETING_VERSION = 0.3.3;
+				MARKETING_VERSION = 0.4.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(WD_BUNDLE_PREFIX).client";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";

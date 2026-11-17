@@ -90,7 +90,7 @@ final class BrightnessKeys {
         if type == .keyDown || type == .keyUp {
             let code = event.getIntegerValueField(.keyboardEventKeycode)
             guard code == Self.brightnessUpKeyCode || code == Self.brightnessDownKeyCode,
-                  controller.brightness != nil else { return Unmanaged.passUnretained(event) }
+                  controller.brightnessKeysTargetIPad else { return Unmanaged.passUnretained(event) }
             if type == .keyDown {
                 let fine = event.flags.contains([.maskAlternate, .maskShift])
                 controller.stepBrightness(up: code == Self.brightnessUpKeyCode, fine: fine)
@@ -104,7 +104,9 @@ final class BrightnessKeys {
         let key = (ns.data1 & 0xFFFF_0000) >> 16
         let isDown = (ns.data1 & 0xFF00) >> 8 == 0x0A
         guard key == Self.brightnessUp || key == Self.brightnessDown else { return Unmanaged.passUnretained(event) }
-        guard controller.brightness != nil else { return Unmanaged.passUnretained(event) } // no iPad: macOS handles it
+        // No iPad, or the pointer is on another display: that display's own
+        // controls (macOS, BetterDisplay, Sidecar) handle it.
+        guard controller.brightnessKeysTargetIPad else { return Unmanaged.passUnretained(event) }
         if isDown {
             let fine = ns.modifierFlags.contains([.option, .shift])
             controller.stepBrightness(up: key == Self.brightnessUp, fine: fine)

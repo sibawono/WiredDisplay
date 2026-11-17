@@ -276,3 +276,11 @@
 **IMPLEMENTATION SUMMARY:** the icon is now just a white iPad in landscape on the blue gradient, like the Sidecar icon (no plug or cable, user request). The Mac icon uses the same artwork inside the macOS squircle (it was still the older screen-and-cable design). The iPad splash/status screen and the Controls header show the icon itself (`AppIconArt` image, written by `make-icons.sh`) instead of an SF Symbol. The menu bar glyph is now an iPad in landscape with its home bar (screen filled while streaming), no plug.
 
 **VERIFIED:** icons rendered and reviewed; iPad build contains `AppIconArt`; host smoke-tested and relaunched.
+
+## CHANGE ID: P1-024 — 0.4.0: ProMotion, coexistence, local cursor, portrait, Metal, several iPads
+
+**FILES CHANGED:** host (`HostController`, `HostFleet`, `CursorEcho`, `VideoEncoder`, `CaptureEngine`, `VirtualDisplayController`, `BrightnessKeys`, `AudioRouter`, `StatusPanel`, `main`), the display shim (serial number), shared (`Messages` protocol 6, `UsbmuxDevice.preferring`), iPad (`VideoView`, `ClientSession`, `ClientApp`, `ClientUI`, new `MetalVideoRenderer`), tests, docs (D-035–D-041), README, guide.
+
+**SUMMARY:** D-036 refresh follows the iPad (120 Hz on ProMotion; standard rate control above 60 fps; the iPad requests a 120 Hz panel); every cabled device is tried, brightness keys follow the pointer, dock audio is not headphones. D-037 latency study (encoder saturated at 3180×2384; periodic keyframes removed; sent→enqueued measurement on the iPad). D-038 local cursor. D-039 portrait. D-040 Metal renderer (default). D-041 one controller per iPad with per-iPad display serials and single audio owner.
+
+**VERIFIED:** unit tests pass; 120 Hz path end to end with `--force-refresh 120` (~119 fps); local cursor, portrait both ways, Metal renderer confirmed by the user on hardware; fleet with one iPad keeps serial 1 and streams normally. Not verified: a real ProMotion iPad; two iPads at once; Sidecar on a second iPad and DisplayLink alongside.

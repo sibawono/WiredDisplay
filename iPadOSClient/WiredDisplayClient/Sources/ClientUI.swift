@@ -321,6 +321,7 @@ struct ControlsContent: View {
     @Binding var speaker: Bool
     @Binding var microphone: Bool
     @Binding var smoothGradients: Bool
+    var metalRenderer: Binding<Bool>? = nil
     let pairedMacs: [PairedMacRow]
     let forgetPaired: () -> Void
     let reconnect: () -> Void
@@ -347,6 +348,10 @@ struct ControlsContent: View {
                     }
                     ToggleRow(symbol: "circle.lefthalf.filled", title: "Smooth gradients",
                               detail: "GPU dithering against banding.", isOn: $smoothGradients)
+                    if let metalRenderer {
+                        ToggleRow(symbol: "bolt.horizontal", title: "Metal renderer",
+                                  detail: "Draws each frame as soon as it is decoded (lower latency). Off: the system video layer.", isOn: metalRenderer)
+                    }
                 }
                 section("Audio") {
                     ToggleRow(symbol: "speaker.wave.2.fill", title: "Mac audio on this iPad", detail: nil, isOn: $speaker)

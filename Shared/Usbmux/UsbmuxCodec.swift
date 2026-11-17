@@ -150,4 +150,14 @@ public struct UsbmuxDevice: Equatable, Sendable {
     public static func wiredOnly(_ devices: [UsbmuxDevice]) -> [UsbmuxDevice] {
         devices.filter { $0.connectionType == .usb }
     }
+
+    /// Order to try several cabled devices in (another iPad on Sidecar, an
+    /// iPhone): the one that ran WiredDisplay last time first, the rest in
+    /// usbmuxd's order.
+    public static func preferring(serial: String?, in devices: [UsbmuxDevice]) -> [UsbmuxDevice] {
+        guard let serial, let index = devices.firstIndex(where: { $0.serialNumber == serial }) else { return devices }
+        var ordered = devices
+        ordered.insert(ordered.remove(at: index), at: 0)
+        return ordered
+    }
 }

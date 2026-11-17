@@ -147,11 +147,20 @@ final class AudioRouter: @unchecked Sendable {
         }
     }
 
+    /// USB audio that belongs to a dock or monitor (DisplayLink docks expose
+    /// one) is not a pair of headphones: plugging in a dock must not move the
+    /// sound away from the iPad (D-036).
+    static func isDisplayOrDock(_ device: AudioDeviceInfo) -> Bool {
+        let name = device.name.lowercased()
+        return ["displaylink", "dock", "display", "monitor", "hdmi", "displayport", "thunderbolt"].contains { name.contains($0) }
+    }
+
     /// Personal listening devices: Bluetooth (AirPods, headphones), USB
     /// (USB-C earphones, headsets, dongles) and the headphone jack. Not
     /// speakers, displays, virtual or aggregate devices.
     private func isHeadphoneOutput(_ device: AudioDeviceInfo) -> Bool {
-        guard device.outputChannels > 0, WiredAudioDevice(rawValue: device.uid) == nil else { return false }
+        guard device.outputChannels > 0, WiredAudioDevice(rawValue: device.uid) == nil,
+              !Self.isDisplayOrDock(device) else { return false }
         switch device.transport {
         case kAudioDeviceTransportTypeBluetooth, kAudioDeviceTransportTypeBluetoothLE, kAudioDeviceTransportTypeUSB:
             return true
@@ -170,7 +179,8 @@ final class AudioRouter: @unchecked Sendable {
     /// shares the UID prefix with a headphone output, or comes and goes in the
     /// same change as one (`among`).
     private func isHeadsetInput(_ device: AudioDeviceInfo, among others: [AudioDeviceInfo]) -> Bool {
-        guard device.inputChannels > 0, WiredAudioDevice(rawValue: device.uid) == nil else { return false }
+        guard device.inputChannels > 0, WiredAudioDevice(rawValue: device.uid) == nil,
+              !Self.isDisplayOrDock(device) else { return false }
         switch device.transport {
         case kAudioDeviceTransportTypeBluetooth, kAudioDeviceTransportTypeBluetoothLE, kAudioDeviceTransportTypeUSB:
             break

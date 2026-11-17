@@ -44,6 +44,102 @@ final class VideoView: UIView, UIPointerInteractionDelegate, UIGestureRecognizer
     }
     var onInput: ((InputEvent) -> Void)?
 
+    /// The stream's frame rate (StreamConfig.refreshHz). Above 60 a display
+    /// link asks iOS to run a ProMotion panel at up to 120 Hz while streaming
+    /// (D-036): video enqueued with "display immediately" carries no frame
+    /// rate, so without it the adaptive panel may stay at 60 Hz.
+    var streamRefreshHz = 0 {
+        didSet { if streamRefreshHz != oldValue { updateRefreshPacer() } }
+    }
+    private var refreshPacer: CADisplayLink?
+
+    // MARK: Metal renderer (D-040, experimental)
+
+    let metalRenderer = MetalVideoRenderer()
+    static let metalRendererKey = "metalRenderer"
+
+    /// Shows the Metal layer over the system display layer when on.
+    var usesMetal = false {
+        didSet {
+            metalRenderer?.layer.isHidden = !usesMetal
+            setNeedsLayout()
+        }
+    }
+
+    // MARK: local cursor (D-038)
+
+    /// The Mac cursor, drawn here from the host's position stream: it moves
+    /// ~1 ms after the Mac pointer instead of with the video (~16 ms later).
+    private let cursorLayer = CALayer()
+    private var cursorShape: (width: CGFloat, height: CGFloat, hotX: CGFloat, hotY: CGFloat)?
+    private var cursorPoint: CGPoint?
+    /// While the iPad's own trackpad moves the pointer, draw it where the
+    /// finger put it and ignore the (slightly older) echo from the Mac.
+    private var localPointerUntil: TimeInterval = 0
+
+    func setCursor(x: Float, y: Float, visible: Bool) {
+        guard ProcessInfo.processInfo.systemUptime >= localPointerUntil else { return }
+        cursorPoint = visible ? CGPoint(x: CGFloat(x), y: CGFloat(y)) : nil
+        layoutCursor()
+    }
+
+    func setCursorImage(png: [UInt8], width: Float, height: Float, hotX: Float, hotY: Float) {
+        guard let image = UIImage(data: Data(png))?.cgImage else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        cursorLayer.contents = image
+        CATransaction.commit()
+        cursorShape = (CGFloat(width), CGFloat(height), CGFloat(hotX), CGFloat(hotY))
+        layoutCursor()
+    }
+
+    private func layoutCursor() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        guard streamSize != nil, let point = cursorPoint, let shape = cursorShape, let mapper else {
+            cursorLayer.isHidden = true
+            return
+        }
+        let picture = mapper.contentRect
+        let width = shape.width * picture.width, height = shape.height * picture.height
+        cursorLayer.frame = CGRect(x: picture.minX + point.x * picture.width - shape.hotX * width,
+                                   y: picture.minY + point.y * picture.height - shape.hotY * height,
+                                   width: width, height: height)
+        cursorLayer.isHidden = false
+    }
+
+    /// Portrait vs landscape of the view, reported when it flips (D-039).
+    var onShapeChange: ((Bool) -> Void)?
+    private var lastPortrait: Bool?
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        metalRenderer?.layout(bounds: bounds, scale: window?.screen.scale ?? 2)
+        layoutCursor()
+        guard bounds.width > 0, bounds.height > 0 else { return }
+        let portrait = bounds.height > bounds.width
+        if portrait != lastPortrait {
+            lastPortrait = portrait
+            onShapeChange?(portrait)
+        }
+    }
+
+    private func updateRefreshPacer() {
+        refreshPacer?.invalidate()
+        refreshPacer = nil
+        guard streamRefreshHz > 60, window != nil else { return }
+        let maximum = Float(window?.screen.maximumFramesPerSecond ?? 60)
+        let link = CADisplayLink(target: self, selector: #selector(refreshPacerTick(_:)))
+        let preferred = min(Float(streamRefreshHz), maximum)
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: min(80, preferred), maximum: preferred, preferred: preferred)
+        link.add(to: .main, forMode: .common)
+        refreshPacer = link
+        ClientLog.write("refresh: stream \(streamRefreshHz) Hz, screen up to \(Int(maximum)) Hz, requested \(Int(preferred)) Hz")
+    }
+
+    @objc private func refreshPacerTick(_ link: CADisplayLink) {}
+
     private var interpreter = TouchInterpreter()
     /// The one direct touch the interpreter follows; other fingers belong to
     /// the multi-finger recognizers.
@@ -65,6 +161,15 @@ final class VideoView: UIView, UIPointerInteractionDelegate, UIGestureRecognizer
         isMultipleTouchEnabled = true
         backgroundColor = .black
         displayLayer.videoGravity = .resizeAspect
+        if let metal = metalRenderer?.layer {
+            metal.isHidden = true
+            metal.zPosition = 5
+            layer.addSublayer(metal)
+        }
+        cursorLayer.isHidden = true
+        cursorLayer.zPosition = 10
+        cursorLayer.magnificationFilter = .linear
+        layer.addSublayer(cursorLayer)
         displayLayer.backgroundColor = UIColor.black.cgColor
         applySmoothGradients()
         let hover = UIHoverGestureRecognizer(target: self, action: #selector(hovered(_:)))
@@ -179,6 +284,7 @@ final class VideoView: UIView, UIPointerInteractionDelegate, UIGestureRecognizer
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
+        updateRefreshPacer()
         if window != nil { becomeFirstResponder() }
     }
 
@@ -383,6 +489,10 @@ final class VideoView: UIView, UIPointerInteractionDelegate, UIGestureRecognizer
         guard streamSize != nil, interpreter.state == .idle, pointerPresses.isEmpty,
               recognizer.state == .began || recognizer.state == .changed,
               let point = normalized(recognizer.location(in: self)) else { return }
+        // Local echo: draw the cursor where the pointer is right now.
+        localPointerUntil = ProcessInfo.processInfo.systemUptime + 0.15
+        cursorPoint = point
+        layoutCursor()
         emit([.pointer(phase: .move, button: .none, x: Float(point.x), y: Float(point.y))])
     }
 

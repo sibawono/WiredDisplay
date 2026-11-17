@@ -26,35 +26,45 @@ final class StatusMenu: NSObject, NSPopoverDelegate {
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let popover = NSPopover()
     private let model = PanelModel()
-    private var controller: HostController?
-    private var state: HostController.State = .waitingForDevice
+    private var fleet: HostFleet?
+    /// The iPad the panel shows (several iPads, D-041).
+    private var controller: HostController? { fleet?.focus }
+    private var state: HostController.State { controller.map { fleet?.state(of: $0) ?? .waitingForDevice } ?? .waitingForDevice }
     private var ticker: Timer?
-    private var brightnessKeys: BrightnessKeys?
+    private var brightnessKeys: [BrightnessKeys] = []
 
-    func attach(_ controller: HostController) {
-        self.controller = controller
+    func attach(_ fleet: HostFleet) {
+        self.fleet = fleet
         item.button?.image = MenuBarGlyph.image(streaming: false)
         item.button?.toolTip = "WiredDisplay"
         item.button?.target = self
         item.button?.action = #selector(togglePanel)
-        model.actions = makeActions(controller)
+        model.actions = makeActions(fleet)
         popover.behavior = .transient
         popover.animates = true
         popover.delegate = self
         popover.contentViewController = NSHostingController(rootView: StatusPanelView(model: model))
-        controller.onBrightnessChange = { [weak self] value in
-            MainActor.assumeIsolated { self?.model.snapshot.brightness = value }
+        fleet.onChange = { [weak self] in MainActor.assumeIsolated { self?.fleetChanged() } }
+        fleet.onControllerAdded = { [weak self] controller in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                controller.onBrightnessChange = { [weak self, weak controller] value in
+                    MainActor.assumeIsolated {
+                        guard let self, let controller, controller === self.controller else { return }
+                        self.model.snapshot.brightness = value
+                    }
+                }
+                // Each iPad's brightness keys act only when the pointer is on it.
+                let keys = BrightnessKeys(controller: controller)
+                keys.start()
+                self.brightnessKeys.append(keys)
+            }
         }
-        let keys = BrightnessKeys(controller: controller)
-        keys.start()
-        brightnessKeys = keys
         refresh()
     }
 
-    func show(_ state: HostController.State) {
-        self.state = state
-        let streaming: Bool
-        if case .streaming = state { streaming = true } else { streaming = false }
+    private func fleetChanged() {
+        let streaming = fleet?.controllers.contains { $0.status.iPadName != nil } ?? false
         item.button?.image = MenuBarGlyph.image(streaming: streaming)
         refresh()
     }
@@ -81,8 +91,21 @@ final class StatusMenu: NSObject, NSPopoverDelegate {
     }
 
     private func refresh() {
-        guard let controller else { return }
-        model.snapshot = Self.snapshot(controller: controller, state: state)
+        guard let controller else {
+            // No cabled device yet: the panel still shows status and settings.
+            var waiting = PanelSnapshot()
+            waiting.accessibility = AXIsProcessTrusted()
+            waiting.screenRecording = CGPreflightScreenCaptureAccess()
+            waiting.openAtLogin = LoginItem.isEnabled
+            waiting.autoSwitchAudio = fleet?.audioRouter.isEnabled ?? true
+            waiting.autoSwitchMicrophone = fleet?.audioRouter.usesHeadsetMicrophone ?? true
+            waiting.version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
+            model.snapshot = waiting
+            return
+        }
+        var snapshot = Self.snapshot(controller: controller, state: state)
+        snapshot.otherIPads = (fleet?.controllers ?? []).filter { $0 !== controller }.compactMap { $0.status.iPadName }
+        model.snapshot = snapshot
     }
 
     static func snapshot(controller: HostController, state: HostController.State) -> PanelSnapshot {
@@ -115,6 +138,8 @@ final class StatusMenu: NSObject, NSPopoverDelegate {
         s.speaker = status.speaker
         s.microphone = status.microphone
         s.autoSwitchAudio = controller.audioRouter.isEnabled
+        s.matchRefresh = controller.refreshFollowsIPad
+        s.localCursor = controller.localCursor
         s.autoSwitchMicrophone = controller.audioRouter.usesHeadsetMicrophone
         s.paired = controller.trust.peers.map { .init(name: $0.name, key: String($0.fingerprint.prefix(8))) }
         if status.iPadName != nil { s.connectionCode = controller.connectionCode.withLock { $0 } }
@@ -124,10 +149,10 @@ final class StatusMenu: NSObject, NSPopoverDelegate {
         return s
     }
 
-    private func makeActions(_ controller: HostController) -> PanelActions {
+    private func makeActions(_ fleet: HostFleet) -> PanelActions {
         var a = PanelActions()
-        a.setBrightness = { controller.setBrightness($0) }
-        a.setQuality = { controller.setQuality($0) }
+        a.setBrightness = { fleet.focus?.setBrightness($0) }
+        a.setQuality = { fleet.setQuality($0) }
         a.setInput = { [weak self] enable in
             if enable && !AXIsProcessTrusted() {
                 // Shows the system prompt that leads to Privacy & Security > Accessibility.
@@ -136,7 +161,7 @@ final class StatusMenu: NSObject, NSPopoverDelegate {
                 let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
                 _ = AXIsProcessTrustedWithOptions(options)
             }
-            controller.setInputEnabled(enable)
+            fleet.setInputEnabled(enable)
             self?.refresh()
         }
         a.setOpenAtLogin = { [weak self] enable in
@@ -144,8 +169,10 @@ final class StatusMenu: NSObject, NSPopoverDelegate {
             if LoginItem.needsApproval { SMAppService.openSystemSettingsLoginItems() }
             self?.refresh()
         }
-        a.setAutoSwitchAudio = { controller.audioRouter.isEnabled = $0 }
-        a.setAutoSwitchMicrophone = { controller.audioRouter.usesHeadsetMicrophone = $0 }
+        a.setAutoSwitchAudio = { fleet.audioRouter.isEnabled = $0 }
+        a.setMatchRefresh = { fleet.setRefreshFollowsIPad($0) }
+        a.setLocalCursor = { fleet.setLocalCursor($0) }
+        a.setAutoSwitchMicrophone = { fleet.audioRouter.usesHeadsetMicrophone = $0 }
         a.openDisplaySettings = { Self.open("x-apple.systempreferences:com.apple.Displays-Settings.extension") }
         a.openSoundSettings = { Self.open("x-apple.systempreferences:com.apple.Sound-Settings.extension") }
         a.openAccessibility = { Self.open("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") }
@@ -174,7 +201,7 @@ final class StatusMenu: NSObject, NSPopoverDelegate {
         NSApp.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         controller?.trust.forgetAllPeers()
-        controller?.forgetDecodeLimits()
+        fleet?.forgetDecodeLimits()
         Log.info("paired iPads forgotten by the user")
         refresh()
     }
@@ -199,7 +226,7 @@ final class StatusMenu: NSObject, NSPopoverDelegate {
 
     private func quit() {
         popover.performClose(nil)
-        controller?.stop()
+        fleet?.stop()
         // Give teardown (release buttons, stop capture, remove display) a moment.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { NSApp.terminate(nil) }
     }
@@ -269,6 +296,11 @@ func parseOptions() -> HostController.Options {
         case "--allow-input": options.allowInput = true
         case "--test-decode-fallback": options.testDecodeFallback = true
         case "--trace-keys": continue // read by BrightnessKeys
+        case "--power-efficient": VideoEncoder.powerEfficient = true
+        case "--periodic-keyframes": VideoEncoder.periodicKeyframes = true
+        case "--force-refresh":
+            guard let fps = Int(value()), (24...120).contains(fps) else { fail("--force-refresh expects 24...120") }
+            options.forceRefresh = fps
         case "--codec":
             switch value() {
             case "h264": options.codec = .h264
@@ -301,6 +333,7 @@ func parseOptions() -> HostController.Options {
         case "--fps":
             guard let fps = Int(value()), (24...120).contains(fps) else { fail("--fps expects 24...120") }
             options.fps = fps
+            options.fpsOverride = fps
         case let other where other.hasPrefix("-psn_"): continue // Finder launch argument
         default: fail("unknown flag \(flag)")
         }
@@ -316,7 +349,7 @@ if let index = CommandLine.arguments.firstIndex(of: "--render-panel"), index + 1
 }
 
 let options = parseOptions()
-Log.info("WiredDisplayHost starting; input \(options.allowInput ? "enabled" : "disabled"), codec \(options.codec.map { "\($0)" } ?? "h264"), \(options.bitrateMbps) Mbit/s, \(options.fps) fps, colour \(options.displayP3 ? "Display P3" : "sRGB")")
+Log.info("WiredDisplayHost starting; input \(options.allowInput ? "enabled" : "disabled"), codec \(options.codec.map { "\($0)" } ?? "h264"), \(options.bitrateMbps) Mbit/s, \(options.fpsOverride.map { "\($0) fps" } ?? "refresh follows the iPad (max 120)"), colour \(options.displayP3 ? "Display P3" : "sRGB")")
 if !CGPreflightScreenCaptureAccess() {
     Log.warn("Screen Recording not granted; requesting (the stream will be black until granted)")
     _ = CGRequestScreenCaptureAccess()
@@ -341,13 +374,12 @@ let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 MainActor.assumeIsolated {
     let menu = StatusMenu()
-    let controller = HostController(options: options, confirmPairing: StatusMenu.confirmPairing) { state in
-        Task { @MainActor in menu.show(state) }
-    }
-    menu.attach(controller)
-    controller.start()
+    // One controller per cabled iPad (D-041).
+    let fleet = HostFleet(options: options, confirmPairing: StatusMenu.confirmPairing)
+    menu.attach(fleet)
+    fleet.start()
     // Keep both alive for the life of the process.
     objc_setAssociatedObject(app, "wd.menu", menu, .OBJC_ASSOCIATION_RETAIN)
-    objc_setAssociatedObject(app, "wd.controller", controller, .OBJC_ASSOCIATION_RETAIN)
+    objc_setAssociatedObject(app, "wd.fleet", fleet, .OBJC_ASSOCIATION_RETAIN)
 }
 app.run()

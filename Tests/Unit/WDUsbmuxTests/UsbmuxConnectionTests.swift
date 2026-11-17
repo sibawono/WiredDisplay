@@ -390,3 +390,17 @@ final class UsbmuxExchangeTests: XCTestCase {
     }
 }
 #endif
+
+final class DevicePreferenceTests: XCTestCase {
+    private func device(_ id: Int, _ serial: String) -> UsbmuxDevice {
+        UsbmuxDevice(deviceID: id, serialNumber: serial, connectionType: .usb)
+    }
+
+    func testLastGoodDeviceIsTriedFirstAndOthersKeepTheirOrder() {
+        let sidecarIPad = device(1, "A"), iPhone = device(2, "B"), ours = device(3, "C")
+        let all = [sidecarIPad, iPhone, ours]
+        XCTAssertEqual(UsbmuxDevice.preferring(serial: "C", in: all).map(\.serialNumber), ["C", "A", "B"])
+        XCTAssertEqual(UsbmuxDevice.preferring(serial: nil, in: all).map(\.serialNumber), ["A", "B", "C"])
+        XCTAssertEqual(UsbmuxDevice.preferring(serial: "gone", in: all).map(\.serialNumber), ["A", "B", "C"])
+    }
+}

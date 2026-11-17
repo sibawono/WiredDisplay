@@ -363,3 +363,16 @@ final class BrightnessTests: XCTestCase {
         XCTAssertThrowsError(try SessionCodec.decodeControl(SessionCodec.encode(.brightness(.nan))))
     }
 }
+
+final class CursorMessageTests: XCTestCase {
+    func testCursorMessagesRoundTripAndAreBounded() throws {
+        XCTAssertEqual(try SessionCodec.decodeControl(SessionCodec.encode(.cursor(x: 0.25, y: 1, visible: true))),
+                       .cursor(x: 0.25, y: 1, visible: true))
+        let image = CursorImage(png: [0x89, 0x50, 0x4E, 0x47], width: 0.012, height: 0.02, hotX: 0.1, hotY: 0.05)
+        XCTAssertEqual(try SessionCodec.decodeControl(SessionCodec.encode(.cursorImage(image))), .cursorImage(image))
+        XCTAssertThrowsError(try SessionCodec.decodeControl(SessionCodec.encode(.cursor(x: 1.5, y: 0, visible: true))))
+        var huge = image
+        huge.png = [UInt8](repeating: 0, count: CursorImage.maxPNGBytes + 1)
+        XCTAssertThrowsError(try SessionCodec.decodeControl(SessionCodec.encode(.cursorImage(huge))))
+    }
+}

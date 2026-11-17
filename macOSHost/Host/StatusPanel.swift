@@ -15,6 +15,8 @@ struct PanelSnapshot {
     var stateText = "Waiting for the iPad on USB"
     var stateColor: Color = .orange
     var connectedFor: String?
+    /// Other iPads streaming at the same time (D-041).
+    var otherIPads: [String] = []
     var looksLike: String?
     var pixels: String?
     var encoding: String?
@@ -27,6 +29,8 @@ struct PanelSnapshot {
     var speaker = false
     var microphone = false
     var autoSwitchAudio = true
+    var matchRefresh = true
+    var localCursor = true
     var autoSwitchMicrophone = true
     var paired: [Paired] = []
     var connectionCode: String?
@@ -41,6 +45,8 @@ struct PanelActions {
     var setInput: (Bool) -> Void = { _ in }
     var setOpenAtLogin: (Bool) -> Void = { _ in }
     var setAutoSwitchAudio: (Bool) -> Void = { _ in }
+    var setMatchRefresh: (Bool) -> Void = { _ in }
+    var setLocalCursor: (Bool) -> Void = { _ in }
     var setAutoSwitchMicrophone: (Bool) -> Void = { _ in }
     var openDisplaySettings: () -> Void = {}
     var openSoundSettings: () -> Void = {}
@@ -119,6 +125,10 @@ struct StatusPanelView: View {
                 }
                 if let connectedFor = s.connectedFor {
                     Text(connectedFor).font(.system(size: 11)).foregroundStyle(.tertiary)
+                }
+                if !s.otherIPads.isEmpty {
+                    Text("Also: " + s.otherIPads.joined(separator: ", ") + " · settings apply to all")
+                        .font(.system(size: 11)).foregroundStyle(.tertiary).lineLimit(1)
                 }
             }
             Spacer(minLength: 0)
@@ -210,6 +220,19 @@ struct StatusPanelView: View {
                     Text(quality.detail).font(.system(size: 11)).foregroundStyle(.tertiary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+            }
+            Card {
+                ToggleLine(title: "Match the iPad's refresh rate",
+                           detail: s.matchRefresh ? "Up to 120 Hz on iPad Pro (ProMotion); 60 Hz on other iPads"
+                               : "Always 60 Hz (less work for the Mac)",
+                           isOn: Binding(get: { s.matchRefresh },
+                                         set: { model.snapshot.matchRefresh = $0; model.actions.setMatchRefresh($0) }))
+                CardDivider()
+                ToggleLine(title: "Draw the cursor on the iPad",
+                           detail: s.localCursor ? "The pointer moves with ~1 ms delay instead of waiting for the video"
+                               : "The cursor is part of the video (as before)",
+                           isOn: Binding(get: { s.localCursor },
+                                         set: { model.snapshot.localCursor = $0; model.actions.setLocalCursor($0) }))
             }
             LinkRow(title: "Display Settings…", symbol: "arrow.up.forward.app", action: model.actions.openDisplaySettings)
         }

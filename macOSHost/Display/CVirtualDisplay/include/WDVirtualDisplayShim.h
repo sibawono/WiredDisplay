@@ -59,6 +59,9 @@ NSError *_Nullable WDVirtualDisplayCheckAvailability(void);
 /// colour to this display. Applied only if the private setters exist with the
 /// expected ABI; otherwise the display stays sRGB (never fails creation).
 @property (nonatomic) BOOL wideColor;
+/// Display serial number; one per iPad so macOS keeps each one's arrangement
+/// and mode apart (D-041). 1 = the original single-iPad identity.
+@property (nonatomic) uint32_t serialNumber;
 @end
 
 /// Owns one virtual display. The display exists while this object is alive and
