@@ -1,0 +1,114 @@
+WiredDisplay 0.1.0 — Panduan Instalasi
+iPad jadi layar Mac lewat kabel USB-C (dengan suara dan input sentuh)
+
+Isi paket
+- WiredDisplay-0.1.0.dmg   → app untuk Mac (host)
+- WiredDisplay-0.1.0.ipa   → app untuk iPad (dipasang lewat AltStore)
+- PANDUAN-INSTALASI.txt    → file ini
+
+Yang dibutuhkan
+- Mac dengan macOS 14 (Sonoma) atau lebih baru; Mac Apple Silicon (M1 ke atas)
+  disarankan.
+- iPad dengan iPadOS 17 atau lebih baru, dan kabel USB-C yang mendukung data
+  (bukan kabel khusus charging).
+- Apple ID gratis (milik kamu sendiri) untuk AltStore.
+
+
+BAGIAN A — Pasang app iPad lewat AltStore
+
+1. Di Mac, unduh AltServer dari situs resminya: https://altstore.io
+   Pasang dan jalankan. AltServer muncul sebagai ikon di menu bar.
+   Ikuti petunjuk di situs itu untuk langkah tambahan di Mac (mis. plug-in Mail),
+   karena langkahnya bisa berubah antar versi.
+
+2. Colokkan iPad ke Mac dengan kabel. Di iPad, ketuk "Trust / Percayai" bila
+   muncul, lalu masukkan kode sandi iPad.
+
+3. Klik ikon AltServer di menu bar → Install AltStore → pilih iPad kamu.
+   Masuk dengan Apple ID kamu. Kata sandi hanya dikirim ke Apple.
+
+4. Di iPad, buka Settings › General › VPN & Device Management, pilih Apple ID
+   kamu, lalu ketuk Trust.
+
+5. Nyalakan Developer Mode: Settings › Privacy & Security › Developer Mode → On.
+   iPad akan restart; setelah menyala, konfirmasi "Turn On".
+
+6. Kirim file WiredDisplay-0.1.0.ipa ke iPad (AirDrop, atau simpan di app Files).
+   Buka AltStore › My Apps › tombol + di kiri atas → pilih file .ipa itu.
+   Tunggu sampai WiredDisplay muncul di layar utama.
+
+Perpanjangan 7 hari (penting)
+- App dari Apple ID gratis berlaku 7 hari. AltStore memperpanjangnya sendiri di
+  latar belakang selama AltServer berjalan di Mac dan iPad bisa menjangkaunya
+  (Wi-Fi yang sama, atau tercolok kabel ke Mac itu).
+- Karena iPad memang tercolok ke Mac untuk WiredDisplay, cukup pastikan
+  AltServer ikut terbuka saat login (menu AltServer › Launch at Login).
+- Pastikan Settings › General › Background App Refresh menyala untuk AltStore.
+- Sesekali buka AltStore › My Apps dan cek sisa harinya. Bila sudah lewat dan
+  app tidak mau terbuka, ketuk "Refresh All". Data app tidak hilang.
+- Batas Apple ID gratis: maksimal 3 app sideload aktif (AltStore memakai 1).
+
+
+BAGIAN B — Pasang app Mac (host)
+
+1. Buka WiredDisplay-0.1.0.dmg. Seret WiredDisplayHost ke folder Applications.
+
+2. Buka WiredDisplayHost. Karena app ini tidak dinotarisasi Apple, macOS akan
+   menolak saat pertama dibuka. Buka System Settings › Privacy & Security,
+   gulir ke bawah, klik "Open Anyway", lalu buka app-nya lagi.
+
+3. App ini hidup di menu bar (ikon layar + USB), tidak ada ikon di Dock.
+   Ia otomatis terbuka setiap login (bisa dimatikan: menu › Open at Login).
+
+4. Beri izin yang diminta:
+   - Screen Recording (wajib) — untuk mengirim gambar layar ke iPad.
+   - Accessibility — hanya bila ingin mengendalikan Mac dari iPad
+     (sentuh, keyboard, trackpad). Lalu nyalakan menu "Allow Input from iPad".
+   - Microphone — hanya untuk mengirim suara Mac ke speaker iPad.
+   Setelah memberi izin Screen Recording, keluar lalu buka lagi app-nya bila
+   diminta.
+
+5. Opsional, suara: buka folder "Audio Driver" di DMG, klik dua kali
+   "Install Audio Driver.command" (minta kata sandi admin Mac kamu). Setelah itu
+   "iPad Speaker" dan "iPad Microphone" muncul di System Settings › Sound.
+   Untuk menghapus: "Uninstall Audio Driver.command".
+
+
+BAGIAN C — Pemakaian pertama
+
+1. Colokkan iPad ke Mac, buka app WiredDisplay di iPad.
+2. Pertama kali terhubung, muncul kode 6 digit di iPad dan di Mac.
+   Pastikan kodenya sama, lalu setujui di kedua sisi. Setelah itu Mac dan iPad
+   saling ingat; tidak perlu pairing lagi.
+3. Layar iPad menjadi layar tambahan Mac. Atur posisinya di
+   System Settings › Displays.
+
+Menu di menu bar Mac
+- "Allow Input from iPad": menyalakan sentuh, Magic Keyboard dan trackpad
+  dari iPad. Default mati; setelah dinyalakan, pilihan ini diingat.
+- Quality: Balanced / Pro (4:2:0 10-bit) / Ultra (4:4:4 10-bit) /
+  High Color (4:4:4 8-bit). Bisa diganti kapan saja.
+- Forget Paired iPads: hapus pairing bila ingin pairing ulang.
+
+Gestur sentuh (bila input dinyalakan)
+- Ketuk = klik · geser 1 jari = scroll · tahan lalu geser = drag/pilih teks
+- Ketuk 2 jari = klik kanan · cubit = zoom
+- Putar 2 jari = rotate
+- 3 jari: cubit masuk = copy, 2× = cut, cubit keluar = paste,
+  geser kiri = undo, geser kanan = redo
+
+Magic Keyboard & trackpad di iPad
+- Trackpad: scroll 2 jari, klik 2 jari = klik kanan, pinch = zoom, putar = rotate.
+- iPadOS mengambil Cmd+Tab, Cmd+Space dan Cmd+Shift+3/4/5, jadi pakai Ctrl:
+  Ctrl+Tab = Cmd+Tab (tahan Ctrl, tekan Tab lagi untuk pindah app)
+  Ctrl+Shift+Tab, Ctrl+` , Ctrl+Space = Spotlight, Ctrl+Shift+3/4/5 = screenshot
+- Ctrl+↑ = Mission Control, Ctrl+←/→ = pindah Space.
+- Daftar lengkap ada di app iPad: tombol Controls › Keyboard & trackpad.
+
+Bila tidak tersambung
+- Layar iPad menunjukkan langkah yang sedang ditunggu.
+- Setelah Mac restart, terkadang iPad tidak terdeteksi lewat USB sampai kabel
+  dicabut ±10 detik lalu dicolok lagi. Ini perilaku USB-C di macOS, bukan
+  kerusakan.
+- Cek kabel (harus kabel data) dan pastikan app di iPad sedang terbuka.
+- App hanya bekerja lewat kabel; tidak ada mode Wi-Fi.

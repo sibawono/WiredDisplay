@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>WiredDisplay test pattern</title>
+<style>
+  :root { color-scheme: light; }
+  body { margin: 0; font-family: -apple-system, "Helvetica Neue", sans-serif; background: #fff; color: #111; }
+  header { padding: 14px 20px; background: #111; color: #fff; display: flex; justify-content: space-between; align-items: center; }
+  header b { font-size: 18px; }
+  #fps { font: 600 16px ui-monospace, Menlo, monospace; }
+  main { display: grid; grid-template-columns: 1.2fr 1fr; gap: 18px; padding: 18px 20px; }
+  section { border: 1px solid #ccc; border-radius: 8px; padding: 12px 14px; }
+  h2 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: #666; }
+  .t9{font-size:9px}.t11{font-size:11px}.t13{font-size:13px}.t16{font-size:16px}.t20{font-size:20px}.t28{font-size:28px}
+  .lines { height: 120px; background: repeating-linear-gradient(90deg, #000 0 1px, #fff 1px 2px); }
+  .hlines { height: 60px; background: repeating-linear-gradient(0deg, #000 0 1px, #fff 1px 2px); margin-top: 6px; }
+  .swatches { display: grid; grid-template-columns: repeat(8, 1fr); gap: 4px; }
+  .swatches div { height: 34px; border-radius: 4px; }
+  .grad { height: 34px; margin-top: 6px; background: linear-gradient(90deg, #000, #fff); border-radius: 4px; }
+  .track { position: relative; height: 90px; background: #f2f2f2; border-radius: 8px; overflow: hidden; }
+  .ball { position: absolute; top: 15px; width: 60px; height: 60px; border-radius: 50%; background: #e2373f; }
+  .ticker { font: 600 22px ui-monospace, Menlo, monospace; white-space: nowrap; }
+  .red{color:#d00}.blue{color:#0047d6}
+</style></head>
+<body>
+<header><b>WiredDisplay test pattern</b><span id="fps">— fps</span></header>
+<main>
+  <section>
+    <h2>Text sharpness</h2>
+    <p class="t9">9 px — The quick brown fox jumps over the lazy dog 0123456789 il1| O0 rn m</p>
+    <p class="t11">11 px — The quick brown fox jumps over the lazy dog 0123456789 il1| O0 rn m</p>
+    <p class="t13">13 px — The quick brown fox jumps over the lazy dog 0123456789 il1| O0 rn m</p>
+    <p class="t16">16 px — The quick brown fox jumps over the lazy dog</p>
+    <p class="t20 red">20 px red on white — chroma edges</p>
+    <p class="t20 blue">20 px blue on white — chroma edges</p>
+    <p class="t28">28 px — Aa Bb Gg Qq @#&amp;</p>
+  </section>
+  <section>
+    <h2>Fine lines (1 px)</h2>
+    <div class="lines"></div><div class="hlines"></div>
+    <h2 style="margin-top:12px">Colour</h2>
+    <div class="swatches">
+      <div style="background:#ff0000"></div><div style="background:#00ff00"></div><div style="background:#0000ff"></div><div style="background:#ffff00"></div>
+      <div style="background:#ff00ff"></div><div style="background:#00ffff"></div><div style="background:color(display-p3 1 0 0)"></div><div style="background:color(display-p3 0 1 0)"></div>
+    </div>
+    <div class="grad"></div>
+  </section>
+  <section style="grid-column: 1 / -1">
+    <h2>Motion (should glide smoothly, no stutter)</h2>
+    <div class="track"><div class="ball" id="ball"></div></div>
+    <p class="ticker" id="ticker">00:00.000</p>
+  </section>
+</main>
+<script>
+  const ball = document.getElementById('ball'), ticker = document.getElementById('ticker'), fps = document.getElementById('fps');
+  let frames = 0, last = performance.now(), start = last;
+  function tick(now) {
+    const track = ball.parentElement.clientWidth - 60;
+    const x = (Math.sin((now - start) / 700) * 0.5 + 0.5) * track;
+    ball.style.transform = `translateX(${x}px)`;
+    const t = (now - start) / 1000;
+    ticker.textContent = `${String(Math.floor(t / 60)).padStart(2, '0')}:${(t % 60).toFixed(3).padStart(6, '0')}`;
+    frames++;
+    if (now - last >= 1000) { fps.textContent = `${frames} fps (Mac render)`; frames = 0; last = now; }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+</script>
+</body></html>
