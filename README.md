@@ -6,7 +6,7 @@
 
 <p align="center">
   Turn an iPad into a wired USB‑C display for your Mac, with sound, touch, keyboard and trackpad.<br>
-  Built for a headless Mac mini with an iPad Air 13″ (M2) as its only screen.
+  Adapts to any iPad on iPadOS 17 or later, and can even be the only screen of a headless Mac.
 </p>
 
 ---
