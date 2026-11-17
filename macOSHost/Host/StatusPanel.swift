@@ -26,6 +26,7 @@ struct PanelSnapshot {
     var screenRecording = false
     var speaker = false
     var microphone = false
+    var autoSwitchAudio = true
     var paired: [Paired] = []
     var connectionCode: String?
     var openAtLogin = false
@@ -38,6 +39,7 @@ struct PanelActions {
     var setQuality: (QualityPreset) -> Void = { _ in }
     var setInput: (Bool) -> Void = { _ in }
     var setOpenAtLogin: (Bool) -> Void = { _ in }
+    var setAutoSwitchAudio: (Bool) -> Void = { _ in }
     var openDisplaySettings: () -> Void = {}
     var openSoundSettings: () -> Void = {}
     var openAccessibility: () -> Void = {}
@@ -245,6 +247,12 @@ struct StatusPanelView: View {
                            detail: "Input device “iPad Microphone”", on: s.microphone)
                 Text("Turn these on or off in the WiredDisplay app on the iPad.")
                     .font(.system(size: 11)).foregroundStyle(.tertiary)
+            }
+            Card {
+                ToggleLine(title: "Switch to headphones automatically",
+                           detail: "AirPods, Bluetooth, USB-C earphones: sound and mic move to them, and back to the iPad when they disconnect",
+                           isOn: Binding(get: { s.autoSwitchAudio },
+                                         set: { model.snapshot.autoSwitchAudio = $0; model.actions.setAutoSwitchAudio($0) }))
             }
             LinkRow(title: "Sound Settings…", symbol: "arrow.up.forward.app", action: model.actions.openSoundSettings)
         }

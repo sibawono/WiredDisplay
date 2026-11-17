@@ -252,3 +252,11 @@
 **IMPLEMENTATION SUMMARY:** the NSMenu becomes an NSPopover with a SwiftUI panel: header (icon, status dot, connected time), icon tab bar (Display, Input, Audio, Security, General) over cards: resolution and codec, a full-width brightness slider, quality chips with descriptions, the input switch and shortcut list, audio status, the connection code and paired iPads, permissions with Grant buttons, Open at Login; footer Show Log and Quit. The host keeps a `SessionStatus` snapshot for it. `--render-panel <dir>` renders every tab (light and dark) to PNG for review. The brightness key tap moved to the HID level and also handles key codes 144/145; `--trace-keys` logs system-defined events and function keys (never letters or digits) for 10 minutes.
 
 **VERIFIED:** panel rendered and reviewed in light and dark; on hardware the user confirmed the panel and that the ProtoArc K90 brightness keys now change the iPad's real brightness. **Incident:** while adding `--trace-keys` the host briefly rejected the new flag at launch (unknown option) and the iPad display was down for about 6 minutes; the parser now accepts it.
+
+## CHANGE ID: P1-021 — Automatic headphone switching (D-034)
+
+**FILES CHANGED:** `macOSHost/Host/{AudioRouter,HostController,StatusPanel,main}.swift`; `Shared/MacAudio/AudioDevices.swift`; `docs/{DECISIONS,CHANGELOG}.md`.
+
+**IMPLEMENTATION SUMMARY:** `AudioRouter` listens for device-list changes and sets the default output/input on transitions only (headphones in: to them; out: back to the iPad devices if the iPad has that direction on; iPad direction on with no headphones: to the iPad). Headset microphones published as separate input-only devices (AirPods "<address>:input", USB-C "Headset") are paired by UID prefix or by arriving/leaving with a headphone output of the same transport. Panel Audio tab: "Switch to headphones automatically" (default on).
+
+**VERIFIED (hardware):** USB-C "CtoL Audio" plugged in → output CtoL Audio and input its "Headset" mic; unplugged → iPad Speaker / iPad Microphone. AirPods 4 connected → output AirPods; disconnected → iPad Speaker.

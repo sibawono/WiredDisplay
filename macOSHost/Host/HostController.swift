@@ -275,7 +275,11 @@ final class HostController: @unchecked Sendable {
         }
     }
 
+    /// Headphones in, iPad out (D-034).
+    let audioRouter = AudioRouter()
+
     func start() {
+        audioRouter.start()
         Thread.detachNewThread { [self] in runLoop() }
     }
 
@@ -441,6 +445,7 @@ final class HostController: @unchecked Sendable {
             lastHeard = Date()
             iPadBrightness.withLock { $0 = nil }
             sessionStatus.withLock { $0 = SessionStatus() }
+            audioRouter.iPadRoute(speaker: false, microphone: false)
         }
         while helloArrived.wait(timeout: .now()) == .success {} // drain stale signals
         socket.start()
@@ -788,6 +793,7 @@ final class HostController: @unchecked Sendable {
             socket.close("protocol error: unexpected \(message) from client")
         case .audioRoute(let speaker, let microphone):
             sessionStatus.withLock { $0.speaker = speaker; $0.microphone = microphone }
+            audioRouter.iPadRoute(speaker: speaker, microphone: microphone)
             guard let audio else { return }
             Log.info("audio route from iPad: speaker \(speaker), microphone \(microphone)")
             audioQueue.async {

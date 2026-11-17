@@ -68,6 +68,9 @@ monitor attached.
   refresh rate and hardware HEVC support, and the Mac builds the display to
   match. The iPad's Controls panel shows the same details under **This iPad**,
   including the model identifier.
+- **Automatic headphone switching.** When AirPods, Bluetooth headphones or
+  USB-C earphones connect, sound and the microphone move to them. When they
+  disconnect, everything goes back to the iPad.
 - **Real iPad brightness.** The Mac's brightness keys and a slider in the menu
   bar panel set the iPad's actual backlight instead of dimming the picture.
   This works with Apple keyboards and third-party keyboards.

@@ -114,6 +114,7 @@ final class StatusMenu: NSObject, NSPopoverDelegate {
         s.screenRecording = CGPreflightScreenCaptureAccess()
         s.speaker = status.speaker
         s.microphone = status.microphone
+        s.autoSwitchAudio = controller.audioRouter.isEnabled
         s.paired = controller.trust.peers.map { .init(name: $0.name, key: String($0.fingerprint.prefix(8))) }
         if status.iPadName != nil { s.connectionCode = controller.connectionCode.withLock { $0 } }
         s.openAtLogin = LoginItem.isEnabled
@@ -142,6 +143,7 @@ final class StatusMenu: NSObject, NSPopoverDelegate {
             if LoginItem.needsApproval { SMAppService.openSystemSettingsLoginItems() }
             self?.refresh()
         }
+        a.setAutoSwitchAudio = { controller.audioRouter.isEnabled = $0 }
         a.openDisplaySettings = { Self.open("x-apple.systempreferences:com.apple.Displays-Settings.extension") }
         a.openSoundSettings = { Self.open("x-apple.systempreferences:com.apple.Sound-Settings.extension") }
         a.openAccessibility = { Self.open("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") }

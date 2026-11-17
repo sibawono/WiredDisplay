@@ -23,6 +23,8 @@ public struct AudioDeviceInfo: Sendable, Equatable {
     public var uid: String
     public var inputChannels: Int
     public var outputChannels: Int
+    /// kAudioDeviceTransportType… (Bluetooth, USB, BuiltIn, Virtual, …).
+    public var transport: UInt32 = 0
 }
 
 public enum AudioDevices {
@@ -53,7 +55,8 @@ public enum AudioDevices {
             AudioDeviceInfo(id: id, name: string(id, kAudioObjectPropertyName) ?? "?",
                             uid: string(id, kAudioDevicePropertyDeviceUID) ?? "?",
                             inputChannels: channels(id, scope: kAudioObjectPropertyScopeInput),
-                            outputChannels: channels(id, scope: kAudioObjectPropertyScopeOutput))
+                            outputChannels: channels(id, scope: kAudioObjectPropertyScopeOutput),
+                            transport: uint(id, kAudioDevicePropertyTransportType))
         }
     }
 
@@ -96,6 +99,42 @@ public enum AudioDevices {
         var size = UInt32(MemoryLayout<UInt32>.size)
         _ = AudioObjectGetPropertyData(device, &address, 0, nil, &size, &actual)
         return actual
+    }
+
+    /// The system default output (`input: false`) or input device.
+    public static func defaultDevice(input: Bool) -> AudioDeviceID {
+        uint(AudioObjectID(kAudioObjectSystemObject),
+             input ? kAudioHardwarePropertyDefaultInputDevice : kAudioHardwarePropertyDefaultOutputDevice)
+    }
+
+    @discardableResult
+    public static func setDefaultDevice(_ device: AudioDeviceID, input: Bool) -> Bool {
+        var address = AudioObjectPropertyAddress(
+            mSelector: input ? kAudioHardwarePropertyDefaultInputDevice : kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var id = device
+        return AudioObjectSetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil,
+                                          UInt32(MemoryLayout<AudioDeviceID>.size), &id) == noErr
+    }
+
+    /// The built-in output's current data source is the headphone jack.
+    public static func isHeadphoneJack(_ id: AudioDeviceID) -> Bool {
+        var address = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyDataSource,
+                                                 mScope: kAudioObjectPropertyScopeOutput,
+                                                 mElement: kAudioObjectPropertyElementMain)
+        var source: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        guard AudioObjectGetPropertyData(id, &address, 0, nil, &size, &source) == noErr else { return false }
+        return source == 0x6864_706E // 'hdpn'
+    }
+
+    private static func uint(_ id: AudioObjectID, _ selector: AudioObjectPropertySelector) -> UInt32 {
+        var address = AudioObjectPropertyAddress(mSelector: selector, mScope: kAudioObjectPropertyScopeGlobal,
+                                                 mElement: kAudioObjectPropertyElementMain)
+        var value: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        guard AudioObjectGetPropertyData(id, &address, 0, nil, &size, &value) == noErr else { return 0 }
+        return value
     }
 
     private static func string(_ id: AudioObjectID, _ selector: AudioObjectPropertySelector) -> String? {
