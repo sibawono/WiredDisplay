@@ -5,9 +5,10 @@ import WDMacAudio
 import WDSession
 
 /// Bridges the WiredDisplayAudio loopback devices and the session (D-017):
-/// - speaker: record "iPad Speaker" (what Mac apps play) via a CoreAudio IOProc
+/// - speaker: record "iPad Speaker Tap" (what Mac apps play into "iPad Speaker") via a CoreAudio IOProc
 ///   -> one PCM packet per ~5 ms IO cycle -> iPad
-/// - microphone: iPad PCM packets -> jitter buffer -> play into "iPad Microphone"
+/// - microphone: iPad PCM packets -> jitter buffer -> play into "iPad Microphone Feed",
+///   which apps record as "iPad Microphone" (D-032)
 ///
 /// Each direction starts and stops alone.
 /// Recording the loopback input needs the Microphone permission (TCC) for this
@@ -47,7 +48,7 @@ final class HostAudioBridge: @unchecked Sendable {
 
     func startSpeaker() throws {
         guard speakerProc == nil else { return }
-        let device = try AudioDevices.find(.speaker)
+        let device = try AudioDevices.find(.speakerTap)
         let frames = AudioDevices.setBufferFrameSize(device, frames: Self.ioBufferFrames)
         let send = send
         let ioCalls = OSAllocatedUnfairLock(initialState: 0)
@@ -119,7 +120,7 @@ final class HostAudioBridge: @unchecked Sendable {
 
     func startMicrophone() throws {
         guard microphoneEngine == nil else { return }
-        let device = try AudioDevices.find(.microphone)
+        let device = try AudioDevices.find(.microphoneFeed)
         let engine = AVAudioEngine()
         try AudioDevices.bind(engine.outputNode, to: device)
         AudioDevices.setBufferFrameSize(device, frames: Self.ioBufferFrames)

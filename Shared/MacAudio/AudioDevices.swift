@@ -3,12 +3,18 @@ import AVFoundation
 import CoreAudio
 import Foundation
 
-/// The two loopback devices published by WiredDisplayAudio.driver (D-017).
+/// The devices published by WiredDisplayAudio.driver (D-017, D-032): two
+/// loopback channels, each split into a visible one-way device for apps and a
+/// hidden one for the host, so apps cannot pick them the wrong way round.
 public enum WiredAudioDevice: String, CaseIterable, Sendable {
-    /// Apps play here; the host records its loopback input and sends it to the iPad.
+    /// Output only, visible: apps play here.
     case speaker = "dev.wireddisplay.audio.speaker"
-    /// The host plays iPad microphone audio here; apps record its loopback input.
+    /// Input only, hidden: the host records what apps played into `speaker`.
+    case speakerTap = "dev.wireddisplay.audio.speaker.tap"
+    /// Input only, visible: apps record the iPad microphone here.
     case microphone = "dev.wireddisplay.audio.microphone"
+    /// Output only, hidden: the host plays iPad microphone audio here.
+    case microphoneFeed = "dev.wireddisplay.audio.microphone.feed"
 }
 
 public struct AudioDeviceInfo: Sendable, Equatable {
@@ -51,11 +57,20 @@ public enum AudioDevices {
         }
     }
 
+    /// By UID, which also finds hidden devices (they are not in `all()`).
     public static func find(_ device: WiredAudioDevice) throws -> AudioDeviceID {
-        guard let info = all().first(where: { $0.uid == device.rawValue }) else {
-            throw Error.notInstalled(device.rawValue)
+        var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyTranslateUIDToDevice,
+                                                 mScope: kAudioObjectPropertyScopeGlobal,
+                                                 mElement: kAudioObjectPropertyElementMain)
+        var uid = device.rawValue as CFString
+        var id = AudioDeviceID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        let status = withUnsafePointer(to: &uid) { uidPointer in
+            AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address,
+                                       UInt32(MemoryLayout<CFString>.size), uidPointer, &size, &id)
         }
-        return info.id
+        guard status == noErr, id != kAudioObjectUnknown else { throw Error.notInstalled(device.rawValue) }
+        return id
     }
 
     /// Points an AVAudioEngine's input or output node at a specific device.

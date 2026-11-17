@@ -224,3 +224,13 @@
 **IMPLEMENTATION SUMMARY:** D-031. Protocol 3: `Hello.pixelsPerInch`, `ControlMessage.decodeFailed`. iPad: HEVC advertised only with hardware decode; renderer failures counted and reported. Host: per-iPad `DecodeLimits`, effective quality = preset within limits, live encoder restart, menu note, `--test-decode-fallback` diagnostic flag; display physical size from the reported ppi.
 
 **VERIFIED:** 3 new unit tests pass. On hardware, `--test-decode-fallback` stepped 4:2:0 10-bit down to 8-bit with video continuing; limits reset and normal launch back at 10-bit. Not verified: an iPad that really fails to decode; iPad mini sizing.
+
+## CHANGE ID: P1-018 — One-way audio devices (D-032)
+
+**OBJECTIVE:** Make it impossible for call apps to pick the WiredDisplay audio devices the wrong way round (Google Meet report: no audio either way).
+
+**FILES CHANGED:** `MacVirtualDevices/AudioDriver/WiredDisplayAudio.c`; `Shared/MacAudio/AudioDevices.swift`; `macOSHost/Host/HostAudioBridge.swift`; `macOSHost/Probes/wd-audio-probe/main.swift`; `docs/{DECISIONS,CHANGELOG}.md`.
+
+**IMPLEMENTATION SUMMARY:** the driver's ring buffer and timing move into a shared `LoopbackChannel`; four devices (two visible one-way, two hidden one-way) point at the two channels. `AudioDevices.find` translates UIDs (works for hidden devices). The host records "iPad Speaker Tap" and plays into "iPad Microphone Feed". The probe tests each channel end to end.
+
+**VERIFIED:** both loopback probes pass; device list correct; host bridges start on the taps. Diagnosis before the change: measured on hardware that the Mac side delivered the iPad microphone at −8 dBFS into "iPad Microphone" and nothing leaked into "iPad Speaker". Google Meet call (browser on iPad Microphone / iPad Speaker) confirmed working both ways by the user.

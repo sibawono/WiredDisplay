@@ -33,24 +33,37 @@ func fail(_ message: String, code: Int32 = 1) -> Never {
 }
 
 let arguments = Array(CommandLine.arguments.dropFirst())
+
+/// The channel's write side (output) and read side (input), D-032.
+func channel(_ name: String) -> (output: WiredAudioDevice, input: WiredAudioDevice)? {
+    switch name {
+    case "speaker": return (.speaker, .speakerTap)
+    case "microphone": return (.microphoneFeed, .microphone)
+    default: return nil
+    }
+}
 switch arguments.first {
 case "list":
     for device in AudioDevices.all() {
         let mark = WiredAudioDevice(rawValue: device.uid) != nil ? "  <-- WiredDisplay" : ""
         print("id=\(device.id) in=\(device.inputChannels) out=\(device.outputChannels) \(device.name) [\(device.uid)]\(mark)")
     }
+    for hidden in [WiredAudioDevice.speakerTap, .microphoneFeed] {
+        print("hidden \(hidden.rawValue): " + ((try? AudioDevices.find(hidden)).map { "id=\($0)" } ?? "not installed"))
+    }
 case "loopback":
-    guard arguments.count == 2, let which = WiredAudioDevice.allCases.first(where: { "\($0)" == arguments[1] }) else {
+    guard arguments.count == 2, let which = channel(arguments[1]) else {
         fail("usage: wd-audio-probe loopback speaker|microphone", code: 64)
     }
-    let deviceID: AudioDeviceID
-    do { deviceID = try AudioDevices.find(which) } catch { fail("\(error)", code: 2) }
+    let outputID: AudioDeviceID, inputID: AudioDeviceID
+    do { outputID = try AudioDevices.find(which.output); inputID = try AudioDevices.find(which.input) }
+    catch { fail("\(error)", code: 2) }
 
     let player = AVAudioEngine()
     let recorder = AVAudioEngine()
     do {
-        try AudioDevices.bind(player.outputNode, to: deviceID)
-        try AudioDevices.bind(recorder.inputNode, to: deviceID)
+        try AudioDevices.bind(player.outputNode, to: outputID)
+        try AudioDevices.bind(recorder.inputNode, to: inputID)
     } catch { fail("\(error)", code: 3) }
 
     let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2)!
@@ -65,7 +78,7 @@ case "loopback":
     }
     let capture = Capture()
     let inputFormat = recorder.inputNode.inputFormat(forBus: 0)
-    print("device \(deviceID) input format: \(inputFormat)")
+    print("devices \(outputID) -> \(inputID) input format: \(inputFormat)")
     recorder.inputNode.installTap(onBus: 0, bufferSize: 4800, format: inputFormat) { buffer, _ in
         guard let channel = buffer.floatChannelData?[0] else { return }
         let chunk = Array(UnsafeBufferPointer(start: channel, count: Int(buffer.frameLength)))
@@ -95,11 +108,11 @@ case "loopback":
 case "level":
     // Records the device INPUT for 5 s and prints the level every 0.5 s, e.g.
     // to see the iPad microphone arriving in "iPad Microphone".
-    guard arguments.count == 2, let which = WiredAudioDevice.allCases.first(where: { "\($0)" == arguments[1] }) else {
+    guard arguments.count == 2, let which = channel(arguments[1]) else {
         fail("usage: wd-audio-probe level speaker|microphone", code: 64)
     }
     let deviceID: AudioDeviceID
-    do { deviceID = try AudioDevices.find(which) } catch { fail("\(error)", code: 2) }
+    do { deviceID = try AudioDevices.find(which.input) } catch { fail("\(error)", code: 2) }
     let recorder = AVAudioEngine()
     do { try AudioDevices.bind(recorder.inputNode, to: deviceID) } catch { fail("\(error)", code: 3) }
     final class Meter: @unchecked Sendable { let lock = NSLock(); var sum: Float = 0; var count = 0; var peak: Float = 0 }
