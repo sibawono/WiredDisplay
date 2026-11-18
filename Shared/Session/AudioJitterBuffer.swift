@@ -9,11 +9,18 @@ import os
 /// - Starts output only after `targetFrames` are buffered (prebuffer), plays
 ///   silence on underrun and re-prebuffers, and drops the oldest audio when
 ///   more than `maxFrames` pile up, so latency stays bounded.
+/// - Clock drift (Mac and iPad audio clocks differ by tens of ppm): when the
+///   level leaves a band around the target, one frame per pull is skipped
+///   (too full) or repeated (too empty) until it is back near the target.
+///   Measured before (client.log): latency wandered 19-84 ms and a slow
+///   drain ended in an underrun (30 ms gap, click) about every 10 minutes.
 public final class AudioJitterBuffer: @unchecked Sendable {
     public struct Stats: Sendable, Equatable {
         public var underruns = 0
         public var droppedFrames = 0
         public var bufferedFrames = 0
+        /// Frames skipped or repeated for drift correction.
+        public var driftCorrections = 0
     }
 
     public let channels: Int
@@ -26,9 +33,14 @@ public final class AudioJitterBuffer: @unchecked Sendable {
         var count = 0       // frames buffered
         var playing = false
         var stats = Stats()
+        /// +1 skipping (too full), -1 repeating (too empty), 0 none.
+        var correcting = 0
     }
 
     private let capacity: Int
+    /// Drift band: correct above `high` or below `low`, stop once within
+    /// `settle` of the target.
+    private let high: Int, low: Int, settle: Int
     private let state: OSAllocatedUnfairLock<State>
 
     public init(channels: Int, targetFrames: Int, maxFrames: Int) {
@@ -37,6 +49,9 @@ public final class AudioJitterBuffer: @unchecked Sendable {
         self.targetFrames = targetFrames
         self.maxFrames = maxFrames
         capacity = maxFrames + SessionConstants.maxAudioFramesPerPacket
+        high = targetFrames + max(targetFrames / 3, 1)
+        low = targetFrames / 2
+        settle = max(targetFrames / 12, 1)
         state = OSAllocatedUnfairLock(initialState: State(ring: [Float](repeating: 0, count: capacity * channels)))
     }
 
@@ -47,6 +62,7 @@ public final class AudioJitterBuffer: @unchecked Sendable {
             $0.readIndex = 0
             $0.count = 0
             $0.playing = false
+            $0.correcting = 0
         }
     }
 
@@ -81,25 +97,55 @@ public final class AudioJitterBuffer: @unchecked Sendable {
         // Unchecked: the closure runs synchronously under the lock; the raw
         // output pointers never escape it.
         state.withLockUnchecked { s in
-            var produced = 0
-            if s.playing {
-                produced = min(frames, s.count)
-                for frame in 0..<produced {
-                    let read = (s.readIndex + frame) % capacity
-                    for (index, buffer) in buffers.enumerated() {
-                        buffer[frame] = s.ring[read * channels + min(index, channels - 1)]
-                    }
-                }
-                s.readIndex = (s.readIndex + produced) % capacity
-                s.count -= produced
-                if produced < frames {
-                    s.playing = false // re-prebuffer before resuming
-                    s.stats.underruns += 1
+            fill(&s, count: buffers.count, frames: frames) { buffers[$0] }
+        }
+    }
+
+    /// Same as `pull(into:frames:)` for up to two output channels, without
+    /// building an array: for render callbacks, which must not allocate.
+    public func pull(_ first: UnsafeMutablePointer<Float>?, _ second: UnsafeMutablePointer<Float>?, frames: Int) {
+        let count = first == nil ? 0 : second == nil ? 1 : 2
+        guard count > 0 else { return }
+        state.withLockUnchecked { s in
+            fill(&s, count: count, frames: frames) { $0 == 0 ? first! : second! }
+        }
+    }
+
+    private func fill(_ s: inout State, count outputs: Int, frames: Int,
+                      buffer: (Int) -> UnsafeMutablePointer<Float>) {
+        var produced = 0
+        if s.playing {
+            // Drift correction: at most one frame per pull, so it is inaudible.
+            if s.count > high { s.correcting = 1 } else if s.count < low { s.correcting = -1 }
+            else if abs(s.count - targetFrames) <= settle { s.correcting = 0 }
+            let repeatLast = s.correcting < 0 && frames > 1 && s.count > 0
+            let wanted = repeatLast ? frames - 1 : frames
+            produced = min(wanted, s.count)
+            for frame in 0..<produced {
+                let read = (s.readIndex + frame) % capacity
+                for index in 0..<outputs {
+                    buffer(index)[frame] = s.ring[read * channels + min(index, channels - 1)]
                 }
             }
-            for buffer in buffers where produced < frames {
-                (buffer + produced).update(repeating: 0, count: frames - produced)
+            s.readIndex = (s.readIndex + produced) % capacity
+            s.count -= produced
+            if repeatLast, produced == wanted, produced > 0 {
+                for index in 0..<outputs { buffer(index)[produced] = buffer(index)[produced - 1] }
+                produced += 1
+                s.stats.driftCorrections += 1
+            } else if s.correcting > 0, s.count > 1 {
+                s.readIndex = (s.readIndex + 1) % capacity // skip one frame
+                s.count -= 1
+                s.stats.driftCorrections += 1
             }
+            if produced < frames {
+                s.playing = false // re-prebuffer before resuming
+                s.correcting = 0
+                s.stats.underruns += 1
+            }
+        }
+        for index in 0..<outputs where produced < frames {
+            (buffer(index) + produced).update(repeating: 0, count: frames - produced)
         }
     }
 }

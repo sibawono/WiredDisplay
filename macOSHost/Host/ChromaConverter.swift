@@ -1,0 +1,130 @@
+import CoreVideo
+import Foundation
+import Metal
+
+/// BGRA -> 4:2:0 (8- or 10-bit, BT.709 video range) on the GPU, with a
+/// filtered chroma downsample.
+///
+/// VTPixelTransferSession point-samples chroma (measured: a 1-pixel red line
+/// on an odd column lost its colour completely, on an even column it kept all
+/// of it), so coloured text edges in the 4:2:0 lanes looked ragged. Here each
+/// chroma sample is a [1 2 1]/4 horizontal filter centred on the even column
+/// (left-sited, the HEVC default the iPad renderer assumes) averaged over its
+/// two rows (vertically centred).
+///
+/// Colour maths match the VideoToolbox path it replaces: matrix only, the
+/// source's sRGB-encoded values kept as they are (no gamma change), BT.709
+/// coefficients, video range.
+final class ChromaConverter: @unchecked Sendable {
+    let tenBit: Bool
+    private let device: MTLDevice
+    private let queue: MTLCommandQueue
+    private let pipeline: MTLComputePipelineState
+    private var cache: CVMetalTextureCache?
+    private var conversions = 0
+
+    init?(tenBit: Bool) {
+        guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue() else { return nil }
+        let source = """
+        #include <metal_stdlib>
+        using namespace metal;
+
+        // BT.709, video range, on gamma-encoded RGB. Returns codes in 0...1
+        // of the full 8/10-bit scale (Y 16..235, C 16..240 in 8-bit terms).
+        static float lumaOf(float3 rgb) { return dot(rgb, float3(0.2126, 0.7152, 0.0722)); }
+
+        kernel void convert(texture2d<float, access::read> src [[texture(0)]],
+                            texture2d<float, access::write> luma [[texture(1)]],
+                            texture2d<float, access::write> chroma [[texture(2)]],
+                            constant uint &tenBit [[buffer(0)]],
+                            uint2 gid [[thread_position_in_grid]]) {
+            uint cw = chroma.get_width(), ch = chroma.get_height();
+            if (gid.x >= cw || gid.y >= ch) return;
+            int w = int(src.get_width()), h = int(src.get_height());
+            int x0 = int(gid.x) * 2, y0 = int(gid.y) * 2;
+            float3 sum = float3(0);
+            float weight = 0;
+            for (int dy = 0; dy < 2; dy++) {
+                int y = min(y0 + dy, h - 1);
+                // [1 2 1] centred on the even column (left-sited chroma).
+                for (int dx = -1; dx <= 1; dx++) {
+                    int x = clamp(x0 + dx, 0, w - 1);
+                    float3 rgb = src.read(uint2(x, y)).rgb;
+                    float k = dx == 0 ? 2.0 : 1.0;
+                    sum += rgb * k;
+                    weight += k;
+                    if (dx >= 0 && x0 + dx < w) {
+                        float y8 = 16.0 + 219.0 * lumaOf(rgb);
+                        float code = tenBit != 0 ? round(y8 * 4.0) * 64.0 / 65535.0 : round(y8) / 255.0;
+                        luma.write(float4(code), uint2(x0 + dx, y));
+                    }
+                }
+            }
+            float3 rgb = sum / weight;
+            float yl = lumaOf(rgb);
+            float cb = (rgb.b - yl) / 1.8556, cr = (rgb.r - yl) / 1.5748;
+            float2 c8 = float2(128.0) + 224.0 * float2(cb, cr);
+            float2 code = tenBit != 0 ? round(c8 * 4.0) * 64.0 / 65535.0 : round(c8) / 255.0;
+            chroma.write(float4(code, 0, 0), gid);
+        }
+        """
+        guard let library = try? device.makeLibrary(source: source, options: nil),
+              let function = library.makeFunction(name: "convert"),
+              let pipeline = try? device.makeComputePipelineState(function: function) else { return nil }
+        self.tenBit = tenBit
+        self.device = device
+        self.queue = queue
+        self.pipeline = pipeline
+        CVMetalTextureCacheCreate(nil, nil, device, nil, &cache)
+        guard cache != nil else { return nil }
+    }
+
+    /// Converts `source` (32BGRA) into `destination` (a 4:2:0 bi-planar video
+    /// range buffer of the same size, Metal compatible). Synchronous, like the
+    /// VideoToolbox transfer it replaces (~0.3 ms for 2732x2048 on M2).
+    func convert(_ source: CVPixelBuffer, into destination: CVPixelBuffer) -> Bool {
+        guard let cache,
+              CVPixelBufferGetPixelFormatType(source) == kCVPixelFormatType_32BGRA,
+              let input = texture(source, plane: 0, format: .bgra8Unorm),
+              let lumaTexture = texture(destination, plane: 0, format: tenBit ? .r16Unorm : .r8Unorm),
+              let chromaTexture = texture(destination, plane: 1, format: tenBit ? .rg16Unorm : .rg8Unorm),
+              let commands = queue.makeCommandBuffer(), let encoder = commands.makeComputeCommandEncoder(),
+              let inputTex = CVMetalTextureGetTexture(input), let lumaTex = CVMetalTextureGetTexture(lumaTexture),
+              let chromaTex = CVMetalTextureGetTexture(chromaTexture) else { return false }
+        encoder.setComputePipelineState(pipeline)
+        encoder.setTexture(inputTex, index: 0)
+        encoder.setTexture(lumaTex, index: 1)
+        encoder.setTexture(chromaTex, index: 2)
+        var flag: UInt32 = tenBit ? 1 : 0
+        encoder.setBytes(&flag, length: 4, index: 0)
+        let group = MTLSize(width: 16, height: 16, depth: 1)
+        let grid = MTLSize(width: chromaTex.width, height: chromaTex.height, depth: 1)
+        encoder.dispatchThreads(grid, threadsPerThreadgroup: group)
+        encoder.endEncoding()
+        commands.commit()
+        commands.waitUntilCompleted()
+        _ = (input, lumaTexture, chromaTexture) // alive until the GPU is done
+        guard commands.status == .completed else { return false }
+        for (key, value) in [(kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_709_2),
+                             (kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_709_2),
+                             (kCVImageBufferTransferFunctionKey, kCVImageBufferTransferFunction_ITU_R_709_2),
+                             (kCVImageBufferChromaLocationTopFieldKey, kCVImageBufferChromaLocation_Left),
+                             (kCVImageBufferChromaLocationBottomFieldKey, kCVImageBufferChromaLocation_Left)] {
+            CVBufferSetAttachment(destination, key, value, .shouldPropagate)
+        }
+        conversions += 1
+        if conversions % 600 == 0 { CVMetalTextureCacheFlush(cache, 0) }
+        return true
+    }
+
+    private func texture(_ buffer: CVPixelBuffer, plane: Int, format: MTLPixelFormat) -> CVMetalTexture? {
+        guard let cache else { return nil }
+        let planar = CVPixelBufferIsPlanar(buffer)
+        let width = planar ? CVPixelBufferGetWidthOfPlane(buffer, plane) : CVPixelBufferGetWidth(buffer)
+        let height = planar ? CVPixelBufferGetHeightOfPlane(buffer, plane) : CVPixelBufferGetHeight(buffer)
+        var texture: CVMetalTexture?
+        guard CVMetalTextureCacheCreateTextureFromImage(nil, cache, buffer, nil, format, width, height, plane,
+                                                        &texture) == kCVReturnSuccess else { return nil }
+        return texture
+    }
+}

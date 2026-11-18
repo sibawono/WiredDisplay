@@ -45,30 +45,35 @@ final class HostAudioBridge: @unchecked Sendable {
 
     private var speakerDevice: AudioDeviceID = 0
     private var speakerProc: AudioDeviceIOProcID?
+    private var speakerFifo: SpeakerFifo?
 
     func startSpeaker() throws {
         guard speakerProc == nil else { return }
         let device = try AudioDevices.find(.speakerTap)
         let frames = AudioDevices.setBufferFrameSize(device, frames: Self.ioBufferFrames)
-        let send = send
-        let ioCalls = OSAllocatedUnfairLock(initialState: 0)
         Log.info("audio: speaker capture from device \(device), IO buffer \(frames) frames, microphone TCC " +
                  "\(AVCaptureDevice.authorizationStatus(for: .audio).rawValue) (3 = authorized)")
+        // The real-time IO thread only converts into a preallocated FIFO;
+        // packets are built, encrypted and queued on a normal thread (audit
+        // B-7: allocating, locking and encrypting on the IO thread risks
+        // dropouts when the Mac is busy).
+        let fifo = SpeakerFifo(channels: Int(SessionConstants.speakerChannels))
         var procID: AudioDeviceIOProcID?
-        // Called on CoreAudio's real-time IO thread once per IO cycle with the
-        // loopback input (what Mac apps play into "iPad Speaker").
-        let status = AudioDeviceCreateIOProcIDWithBlock(&procID, device, nil, Self.makeSpeakerIOBlock(send: send, calls: ioCalls))
+        let status = AudioDeviceCreateIOProcIDWithBlock(&procID, device, nil, Self.makeSpeakerIOBlock(fifo: fifo))
         guard status == noErr, let procID else { throw AudioDevices.Error.coreAudio("create speaker IOProc", status) }
+        fifo.startSender(send)
         let started = AudioDeviceStart(device, procID)
         guard started == noErr else {
             AudioDeviceDestroyIOProcID(device, procID)
+            fifo.stopSender()
             throw AudioDevices.Error.coreAudio("start speaker IOProc", started)
         }
         speakerDevice = device
         speakerProc = procID
+        speakerFifo = fifo
         Log.info("audio: speaker bridge started (iPad Speaker -> iPad, IOProc)")
         DispatchQueue.global().asyncAfter(deadline: .now() + 3) {
-            Log.info("audio: speaker IO check after 3 s: \(ioCalls.withLock { $0 }) IO cycles")
+            Log.info("audio: speaker IO check after 3 s: \(fifo.ioCycles) IO cycles, \(fifo.overflows) overflows")
         }
     }
 
@@ -77,42 +82,18 @@ final class HostAudioBridge: @unchecked Sendable {
         AudioDeviceStop(speakerDevice, procID)
         AudioDeviceDestroyIOProcID(speakerDevice, procID)
         speakerProc = nil
+        speakerFifo?.stopSender()
+        speakerFifo = nil
         Log.info("audio: speaker bridge stopped")
     }
 
-    /// Converts each IO cycle's input (Float32, interleaved or not) into one
-    /// 16-bit stereo packet. Built outside any actor (real-time thread).
-    private nonisolated static func makeSpeakerIOBlock(send: @escaping @Sendable (AudioPacket) -> Void,
-                                                       calls: OSAllocatedUnfairLock<Int>) -> AudioDeviceIOBlock {
-        let channels = Int(SessionConstants.speakerChannels)
+    /// Converts each IO cycle's input (Float32, interleaved or not) into
+    /// 16-bit stereo in the FIFO. No allocation, no blocking lock.
+    private nonisolated static func makeSpeakerIOBlock(fifo: SpeakerFifo) -> AudioDeviceIOBlock {
         return { _, inputData, _, _, _ in
-            calls.withLock { $0 += 1 }
             let list = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inputData))
-            guard let first = list.first, let base = first.mData else { return }
-            var samples: [Int16]
-            if list.count == 1 {
-                // Interleaved: one buffer carrying all channels.
-                let sourceChannels = max(Int(first.mNumberChannels), 1)
-                let frames = Int(first.mDataByteSize) / (MemoryLayout<Float>.size * sourceChannels)
-                let floats = base.assumingMemoryBound(to: Float.self)
-                samples = [Int16](repeating: 0, count: frames * channels)
-                for frame in 0..<frames {
-                    for channel in 0..<channels {
-                        let value = floats[frame * sourceChannels + min(channel, sourceChannels - 1)]
-                        samples[frame * channels + channel] = Int16((max(-1, min(1, value)) * 32767).rounded())
-                    }
-                }
-            } else {
-                // Deinterleaved: one buffer per channel.
-                let frames = Int(first.mDataByteSize) / MemoryLayout<Float>.size
-                let sources = (0..<channels).compactMap { index -> UnsafePointer<Float>? in
-                    list[min(index, list.count - 1)].mData.map { UnsafePointer($0.assumingMemoryBound(to: Float.self)) }
-                }
-                guard sources.count == channels else { return }
-                samples = PCM.interleave(sources, frames: frames)
-            }
-            guard !samples.isEmpty else { return }
-            send(AudioPacket(channels: UInt8(channels), samples: samples))
+            guard let first = list.first, first.mData != nil else { return }
+            fifo.write(list)
         }
     }
 
@@ -167,9 +148,116 @@ final class HostAudioBridge: @unchecked Sendable {
         let format = AVAudioFormat(standardFormatWithSampleRate: SessionConstants.audioSampleRate, channels: 2)!
         return AVAudioSourceNode(format: format) { _, _, frameCount, bufferList -> OSStatus in
             let list = UnsafeMutableAudioBufferListPointer(bufferList)
-            let outputs = list.compactMap { $0.mData?.assumingMemoryBound(to: Float.self) }
-            buffer.pull(into: outputs, frames: Int(frameCount))
+            // No array here: render callbacks must not allocate (audit C-5).
+            let first = list.count > 0 ? list[0].mData?.assumingMemoryBound(to: Float.self) : nil
+            let second = list.count > 1 ? list[1].mData?.assumingMemoryBound(to: Float.self) : nil
+            buffer.pull(first, second, frames: Int(frameCount))
             return noErr
         }
+    }
+}
+
+/// Single-producer (CoreAudio IO thread) / single-consumer (sender thread)
+/// sample FIFO for the speaker bridge. The producer never allocates and only
+/// try-locks: if the sender happens to hold the lock, that one IO cycle
+/// (5 ms) is dropped and counted rather than blocking the IO thread.
+final class SpeakerFifo: @unchecked Sendable {
+    let channels: Int
+    /// One second of audio: far more than the sender ever leaves behind.
+    private let capacityFrames = 48_000
+    private let storage: UnsafeMutablePointer<Int16>
+    private var readFrame = 0, writeFrame = 0, count = 0
+    /// Heap-allocated: an os_unfair_lock must not move (no `&property`).
+    private let lock: UnsafeMutablePointer<os_unfair_lock> = {
+        let pointer = UnsafeMutablePointer<os_unfair_lock>.allocate(capacity: 1)
+        pointer.initialize(to: os_unfair_lock())
+        return pointer
+    }()
+    private let wake = DispatchSemaphore(value: 0)
+    private var running = false
+    private var cycles = 0, dropped = 0
+
+    init(channels: Int) {
+        self.channels = channels
+        storage = .allocate(capacity: capacityFrames * channels)
+    }
+
+    deinit {
+        storage.deallocate()
+        lock.deallocate()
+    }
+
+    var ioCycles: Int { os_unfair_lock_lock(lock); defer { os_unfair_lock_unlock(lock) }; return cycles }
+    var overflows: Int { os_unfair_lock_lock(lock); defer { os_unfair_lock_unlock(lock) }; return dropped }
+
+    /// IO thread.
+    func write(_ list: UnsafeMutableAudioBufferListPointer) {
+        guard os_unfair_lock_trylock(lock) else { return }
+        cycles += 1
+        let first = list[0]
+        let interleaved = list.count == 1
+        let sourceChannels = interleaved ? max(Int(first.mNumberChannels), 1) : 1
+        let frames = Int(first.mDataByteSize) / (MemoryLayout<Float>.size * sourceChannels)
+        if frames > capacityFrames - count {
+            dropped += 1
+        } else {
+            for frame in 0..<frames {
+                let base = writeFrame * channels
+                for channel in 0..<channels {
+                    let value: Float
+                    if interleaved {
+                        let floats = first.mData!.assumingMemoryBound(to: Float.self)
+                        value = floats[frame * sourceChannels + min(channel, sourceChannels - 1)]
+                    } else {
+                        let buffer = list[min(channel, list.count - 1)]
+                        value = buffer.mData.map { $0.assumingMemoryBound(to: Float.self)[frame] } ?? 0
+                    }
+                    storage[base + channel] = Int16((max(-1, min(1, value)) * 32767).rounded())
+                }
+                writeFrame = (writeFrame + 1) % capacityFrames
+            }
+            count += frames
+        }
+        os_unfair_lock_unlock(lock)
+        if frames > 0 { wake.signal() }
+    }
+
+    /// Everything buffered so far, oldest first (sender thread).
+    private func drain() -> [Int16] {
+        os_unfair_lock_lock(lock)
+        defer { os_unfair_lock_unlock(lock) }
+        let frames = min(count, SessionConstants.maxAudioFramesPerPacket)
+        guard frames > 0 else { return [] }
+        var out = [Int16](repeating: 0, count: frames * channels)
+        for index in 0..<frames {
+            let source = ((readFrame + index) % capacityFrames) * channels
+            for channel in 0..<channels { out[index * channels + channel] = storage[source + channel] }
+        }
+        readFrame = (readFrame + frames) % capacityFrames
+        count -= frames
+        return out
+    }
+
+    func startSender(_ send: @escaping @Sendable (AudioPacket) -> Void) {
+        os_unfair_lock_lock(lock); running = true; os_unfair_lock_unlock(lock)
+        let channels = UInt8(channels)
+        let thread = Thread { [self] in
+            while true {
+                wake.wait()
+                os_unfair_lock_lock(lock); let keepGoing = running; os_unfair_lock_unlock(lock)
+                guard keepGoing else { return }
+                while case let samples = drain(), !samples.isEmpty {
+                    send(AudioPacket(channels: channels, samples: samples))
+                }
+            }
+        }
+        thread.qualityOfService = .userInteractive
+        thread.name = "wireddisplay.speaker-sender"
+        thread.start()
+    }
+
+    func stopSender() {
+        os_unfair_lock_lock(lock); running = false; os_unfair_lock_unlock(lock)
+        wake.signal()
     }
 }

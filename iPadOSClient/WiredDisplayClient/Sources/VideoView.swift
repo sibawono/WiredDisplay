@@ -489,10 +489,7 @@ final class VideoView: UIView, UIPointerInteractionDelegate, UIGestureRecognizer
         guard streamSize != nil, interpreter.state == .idle, pointerPresses.isEmpty,
               recognizer.state == .began || recognizer.state == .changed,
               let point = normalized(recognizer.location(in: self)) else { return }
-        // Local echo: draw the cursor where the pointer is right now.
-        localPointerUntil = ProcessInfo.processInfo.systemUptime + 0.15
-        cursorPoint = point
-        layoutCursor()
+        // Local echo happens in emit().
         emit([.pointer(phase: .move, button: .none, x: Float(point.x), y: Float(point.y))])
     }
 
@@ -529,7 +526,17 @@ final class VideoView: UIView, UIPointerInteractionDelegate, UIGestureRecognizer
     }
 
     private func emit(_ events: [InputEvent]) {
-        for event in events { onInput?(event) }
+        for event in events {
+            // Local echo for every pointer position the iPad sends (drags,
+            // trackpad clicks, touches), not only for hover (audit C-6): the
+            // cursor follows at once instead of one round trip later.
+            if case .pointer(_, _, let x, let y) = event {
+                localPointerUntil = ProcessInfo.processInfo.systemUptime + 0.15
+                cursorPoint = CGPoint(x: CGFloat(x), y: CGFloat(y))
+                layoutCursor()
+            }
+            onInput?(event)
+        }
     }
 }
 

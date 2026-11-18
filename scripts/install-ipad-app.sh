@@ -41,10 +41,13 @@ esac
 EXTRA=()
 [ -n "${BUNDLE_ID:-}" ] && EXTRA+=(PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID")
 
-xcodebuild -project "$PROJECT" -scheme "$SCHEME" -configuration Debug -destination "id=$DEVICE" \
+# Release by default (audit C-2): Debug (-Onone) runs the per-byte parsing,
+# decryption and audio loops unoptimised. CONFIG=Debug for debugging.
+CONFIG="${CONFIG:-Release}"
+xcodebuild -project "$PROJECT" -scheme "$SCHEME" -configuration "$CONFIG" -destination "id=$DEVICE" \
   -derivedDataPath "$DERIVED" -allowProvisioningUpdates \
   DEVELOPMENT_TEAM="$TEAM_ID" WD_BUNDLE_PREFIX="$BUNDLE_PREFIX" ${EXTRA[@]+"${EXTRA[@]}"} build 2>&1 \
   | grep -E "error:|BUILD (SUCCEEDED|FAILED)" | grep -v appintents
-xcrun devicectl device install app --device "$DEVICE" "$DERIVED/Build/Products/Debug-iphoneos/$SCHEME.app" 2>&1 \
+xcrun devicectl device install app --device "$DEVICE" "$DERIVED/Build/Products/$CONFIG-iphoneos/$SCHEME.app" 2>&1 \
   | grep -E "bundleID|rror"
 echo "installed $SCHEME as ${BUNDLE_ID:-$BUNDLE_PREFIX.$([ "$APP" = client ] && echo client || echo transportprobe)}"

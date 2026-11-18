@@ -31,7 +31,6 @@ final class StatusMenu: NSObject, NSPopoverDelegate {
     private var controller: HostController? { fleet?.focus }
     private var state: HostController.State { controller.map { fleet?.state(of: $0) ?? .waitingForDevice } ?? .waitingForDevice }
     private var ticker: Timer?
-    private var brightnessKeys: [BrightnessKeys] = []
 
     func attach(_ fleet: HostFleet) {
         self.fleet = fleet
@@ -54,10 +53,9 @@ final class StatusMenu: NSObject, NSPopoverDelegate {
                         self.model.snapshot.brightness = value
                     }
                 }
-                // Each iPad's brightness keys act only when the pointer is on it.
-                let keys = BrightnessKeys(controller: controller)
-                keys.start()
-                self.brightnessKeys.append(keys)
+                // One shared tap on its own thread; the keys act on the iPad
+                // that has the pointer (C-3).
+                BrightnessKeys.shared.add(controller)
             }
         }
         refresh()
@@ -227,8 +225,14 @@ final class StatusMenu: NSObject, NSPopoverDelegate {
     private func quit() {
         popover.performClose(nil)
         fleet?.stop()
-        // Give teardown (release buttons, stop capture, remove display) a moment.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { NSApp.terminate(nil) }
+        fleet?.audioRouter.handBackBeforeQuit()
+        // Give teardown (release buttons, stop capture, remove display) a
+        // moment; hand the audio back once more in case a late audio route
+        // from the iPad arrived meanwhile.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            self?.fleet?.audioRouter.handBackBeforeQuit()
+            NSApp.terminate(nil)
+        }
     }
 }
 
@@ -298,6 +302,12 @@ func parseOptions() -> HostController.Options {
         case "--trace-keys": continue // read by BrightnessKeys
         case "--power-efficient": VideoEncoder.powerEfficient = true
         case "--periodic-keyframes": VideoEncoder.periodicKeyframes = true
+        case "--chroma-filter":
+            switch value() {
+            case "on": VideoEncoder.filteredChroma = true
+            case "off": VideoEncoder.filteredChroma = false
+            case let other: fail("--chroma-filter expects on|off, got \(other)")
+            }
         case "--force-refresh":
             guard let fps = Int(value()), (24...120).contains(fps) else { fail("--force-refresh expects 24...120") }
             options.forceRefresh = fps

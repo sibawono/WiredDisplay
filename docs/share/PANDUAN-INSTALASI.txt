@@ -128,6 +128,9 @@ Fitur lain
 - Renderer Metal menyala secara default (Controls iPad › Display).
 - iPad Pro: sampai 120 Hz. Panel Mac › Display › "Match the iPad's refresh rate".
 - Beberapa iPad bisa dicolok sekaligus, masing-masing jadi layar sendiri.
+- Gambar paling tajam dan responsif: di iPad, Settings › Display &
+  Brightness › Display Zoom › Default (bukan "More Space"). Stream jadi
+  pas 1:1 dengan panel iPad dan latensinya ~14 ms lebih rendah.
 - macOS menyembunyikan notifikasi selama ada app yang merekam layar. Supaya
   tetap muncul: System Settings › Notifications › "Allow notifications when
   mirroring or sharing the display".

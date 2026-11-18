@@ -284,3 +284,85 @@
 **SUMMARY:** D-036 refresh follows the iPad (120 Hz on ProMotion; standard rate control above 60 fps; the iPad requests a 120 Hz panel); every cabled device is tried, brightness keys follow the pointer, dock audio is not headphones. D-037 latency study (encoder saturated at 3180×2384; periodic keyframes removed; sent→enqueued measurement on the iPad). D-038 local cursor. D-039 portrait. D-040 Metal renderer (default). D-041 one controller per iPad with per-iPad display serials and single audio owner.
 
 **VERIFIED:** unit tests pass; 120 Hz path end to end with `--force-refresh 120` (~119 fps); local cursor, portrait both ways, Metal renderer confirmed by the user on hardware; fleet with one iPad keeps serial 1 and streams normally. Not verified: a real ProMotion iPad; two iPads at once; Sidecar on a second iPad and DisplayLink alongside.
+
+## CHANGE ID: P1-025 — v0.4.1 work: audit fixes and real on-glass measurement (D-042)
+
+**FILES CHANGED:** `Shared/Video/HEVCSPS.swift` (new), `Tests/Unit/WDVideoTests/VideoTests.swift`, `iPadOSClient/WiredDisplayClient/Sources/{MetalVideoRenderer,ClientSession}.swift`, `macOSHost/Host/HostController.swift`, `docs/{DECISIONS,CHANGELOG}.md`, `docs/share/PANDUAN-INSTALASI.txt`, `README.md`.
+
+**SUMMARY:** Metal decodes 4:4:4 as 4:4:4 (chroma and depth read from the HEVC SPS) and reuses the other lane's decoder; decode and presentation on separate queues with a generation fence; three drawables; config before capture, and an early frame is dropped instead of ending the session; a "metal on glass" meter. Display Zoom Default recommended.
+
+**VERIFIED (iPad Air 13″, Pro preset, animation):** at Display Zoom Default (2732×2048) host encode p50 12.2 ms (16 at More Space), 60 fps on the glass, enqueue→glass p50 ~30 ms (~40 before); Balanced decodes "4:4:4 10-bit". The user judged the text sharper. Not released yet.
+
+## CHANGE ID: P1-026 — v0.4.2 work: full-audit batch A (audio hand-back, settings, log, click)
+
+**FILES CHANGED:** `macOSHost/Host/{AudioRouter,HostController,HostFleet,InputInjector,Log}.swift`, `docs/CHANGELOG.md`.
+
+**SUMMARY:**
+- When the iPad stops carrying audio (switched off, unplugged, app closed), a default output/input that is still "iPad Speaker" / "iPad Microphone" moves back to the last real device, else the built-in one. The session end now releases the audio owner, so another iPad can take audio over. Found by the audit: with no iPad attached, the Mac's input was still "iPad Microphone".
+- An iPad plugged in after launch gets the menu's current input and quality choices, not the launch values. Before, input switched off after launch was on again for that iPad (D-006).
+- Input logging: only clicks, gesture boundaries and releaseAll. Scroll and gesture steps are counted, not logged, and "input disabled" is logged once. The host log rotates at 5 MB into `WiredDisplayHost.old.log`; it had reached 7.8 MB.
+- A short tap's mouse-up is posted 25 ms later from the session queue instead of `usleep` on it. Audio, control and other input no longer wait, and the next event posts a held-back up first, so order is kept.
+
+**VERIFIED:** builds; unit tests pass; host relaunched; the log rotated at launch. Not verified on hardware yet: audio hand-back on unplug, short taps and double-clicks.
+
+## CHANGE ID: P1-027 — v0.4.2 work: full-audit batch B (sharpness, latency, CPU)
+
+**FILES CHANGED:** `macOSHost/Host/{VideoEncoder,HostController,HostAudioBridge,CursorEcho,AudioRouter}.swift`, `iPadOSClient/WiredDisplayClient/Sources/ClientSession.swift`, `docs/CHANGELOG.md`.
+
+**SUMMARY:**
+- Balanced with the local cursor: pointer movement no longer counts as motion, because the pointer is not in the video. The screen refines to 4:4:4 while the mouse moves.
+- The host video queue holds at most 4 frames (was 6, ~100 ms at 60 Hz) before it restarts at a keyframe.
+- Speaker bridge: the real-time IO thread only converts into a preallocated FIFO, using a try-lock and no allocation. A normal thread builds, encrypts and queues the packets.
+- Cursor image: checked only while the pointer is on the iPad's display, with a cheap bitmap key. The PNG is made only on a real change. `resendImage` (dead code) is removed.
+- iPad: frame counters are published to the UI once a second instead of on every frame.
+- At host start, a leftover "iPad Speaker" / "iPad Microphone" default is moved to a real device (automatic switching on). The iPad takes it back when it connects.
+
+**VERIFIED:** builds (host; iPad for generic iOS); unit tests pass; live session after relaunch: speaker FIFO 200 IO cycles/s with 0 overflows, packets reach the iPad; the stale default input moved off "iPad Microphone"; encode p50 ~12 ms (Pro). Not verified: the Balanced lane change by eye; the iPad build is not installed on the iPad yet.
+
+## CHANGE ID: P1-028 — v0.4.2 work: second full audit, batch C (audio drift, typing, quit, build)
+
+**FILES CHANGED:** `Shared/Session/AudioJitterBuffer.swift`, `Tests/Unit/WDSessionTests/SessionTests.swift`, `macOSHost/Host/{BrightnessKeys,main,AudioRouter,HostAudioBridge,HostController}.swift`, `iPadOSClient/WiredDisplayClient/Sources/ClientAudio.swift`, `scripts/install-ipad-app.sh`, `docs/CHANGELOG.md`.
+
+**SUMMARY:**
+- C-1 jitter buffer drift correction. Outside a band around the target (−50 %/+33 %), one frame per pull is repeated (too empty) or skipped (too full) until the level is back near the target. Found in client.log: latency wandered 19–84 ms, and slow drain caused an underrun (~30 ms gap) about every 10 minutes.
+- C-5 two-pointer `pull` that builds no array. Used by both render callbacks (iPad speaker, Mac microphone).
+- C-3 brightness keys use one shared event tap on its own thread, instead of one tap per iPad on the main thread. Every key press on the Mac had waited for the host's main thread.
+- C-4 Quit hands the audio back synchronously, before and right before terminating.
+- C-8 (found while testing) the "on USB" wait line is logged only when the device set changes. With a cabled device that does not run the app (an iPhone), it alternated with "nothing listens" and wrote 2 lines/s.
+- C-2 `install-ipad-app.sh` builds Release by default (`CONFIG=Debug` to override).
+
+**VERIFIED:** builds (host; iPad Release, installed); unit tests pass, including 3 new jitter-buffer tests (drain held without underrun, excess trimmed to the target, two-pointer pull); host relaunched, the brightness tap is listening and the log is quiet with the iPhone cabled. Cmd-click and Shift-click from the iPad trackpad confirmed by the user, so mouse events carry the modifiers (open audit item closed). Not measured yet: Debug vs Release latency on the iPad. The Debug baseline at idle is sent→enqueued p50 3.5–3.8 ms and decode p50 3.5 ms. Also not measured: the drift fix over a long session.
+
+## CHANGE ID: P1-029 — v0.4.2 work: soak test and the remaining audit items
+
+**FILES CHANGED:** `iPadOSClient/WiredDisplayClient/Sources/{VideoView,ClientApp,ClientSession,MetalVideoRenderer}.swift`, `Shared/Session/SecureChannel.swift`, `docs/CHANGELOG.md`.
+
+**SOAK (30 min, iPad Air 13″ cabled, Release iPad build, test pattern every 5 min on the WiredDisplay screen):**
+- Host RSS 42–66 MB with no growth; 16–19 threads; CPU 2–4 % streaming, up to 13 % during motion. The log grew ~5 KB/min.
+- 0 video frames dropped; control RTT ~1.1 ms; encode p50 11–13 ms. On the glass: 60 fps, enqueued→glass p50 ~29–31 ms during 60 fps motion.
+- Some test-pattern runs were captured at only ~37 fps. Capture and encode counts match, so the test window drew fewer frames; the pipeline did not drop any.
+- Audio: 1 underrun in 30 min (the buffer was at 1320 frames just before, so this was a delivery gap, not drift); 813 drift corrections.
+- "sent->enqueued" climbed 1.2 ms per minute: the Mac and iPad clocks drift ~20 ppm apart, and the offset estimate never forgot old samples. A diagnostic artefact, fixed below.
+
+**SUMMARY:**
+- C-6: every pointer position the iPad sends is echoed locally (drags, trackpad clicks, touches), not only hover.
+- C-7: the loopback echo server (port 9000) runs only with `-diagnosticEcho YES`.
+- Clock offset for the latency diagnostics: max over the last 8 pings, cleared on every connection.
+- Metal: 4:2:0 chroma is sampled at its real position (left-sited; VTPixelTransfer was probed and point-samples the even column), and the texture cache is flushed every 300 frames and on flush.
+- SecureChannel: separate send and receive locks, so sealing a frame never waits for opening one.
+
+**VERIFIED:** builds (host; iPad Release, installed); all unit tests pass (including SecureChannel). Not verified by eye yet: cursor during drag, colour edges in Pro. Bitrate scaling at 120 Hz is left open; it needs a ProMotion iPad to test.
+
+**NOTE (future quality work):** the 4:2:0 conversion point-samples chroma, so the colour of a 1-pixel detail on an odd column is lost. A filtered (e.g. [1 2 1]) GPU conversion on the host could make Pro's coloured text edges cleaner.
+
+## CHANGE ID: P1-030 — Filtered 4:2:0 chroma on the GPU (Pro and Balanced motion lane)
+
+**FILES CHANGED:** `macOSHost/Host/ChromaConverter.swift` (new), `macOSHost/Host/{VideoEncoder,main}.swift`, `docs/CHANGELOG.md`.
+
+**SUMMARY:** the 4:2:0 lanes convert BGRA with a Metal compute kernel instead of VTPixelTransferSession. A probe showed VTPixelTransfer point-samples chroma: a 1-pixel red line on an odd column lost its colour completely, and on an even column it kept all of it, so coloured text edges were ragged. The kernel uses a [1 2 1]/4 horizontal filter centred on the even column (left-sited, as the iPad renderer assumes) averaged over the two rows. Colour maths are unchanged: matrix only, sRGB-encoded values, BT.709 video range; the buffers are tagged 709 and Left. VideoToolbox remains the fallback if the GPU path fails. `--chroma-filter off` turns it off for A/B tests. The lane statistics now log the conversion time, which had not been measured before.
+
+**VERIFIED:**
+- Against VideoToolbox on 9 flat colours, 8- and 10-bit: at most 1 code apart.
+- 1-pixel red line on an odd column: chroma Cr 28 / 28 (8-bit) where VideoToolbox gave 0.
+- Live A/B, Pro, 60 fps test pattern: conversion p50 VideoToolbox 4.65–5.42 ms, GPU 3.87–4.11 ms (p95 5.3–6.6 vs 4.2–4.6). Encode p50 unchanged at ~12 ms; 60 fps.
+- Not judged by eye yet: coloured text edges in Pro.

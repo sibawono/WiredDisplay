@@ -79,6 +79,11 @@ final class ClientSession: @unchecked Sendable {
     /// Latency diagnostics: host clock minus iPad clock, estimated from pings
     /// (the largest sample is closest, since one-way delay only lowers it).
     private var clockOffset: Int64?
+    /// Recent offset samples (one per ping, every 2 s). The offset is the max
+    /// over the last 8 only: the Mac and iPad clocks drift ~20 ppm apart, and
+    /// an all-time max made "sent->enqueued" climb 1.2 ms a minute (soak test,
+    /// audit). Cleared on every connection.
+    private var offsetSamples: [Int64] = []
     private var transitSamples: [Double] = []
     private var droppedMicrophone = 0
 
@@ -296,6 +301,9 @@ final class ClientSession: @unchecked Sendable {
         format = nil
         formatSets = []
         outstandingSends = 0
+        clockOffset = nil
+        offsetSamples = []
+        transitSamples = []
         var generator = SystemRandomNumberGenerator()
         framer = SessionFramer(sessionID: generator.next(), channel: channel,
                                clock: { clock_gettime_nsec_np(CLOCK_UPTIME_RAW) })
@@ -454,7 +462,9 @@ final class ClientSession: @unchecked Sendable {
             case .ping(let value):
                 send(stream: .control, payload: SessionCodec.encode(.pong(value)), on: current)
                 let estimate = Int64(bitPattern: value) &- Int64(bitPattern: clock_gettime_nsec_np(CLOCK_UPTIME_RAW))
-                clockOffset = max(clockOffset ?? estimate, estimate)
+                offsetSamples.append(estimate)
+                if offsetSamples.count > 8 { offsetSamples.removeFirst() }
+                clockOffset = offsetSamples.max()
             case .brightness(let value):
                 if let apply = onBrightness { Task { @MainActor in apply(value) } }
             case .cursor(let x, let y, let visible):
@@ -471,7 +481,12 @@ final class ClientSession: @unchecked Sendable {
         case .video:
             guard trustedPeer != nil else { throw WireError.invalidValue("video before pairing") }
             guard videoActive else { return } // frames in flight when video paused
-            guard let config else { throw WireError.invalidValue("video before stream config") }
+            guard let config else {
+                // A frame can overtake its config (start, resume, rotation):
+                // drop it and ask for a keyframe instead of ending the session (D-042).
+                requestKeyframe(on: current)
+                return
+            }
             present(AccessUnit(codec: config.codec == .hevc ? .hevc : .h264, annexB: frame.payload),
                     timestamp: frame.header.timestampNanos, on: current)
         case .speaker:
@@ -548,13 +563,13 @@ final class ClientSession: @unchecked Sendable {
         }
         guard let format else {
             requestKeyframe(on: current)
-            ui { $0.framesDropped += 1 }
+            countFrame(shown: false)
             return
         }
         do {
             let time = CMTime(value: CMTimeValue(timestamp), timescale: 1_000_000_000)
             renderer.enqueue(try SampleBuffers.sampleBuffer(for: unit, format: format, presentationTime: time))
-            ui { $0.framesShown += 1 }
+            countFrame(shown: true)
             if let offset = clockOffset {
                 // Mac sent it -> iPad hands it to the display layer (transport,
                 // decryption, parsing); excludes encode and the final vsync.
@@ -572,8 +587,22 @@ final class ClientSession: @unchecked Sendable {
             }
         } catch {
             requestKeyframe(on: current)
-            ui { $0.framesDropped += 1 }
+            countFrame(shown: false)
         }
+    }
+
+    /// Frame counters for the Controls panel, published at most once a
+    /// second instead of one main-actor hop per video frame (audit B-11).
+    private var framesShown = 0, framesDropped = 0
+    private var countersPublished: TimeInterval = 0
+
+    private func countFrame(shown: Bool) {
+        if shown { framesShown += 1 } else { framesDropped += 1 }
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - countersPublished >= 1 else { return }
+        countersPublished = now
+        let (shownTotal, droppedTotal) = (framesShown, framesDropped)
+        ui { $0.framesShown = shownTotal; $0.framesDropped = droppedTotal }
     }
 
     private func requestKeyframe(on current: NWConnection) {

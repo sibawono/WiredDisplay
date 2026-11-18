@@ -3,6 +3,7 @@ import CoreVideo
 import Metal
 import QuartzCore
 import VideoToolbox
+import WDVideo
 
 /// Where decoded video goes: the system display layer (default) or the
 /// experimental Metal path. Thread-safe; called from the session queue.
@@ -71,11 +72,23 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
     private let queue: MTLCommandQueue
     private let pipeline: MTLRenderPipelineState
     private var textureCache: CVMetalTextureCache?
-    private let renderQueue = DispatchQueue(label: "wireddisplay.metal", qos: .userInteractive)
+    /// Decode and presentation run on separate queues (D-042): waiting for a
+    /// drawable never holds up decoding, and the newest decoded frame wins.
+    private let decodeQueue = DispatchQueue(label: "wireddisplay.metal.decode", qos: .userInteractive)
+    private let presentQueue = DispatchQueue(label: "wireddisplay.metal.present", qos: .userInteractive)
     private let lock = NSLock()
-    private var pending: CVPixelBuffer?
+    private var pending: (buffer: CVPixelBuffer, enqueued: CFTimeInterval, decoded: CFTimeInterval)?
+    private var decodeTimes: [CFTimeInterval] = []
+    /// Bumped by flush: decodes and presents from before it are dropped.
+    private var generation = 0
+    /// Presented-frame meter: when frames actually reached the glass.
+    private var presented: [(time: CFTimeInterval, age: CFTimeInterval)] = []
+    private var meterStart = CACurrentMediaTime()
+    private var replacedBeforeShown = 0
     private var session: VTDecompressionSession?
     private var sessionFormat: CMFormatDescription?
+    /// The other lane's decoder (decodeQueue only).
+    private var spare: [(format: CMFormatDescription, session: VTDecompressionSession)] = []
     private var failed: String?
     /// Drawable size in pixels, set from the main thread on layout.
     private var drawableSize = CGSize.zero
@@ -99,11 +112,13 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
             return o;
         }
         fragment float4 fmain(Out in [[stage_in]], texture2d<float> luma [[texture(0)]],
-                              texture2d<float> chroma [[texture(1)]]) {
+                              texture2d<float> chroma [[texture(1)]], constant float2 &siting [[buffer(0)]]) {
             constexpr sampler s(filter::linear, address::clamp_to_edge);
             // BT.709 video range (MSB-aligned 10-bit reads the same as 8-bit).
             float y = (luma.sample(s, in.uv).r - 16.0 / 255.0) * (255.0 / 219.0);
-            float2 c = (chroma.sample(s, in.uv).rg - 128.0 / 255.0) * (255.0 / 224.0);
+            // 4:2:0 chroma siting: shift so each chroma sample lands on the
+            // luma position it was taken at (left-sited by default in HEVC).
+            float2 c = (chroma.sample(s, in.uv + siting).rg - 128.0 / 255.0) * (255.0 / 224.0);
             float3 rgb = float3(y + 1.5748 * c.y, y - 0.1873 * c.x - 0.4681 * c.y, y + 1.8556 * c.x);
             return float4(saturate(rgb), 1);
         }
@@ -123,7 +138,7 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
         layer.pixelFormat = .bgr10a2Unorm // keeps 10-bit streams 10-bit to the panel
         layer.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
         layer.framebufferOnly = true
-        layer.maximumDrawableCount = 2
+        layer.maximumDrawableCount = 3 // 2 starved to 30 fps when composition held a buffer longer (D-042)
         layer.isOpaque = true
         layer.backgroundColor = CGColor(red: 0, green: 0, blue: 0, alpha: 1)
     }
@@ -147,26 +162,42 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
         lock.withLock {
             failed = nil
             pending = nil
+            generation += 1
         }
-        renderQueue.async { [self] in
+        presentQueue.async { [self] in if let textureCache { CVMetalTextureCacheFlush(textureCache, 0) } }
+        decodeQueue.async { [self] in
             if let session { VTDecompressionSessionInvalidate(session) }
             session = nil
             sessionFormat = nil
+            for entry in spare { VTDecompressionSessionInvalidate(entry.session) }
+            spare.removeAll()
         }
     }
 
     func enqueue(_ sample: CMSampleBuffer) {
-        renderQueue.async { [self] in decode(sample) }
+        let enqueued = CACurrentMediaTime()
+        let generation = lock.withLock { self.generation }
+        decodeQueue.async { [self] in decode(sample, enqueued: enqueued, generation: generation) }
     }
 
-    // MARK: decode (renderQueue)
+    // MARK: decode (decodeQueue)
 
-    private func decode(_ sample: CMSampleBuffer) {
+    private func decode(_ sample: CMSampleBuffer, enqueued: CFTimeInterval, generation: Int) {
+        guard lock.withLock({ self.generation == generation }) else { return } // flushed meanwhile
         guard let format = CMSampleBufferGetFormatDescription(sample) else { return }
         if session == nil || sessionFormat.map({ !CMFormatDescriptionEqual($0, otherFormatDescription: format) }) ?? true {
-            if let session { VTDecompressionSessionInvalidate(session) }
-            session = makeSession(format)
+            // Balanced switches 4:2:0 <-> 4:4:4 lanes: keep the previous
+            // decoder ready instead of rebuilding it every switch (D-042).
+            if let index = spare.firstIndex(where: { CMFormatDescriptionEqual($0.format, otherFormatDescription: format) }) {
+                let reused = spare.remove(at: index)
+                if let session, let sessionFormat { spare.append((sessionFormat, session)) }
+                session = reused.session
+            } else {
+                if let session, let sessionFormat { spare.append((sessionFormat, session)) }
+                session = makeSession(format)
+            }
             sessionFormat = format
+            while spare.count > 1 { VTDecompressionSessionInvalidate(spare.removeFirst().session) }
         }
         guard let session else { return }
         var flags = VTDecodeInfoFlags()
@@ -177,17 +208,44 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
                 self.lock.withLock { self.failed = "decode \(status)" }
                 return
             }
-            self.lock.withLock { self.pending = image }
-            self.renderQueue.async { self.drawPending() }
+            let replaced = self.lock.withLock { () -> Bool in
+                guard self.generation == generation else { return false }
+                let had = self.pending != nil
+                let decoded = CACurrentMediaTime()
+                self.pending = (image, enqueued, decoded)
+                self.decodeTimes.append(decoded - enqueued)
+                if had { self.replacedBeforeShown += 1 }
+                return true
+            }
+            if replaced { self.presentQueue.async { self.drawPending() } }
         }
         if status != noErr { lock.withLock { failed = "decode submit \(status)" } }
     }
 
+    /// Decoder output matching the stream (D-042): 4:4:4 stays 4:4:4 (it was
+    /// always 4:2:0 before, which threw away the detail of the 4:4:4 presets).
     private func makeSession(_ format: CMFormatDescription) -> VTDecompressionSession? {
-        let bits = (CMFormatDescriptionGetExtension(format, extensionKey: kCMFormatDescriptionExtension_BitsPerComponent)
+        var chroma = 1
+        var bits = (CMFormatDescriptionGetExtension(format, extensionKey: kCMFormatDescriptionExtension_BitsPerComponent)
             as? NSNumber)?.intValue ?? 8
-        let pixelFormat = bits > 8 ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
-            : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        if CMFormatDescriptionGetMediaSubType(format) == kCMVideoCodecType_HEVC {
+            var pointer: UnsafePointer<UInt8>?
+            var size = 0
+            if CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(format, parameterSetIndex: 1, parameterSetPointerOut: &pointer,
+                                                                   parameterSetSizeOut: &size, parameterSetCountOut: nil,
+                                                                   nalUnitHeaderLengthOut: nil) == noErr, let pointer,
+               let sps = HEVCSPSInfo(sps: Array(UnsafeBufferPointer(start: pointer, count: size))) {
+                chroma = sps.chromaFormat
+                bits = sps.bitDepthLuma
+            }
+        }
+        let full = chroma == 3
+        let pixelFormat: OSType = switch (full, bits > 8) {
+        case (true, true): kCVPixelFormatType_444YpCbCr10BiPlanarVideoRange
+        case (true, false): kCVPixelFormatType_444YpCbCr8BiPlanarVideoRange
+        case (false, true): kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+        case (false, false): kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        }
         let attributes: [CFString: Any] = [kCVPixelBufferPixelFormatTypeKey: pixelFormat,
                                            kCVPixelBufferMetalCompatibilityKey: true,
                                            kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary]
@@ -200,15 +258,20 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
             return nil
         }
         VTSessionSetProperty(created, key: kVTDecompressionPropertyKey_RealTime, value: kCFBooleanTrue)
+        ClientLog.write("metal decoder: \(full ? "4:4:4" : "4:2:0") \(bits)-bit output")
         return created
     }
 
-    // MARK: draw (renderQueue)
+    // MARK: draw (presentQueue)
 
     private func drawPending() {
-        guard let buffer = lock.withLock({ () -> CVPixelBuffer? in defer { pending = nil }; return pending }),
-              let cache = textureCache else { return }
-        let tenBit = CVPixelBufferGetPixelFormatType(buffer) == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+        guard let frame = lock.withLock({ () -> (buffer: CVPixelBuffer, enqueued: CFTimeInterval, decoded: CFTimeInterval)? in
+            defer { pending = nil }
+            return pending
+        }), let cache = textureCache else { return }
+        let buffer = frame.buffer
+        let type = CVPixelBufferGetPixelFormatType(buffer)
+        let tenBit = type == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange || type == kCVPixelFormatType_444YpCbCr10BiPlanarVideoRange
         guard let luma = texture(buffer, plane: 0, format: tenBit ? .r16Unorm : .r8Unorm, cache: cache),
               let chroma = texture(buffer, plane: 1, format: tenBit ? .rg16Unorm : .rg8Unorm, cache: cache),
               let drawable = layer.nextDrawable(), let commands = queue.makeCommandBuffer() else { return }
@@ -229,13 +292,76 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
         }
         encoder.setRenderPipelineState(pipeline)
         encoder.setVertexBytes(&rect, length: MemoryLayout<SIMD4<Float>>.size, index: 0)
+        var siting = Self.chromaSiting(buffer)
+        encoder.setFragmentBytes(&siting, length: MemoryLayout<SIMD2<Float>>.size, index: 0)
         encoder.setFragmentTexture(CVMetalTextureGetTexture(luma), index: 0)
         encoder.setFragmentTexture(CVMetalTextureGetTexture(chroma), index: 1)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         encoder.endEncoding()
+        let enqueued = frame.enqueued
+        drawable.addPresentedHandler { [weak self] shown in
+            guard let self, shown.presentedTime > 0 else { return }
+            self.notePresented(at: shown.presentedTime, age: shown.presentedTime - enqueued)
+        }
         commands.present(drawable)
         commands.addCompletedHandler { _ in _ = (luma, chroma) } // keep textures alive until done
         commands.commit()
+        // Let the texture cache drop entries for buffers no longer in use
+        // (audit: it was never flushed).
+        framesSinceFlush += 1
+        if framesSinceFlush >= 300 {
+            framesSinceFlush = 0
+            CVMetalTextureCacheFlush(cache, 0)
+        }
+    }
+
+    private var framesSinceFlush = 0 // presentQueue only
+
+    /// Texture-coordinate offset for the chroma plane, from the decoder's
+    /// chroma location (HEVC default when unsignalled: left, type 0). Zero
+    /// for 4:4:4.
+    private static func chromaSiting(_ buffer: CVPixelBuffer) -> SIMD2<Float> {
+        let width = CVPixelBufferGetWidth(buffer), height = CVPixelBufferGetHeight(buffer)
+        guard CVPixelBufferGetPlaneCount(buffer) >= 2, width > 0, height > 0 else { return .zero }
+        let subsampledX = CVPixelBufferGetWidthOfPlane(buffer, 1) < width
+        let subsampledY = CVPixelBufferGetHeightOfPlane(buffer, 1) < height
+        guard subsampledX || subsampledY else { return .zero }
+        let location = (CVBufferCopyAttachment(buffer, kCVImageBufferChromaLocationTopFieldKey, nil) as? String)
+            ?? (kCVImageBufferChromaLocation_Left as String)
+        var dx: Float = 0, dy: Float = 0
+        if subsampledX, [kCVImageBufferChromaLocation_Left, kCVImageBufferChromaLocation_TopLeft,
+                         kCVImageBufferChromaLocation_BottomLeft].contains(where: { ($0 as String) == location }) {
+            dx = 0.5 / Float(width)
+        }
+        if subsampledY {
+            if [kCVImageBufferChromaLocation_TopLeft, kCVImageBufferChromaLocation_Top]
+                .contains(where: { ($0 as String) == location }) { dy = 0.5 / Float(height) }
+            if [kCVImageBufferChromaLocation_BottomLeft, kCVImageBufferChromaLocation_Bottom]
+                .contains(where: { ($0 as String) == location }) { dy = -0.5 / Float(height) }
+        }
+        return SIMD2(dx, dy)
+    }
+
+    /// Logs every 5 s: frames that reached the glass, and how long from
+    /// "handed to the renderer" to "on the glass" (decode + GPU + vsync).
+    private func notePresented(at time: CFTimeInterval, age: CFTimeInterval) {
+        let report: String? = lock.withLock {
+            presented.append((time, age))
+            let elapsed = time - meterStart
+            guard elapsed >= 5 else { return nil }
+            let ages = presented.map(\.age).sorted()
+            let decodes = decodeTimes.sorted()
+            let decodeP50 = decodes.isEmpty ? 0 : decodes[decodes.count / 2] * 1000
+            let line = String(format: "metal on glass: %.1f fps, enqueued->glass p50 %.1f p95 %.1f ms (decode p50 %.1f ms), %d replaced before shown",
+                              Double(presented.count) / elapsed, ages[ages.count / 2] * 1000,
+                              ages[min(ages.count - 1, ages.count * 95 / 100)] * 1000, decodeP50, replacedBeforeShown)
+            decodeTimes.removeAll(keepingCapacity: true)
+            presented.removeAll(keepingCapacity: true)
+            replacedBeforeShown = 0
+            meterStart = time
+            return line
+        }
+        if let report { ClientLog.write(report) }
     }
 
     private func texture(_ buffer: CVPixelBuffer, plane: Int, format: MTLPixelFormat, cache: CVMetalTextureCache) -> CVMetalTexture? {

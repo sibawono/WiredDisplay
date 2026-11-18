@@ -25,6 +25,10 @@ final class AudioRouter: @unchecked Sendable {
     private var headphonesArrived = Date.distantPast
     /// The last default input that was not a headset microphone.
     private var lastOtherInput: AudioDeviceID?
+    /// The last default output / input that was not a WiredDisplay device:
+    /// where sound goes back to when the iPad stops carrying it.
+    private var lastRealOutput: AudioDeviceID?
+    private var lastRealInput: AudioDeviceID?
 
     var isEnabled: Bool {
         get { UserDefaults.standard.object(forKey: Self.enabledKey) as? Bool ?? true }
@@ -55,8 +59,71 @@ final class AudioRouter: @unchecked Sendable {
                                                    mElement: kAudioObjectPropertyElementMain)
             AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &input, queue) { [weak self] _, _ in
                 self?.defaultInputChanged()
+                self?.noteRealDefault(input: true)
+            }
+            var output = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+                                                    mScope: kAudioObjectPropertyScopeGlobal,
+                                                    mElement: kAudioObjectPropertyElementMain)
+            AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &output, queue) { [weak self] _, _ in
+                self?.noteRealDefault(input: false)
             }
             defaultInputChanged()
+            noteRealDefault(input: false)
+            noteRealDefault(input: true)
+            // Left over from a session that ended while the host was not
+            // running: no iPad carries audio yet, so do not keep a dead
+            // default. With switching on, the iPad gets it back on connect.
+            if isEnabled {
+                if !iPadSpeaker { restoreFromIPad(input: false) }
+                if !iPadMicrophone { restoreFromIPad(input: true) }
+            }
+        }
+    }
+
+    /// Remembers the default device when it is a real one (not ours).
+    private func noteRealDefault(input: Bool) {
+        let current = AudioDevices.defaultDevice(input: input)
+        guard current != 0, !isWired(current) else { return }
+        if input { lastRealInput = current } else { lastRealOutput = current }
+    }
+
+    private func isWired(_ id: AudioDeviceID) -> Bool {
+        WiredAudioDevice.allCases.contains { (try? AudioDevices.find($0)) == id }
+    }
+
+    /// The iPad stopped carrying a direction (switched off, unplugged, app
+    /// closed). The driver's devices never disappear, so macOS would keep a
+    /// silent "iPad Speaker" / deaf "iPad Microphone" as the default: move it
+    /// back to the device used before, or any real device. Applies even with
+    /// automatic switching off, since a dead default helps nobody.
+    private func restoreFromIPad(input: Bool) {
+        let current = AudioDevices.defaultDevice(input: input)
+        guard current != 0, isWired(current) else { return }
+        let devices = AudioDevices.all()
+        let usable: (AudioDeviceInfo) -> Bool = { info in
+            WiredAudioDevice(rawValue: info.uid) == nil && (input ? info.inputChannels > 0 : info.outputChannels > 0)
+        }
+        let remembered = input ? lastRealInput : lastRealOutput
+        let target = devices.first { $0.id == remembered && usable($0) }
+            ?? devices.first { usable($0) && $0.transport == kAudioDeviceTransportTypeBuiltIn }
+            ?? devices.first(where: usable)
+        guard let target else {
+            Log.info("audio: the iPad stopped its \(input ? "microphone" : "speaker"); no other \(input ? "input" : "output") to switch to")
+            return
+        }
+        setDefault(target.id, input: input, reason: "the iPad stopped its \(input ? "microphone" : "speaker")")
+    }
+
+    /// The host is quitting: nothing will carry "iPad Speaker" / "iPad
+    /// Microphone" any more, so move the defaults off them now, before the
+    /// process ends (audit C-4: the asynchronous session teardown did not
+    /// always get there in time).
+    func handBackBeforeQuit() {
+        queue.sync {
+            iPadSpeaker = false
+            iPadMicrophone = false
+            restoreFromIPad(input: false)
+            restoreFromIPad(input: true)
         }
     }
 
@@ -65,8 +132,12 @@ final class AudioRouter: @unchecked Sendable {
         queue.async { [self] in
             let speakerTurnedOn = speaker && !iPadSpeaker
             let microphoneTurnedOn = microphone && !iPadMicrophone
+            let speakerTurnedOff = !speaker && iPadSpeaker
+            let microphoneTurnedOff = !microphone && iPadMicrophone
             iPadSpeaker = speaker
             iPadMicrophone = microphone
+            if speakerTurnedOff { restoreFromIPad(input: false) }
+            if microphoneTurnedOff { restoreFromIPad(input: true) }
             guard isEnabled else { return }
             let devices = AudioDevices.all()
             // The iPad is the fallback: use it unless headphones are connected.

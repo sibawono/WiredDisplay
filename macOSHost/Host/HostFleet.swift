@@ -8,7 +8,11 @@ import WDUsbmux
 /// them; audio goes to the first iPad that asks (one driver); the menu panel
 /// shows the iPad in focus (the first one streaming).
 final class HostFleet: @unchecked Sendable {
-    let options: HostController.Options
+    /// Launch options, kept current with the menu's choices (input, quality)
+    /// so an iPad plugged in later starts with what the user chose since,
+    /// never with input that was switched off after launch (D-006).
+    private let currentOptions: OSAllocatedUnfairLock<HostController.Options>
+    var options: HostController.Options { currentOptions.withLock { $0 } }
     let audioRouter = AudioRouter()
     private let confirmPairing: @Sendable (SecureChannel.Peer) -> Bool
     private let lock = OSAllocatedUnfairLock(initialState: (controllers: [HostController](), states: [ObjectIdentifier: HostController.State]()))
@@ -19,7 +23,7 @@ final class HostFleet: @unchecked Sendable {
     var onControllerAdded: (@Sendable (HostController) -> Void)?
 
     init(options: HostController.Options, confirmPairing: @escaping @Sendable (SecureChannel.Peer) -> Bool) {
-        self.options = options
+        currentOptions = OSAllocatedUnfairLock(initialState: options)
         self.confirmPairing = confirmPairing
     }
 
@@ -82,8 +86,14 @@ final class HostFleet: @unchecked Sendable {
 
     // MARK: settings for every iPad
 
-    func setQuality(_ preset: QualityPreset) { controllers.forEach { $0.setQuality(preset) } }
-    func setInputEnabled(_ enabled: Bool) { controllers.forEach { $0.setInputEnabled(enabled) } }
+    func setQuality(_ preset: QualityPreset) {
+        currentOptions.withLock { $0.chroma = preset.chroma; $0.tenBit = preset.tenBit }
+        controllers.forEach { $0.setQuality(preset) }
+    }
+    func setInputEnabled(_ enabled: Bool) {
+        currentOptions.withLock { $0.allowInput = enabled }
+        controllers.forEach { $0.setInputEnabled(enabled) }
+    }
     func setRefreshFollowsIPad(_ follow: Bool) { controllers.forEach { $0.setRefreshFollowsIPad(follow) } }
     func setLocalCursor(_ enabled: Bool) { controllers.forEach { $0.setLocalCursor(enabled) } }
     func forgetDecodeLimits() { controllers.forEach { $0.forgetDecodeLimits() } }

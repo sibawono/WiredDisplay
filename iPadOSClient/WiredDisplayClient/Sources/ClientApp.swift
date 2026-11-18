@@ -27,6 +27,9 @@ final class AppModel {
     /// apps (free teams cannot register more App IDs). Foreground only.
     private let echoLog = EventLog()
     private lazy var echo = EchoServer(events: echoLog)
+    /// Off unless asked for (audit C-7): launch with `-diagnosticEcho YES`
+    /// (e.g. `xcrun devicectl device process launch … -- -diagnosticEcho YES`).
+    private var echoEnabled: Bool { UserDefaults.standard.bool(forKey: "diagnosticEcho") }
 
     func activate() {
         ClientLog.write("app active")
@@ -65,7 +68,7 @@ final class AppModel {
         session?.setVideoActive(true)
         reportBrightness()
         session?.start()
-        echo.start()
+        if echoEnabled { echo.start() }
         UIApplication.shared.isIdleTimerDisabled = true
     }
 
@@ -73,7 +76,7 @@ final class AppModel {
     /// video (D-018); otherwise end the session as before.
     func deactivate(reason: String) {
         ClientLog.write("app leaving foreground: \(reason) (audio active \(audio.isActive))")
-        echo.stop(reason: "app not active")
+        if echoEnabled { echo.stop(reason: "app not active") }
         session?.send(.releaseAll)
         if audio.isActive {
             session?.setVideoActive(false)

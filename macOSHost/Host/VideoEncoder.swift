@@ -37,6 +37,9 @@ final class VideoEncoder: @unchecked Sendable {
         let transfer: VTPixelTransferSession?
         let pool: CVPixelBufferPool?
         let label: String
+        /// 4:2:0 lanes: GPU conversion with filtered chroma (VideoToolbox
+        /// point-samples it); nil = VideoToolbox.
+        var gpu: ChromaConverter? = nil
 
         /// Converts `source` for this lane (matrix only, no gamma change, then
         /// tagged 709 like the rest of the pipeline). Returns the source as-is
@@ -44,8 +47,9 @@ final class VideoEncoder: @unchecked Sendable {
         func prepare(_ source: CVPixelBuffer) -> CVPixelBuffer? {
             guard let transfer, let pool else { return source }
             var converted: CVPixelBuffer?
-            guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &converted) == kCVReturnSuccess, let converted,
-                  VTPixelTransferSessionTransferImage(transfer, from: source, to: converted) == noErr else { return nil }
+            guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &converted) == kCVReturnSuccess, let converted else { return nil }
+            if let gpu, gpu.convert(source, into: converted) { return converted }
+            guard VTPixelTransferSessionTransferImage(transfer, from: source, to: converted) == noErr else { return nil }
             CVBufferSetAttachment(converted, kCVImageBufferTransferFunctionKey,
                                   kCVImageBufferTransferFunction_ITU_R_709_2, .shouldPropagate)
             return converted
@@ -61,6 +65,8 @@ final class VideoEncoder: @unchecked Sendable {
     /// Encoder tuning (D-037); command-line switches for A/B tests.
     nonisolated(unsafe) static var powerEfficient = false
     nonisolated(unsafe) static var periodicKeyframes = false
+    /// Filtered 4:2:0 chroma on the GPU (sharper coloured edges); `--chroma-filter off`.
+    nonisolated(unsafe) static var filteredChroma = true
 
     let codec: VideoCodec
     let chroma: ChromaMode
@@ -87,6 +93,10 @@ final class VideoEncoder: @unchecked Sendable {
     private var motionGeneration: UInt64 = 0
     private var lastCursor = CGPoint.zero
     private var lastCursorMove: UInt64 = 0
+    /// False with the local cursor (D-038): the pointer is not in the video,
+    /// so moving it must not hold the screen on the 4:2:0 lane or delay the
+    /// 4:4:4 refinement (audit B-5).
+    private let cursorInVideo: Bool
     /// Last input event from the iPad (key, click, scroll); key presses on
     /// the Mac's own keyboard are read from the event system. Typing changes
     /// only a few hundred pixels, but it must not wait for the slower 4:4:4
@@ -106,8 +116,10 @@ final class VideoEncoder: @unchecked Sendable {
     private let repeatQueue = DispatchQueue(label: "wireddisplay.host.encoder.repeat")
 
     init(codec: VideoCodec, width: Int, height: Int, fps: Int, bitrateMbps: Int, displayP3: Bool,
-         chroma requested: ChromaMode = .c420, tenBit requestedTenBit: Bool = false, onUnit: @escaping @Sendable (AccessUnit) -> Void) throws {
+         chroma requested: ChromaMode = .c420, tenBit requestedTenBit: Bool = false, cursorInVideo: Bool = true,
+         onUnit: @escaping @Sendable (AccessUnit) -> Void) throws {
         self.codec = codec
+        self.cursorInVideo = cursorInVideo
         self.onUnit = onUnit
         let chroma: ChromaMode = codec == .hevc ? requested : .c420 // 4:4:4 needs HEVC RExt
         self.chroma = chroma
@@ -208,10 +220,17 @@ final class VideoEncoder: @unchecked Sendable {
         }
         let attributes: [CFString: Any] = [kCVPixelBufferPixelFormatTypeKey: format,
                                            kCVPixelBufferWidthKey: c.width, kCVPixelBufferHeightKey: c.height,
-                                           kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary]
+                                           kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
+                                           kCVPixelBufferMetalCompatibilityKey: true]
         CVPixelBufferPoolCreate(nil, nil, attributes as CFDictionary, &pool)
         guard let pool else { throw Error.create(-2) }
-        return Lane(session: session, transfer: transferSession, pool: pool, label: (full444 ? "4:4:4" : "4:2:0") + (c.tenBit ? "/10" : ""))
+        var lane = Lane(session: session, transfer: transferSession, pool: pool,
+                        label: (full444 ? "4:4:4" : "4:2:0") + (c.tenBit ? "/10" : ""))
+        if !full444, VideoEncoder.filteredChroma {
+            lane.gpu = ChromaConverter(tenBit: c.tenBit)
+            Log.info("encoder: 4:2:0 conversion \(lane.gpu != nil ? "on the GPU with filtered chroma" : "by VideoToolbox (GPU converter unavailable)")")
+        }
+        return lane
     }
 
     deinit { invalidate() }
@@ -303,11 +322,11 @@ final class VideoEncoder: @unchecked Sendable {
     func encode(_ source: CVPixelBuffer, presentationTime: CMTime, dirtyFraction: Double = 1) {
         guard !invalidated.withLock({ $0 }) else { return }
         let now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-        let cursor = CGEvent(source: nil)?.location ?? .zero
+        let cursor = cursorInVideo ? CGEvent(source: nil)?.location ?? .zero : .zero
         let (job, motionFrame, reason): (Job?, Bool, String) = stateLock.withLock {
             lastSource = source
             frameGeneration &+= 1
-            if cursor != lastCursor { lastCursor = cursor; lastCursorMove = now }
+            if cursorInVideo, cursor != lastCursor { lastCursor = cursor; lastCursorMove = now }
             let reason = still == nil ? "single-lane" : dirtyFraction > Self.motionDirtyShare ? "dirty"
                 : activityReason(now) ?? "still"
             let isMotion = reason != "still"
@@ -325,7 +344,10 @@ final class VideoEncoder: @unchecked Sendable {
     private func submit(_ job: Job, presentationTime: CMTime) {
         guard !invalidated.withLock({ $0 }) else { return }
         let lane = job.lane
-        guard let pixelBuffer = lane.prepare(job.source) else {
+        let convertStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        let prepared = lane.prepare(job.source)
+        if lane.transfer != nil { stats.converted(nanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) &- convertStart) }
+        guard let pixelBuffer = prepared else {
             Log.warn("\(lane.label) conversion failed; frame dropped")
             if job.force { stateLock.withLock { pendingKeyframe = true } }
             return
@@ -433,6 +455,9 @@ private final class LaneStats: @unchecked Sendable {
         flushIfDue()
     }
 
+    private var conversions: [Double] = []
+    func converted(nanos: UInt64) { lock.withLock { conversions.append(Double(nanos) / 1e6) } }
+
     func laneSwitch() { lock.withLock { switches += 1 } } // caller may hold stateLock; this lock is a leaf
 
     func encoded(label: String, nanos: UInt64, bytes count: Int) {
@@ -457,6 +482,11 @@ private final class LaneStats: @unchecked Sendable {
             }
             let d = dirty.sorted()
             let dirtyText = d.isEmpty ? "-" : String(format: "dirty p50 %.4f p90 %.4f", d[d.count / 2], d[Int(Double(d.count) * 0.9)])
+            if !conversions.isEmpty {
+                let c = conversions.sorted()
+                parts.append(String(format: "convert p50 %.2f p95 %.2f ms", c[c.count / 2], c[min(c.count - 1, c.count * 95 / 100)]))
+                conversions = []
+            }
             let line = "lanes: \(parts.joined(separator: "; ")); motion frames \(motionFrames)/\(d.count) (\(reasons.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", "))), switches \(switches), \(dirtyText)"
             latencies = [:]; bytes = [:]; dirty = []; motionFrames = 0; switches = 0; reasons = [:]
             return line

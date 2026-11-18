@@ -174,3 +174,57 @@ final class CodecRoundTripTests: XCTestCase {
         return try box.samples.map { try SampleBuffers.accessUnit(from: $0, codec: codec) }
     }
 }
+
+import CoreMedia
+import VideoToolbox
+
+final class HEVCSPSTests: XCTestCase {
+    /// Encodes one frame with the hardware HEVC encoder and returns its SPS.
+    private func sps(format: OSType, width: Int = 640, height: Int = 480) throws -> [UInt8] {
+        var session: VTCompressionSession?
+        let status = VTCompressionSessionCreate(allocator: nil, width: Int32(width), height: Int32(height),
+                                                codecType: kCMVideoCodecType_HEVC, encoderSpecification: nil,
+                                                imageBufferAttributes: nil, compressedDataAllocator: nil, outputCallback: nil,
+                                                refcon: nil, compressionSessionOut: &session)
+        guard status == noErr, let session else { throw XCTSkip("no HEVC encoder here (\(status))") }
+        defer { VTCompressionSessionInvalidate(session) }
+        var buffer: CVPixelBuffer?
+        CVPixelBufferCreate(nil, width, height, format, [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary, &buffer)
+        var result: [UInt8]?
+        let done = DispatchSemaphore(value: 0)
+        VTCompressionSessionEncodeFrame(session, imageBuffer: buffer!, presentationTimeStamp: .zero, duration: .invalid,
+                                        frameProperties: nil, infoFlagsOut: nil) { _, _, sample in
+            if let sample, let description = CMSampleBufferGetFormatDescription(sample) {
+                var pointer: UnsafePointer<UInt8>?
+                var size = 0
+                if CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(description, parameterSetIndex: 1,
+                                                                       parameterSetPointerOut: &pointer,
+                                                                       parameterSetSizeOut: &size, parameterSetCountOut: nil,
+                                                                       nalUnitHeaderLengthOut: nil) == noErr, let pointer {
+                    result = Array(UnsafeBufferPointer(start: pointer, count: size))
+                }
+            }
+            done.signal()
+        }
+        VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
+        _ = done.wait(timeout: .now() + 5)
+        guard let result else { throw XCTSkip("encoder produced no SPS") }
+        return result
+    }
+
+    func testReadsChromaAndDepthFromRealEncoderOutput() throws {
+        let main = try XCTUnwrap(HEVCSPSInfo(sps: try sps(format: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)))
+        XCTAssertEqual(main.chromaFormat, 1)
+        XCTAssertEqual(main.bitDepthLuma, 8)
+        XCTAssertEqual(main.width, 640)
+        let full = try XCTUnwrap(HEVCSPSInfo(sps: try sps(format: kCVPixelFormatType_444YpCbCr10BiPlanarVideoRange)))
+        XCTAssertEqual(full.chromaFormat, 3)
+        XCTAssertEqual(full.bitDepthLuma, 10)
+    }
+
+    func testRejectsNonSPSAndTruncatedData() {
+        XCTAssertNil(HEVCSPSInfo(sps: [0x40, 0x01, 0x0C])) // VPS header
+        XCTAssertNil(HEVCSPSInfo(sps: [0x42, 0x01, 0x01, 0x01]))
+        XCTAssertEqual(HEVCSPSInfo.removeEmulationPrevention([0, 0, 3, 1, 0, 0, 3]), [0, 0, 1, 0, 0])
+    }
+}

@@ -371,6 +371,44 @@ final class AudioProtocolTests: XCTestCase {
         XCTAssertEqual(pull(buffer, frames: 2, channels: 1)[0].map { ($0 * 32768).rounded() }, [5000, 6000], "newest audio kept")
     }
 
+    /// Producer slightly slower than the consumer (clock drift): without
+    /// correction the buffer drains and underruns; with it, it holds.
+    func testJitterBufferRepeatsFramesWhenDraining() {
+        let buffer = AudioJitterBuffer(channels: 1, targetFrames: 1440, maxFrames: 4800)
+        buffer.push(AudioPacket(channels: 1, samples: [Int16](repeating: 100, count: 1440)))
+        // 2000 cycles: 240 frames pulled, 239 pushed (0.4 % slow, far worse
+        // than real drift) -> 2000 frames short over the run.
+        for _ in 0..<2000 {
+            _ = pull(buffer, frames: 240, channels: 1)
+            buffer.push(AudioPacket(channels: 1, samples: [Int16](repeating: 100, count: 239)))
+        }
+        XCTAssertEqual(buffer.stats.underruns, 0)
+        XCTAssertGreaterThan(buffer.stats.driftCorrections, 0)
+        XCTAssertGreaterThanOrEqual(buffer.stats.bufferedFrames, 600)
+    }
+
+    /// Too much buffered (latency high, e.g. after a burst): it skips frames
+    /// back down near the target instead of staying high until maxFrames.
+    func testJitterBufferSkipsFramesBackToTarget() {
+        let buffer = AudioJitterBuffer(channels: 1, targetFrames: 1440, maxFrames: 4800)
+        buffer.push(AudioPacket(channels: 1, samples: [Int16](repeating: 100, count: 4000)))
+        for _ in 0..<3000 {
+            _ = pull(buffer, frames: 240, channels: 1)
+            buffer.push(AudioPacket(channels: 1, samples: [Int16](repeating: 100, count: 240)))
+        }
+        XCTAssertEqual(buffer.stats.underruns, 0)
+        XCTAssertLessThanOrEqual(abs(buffer.stats.bufferedFrames - 1440), 480)
+    }
+
+    func testJitterBufferTwoPointerPullMatchesArrayPull() {
+        let buffer = AudioJitterBuffer(channels: 2, targetFrames: 1, maxFrames: 8)
+        buffer.push(AudioPacket(channels: 2, samples: [16384, -16384, 8192, -8192]))
+        let left = UnsafeMutablePointer<Float>.allocate(capacity: 2), right = UnsafeMutablePointer<Float>.allocate(capacity: 2)
+        defer { left.deallocate(); right.deallocate() }
+        buffer.pull(left, right, frames: 2)
+        XCTAssertEqual([left[0], left[1], right[0], right[1]], [0.5, 0.25, -0.5, -0.25])
+    }
+
     func testMonoUpmixesToStereoAndStereoDeinterleaves() {
         let mono = AudioJitterBuffer(channels: 1, targetFrames: 1, maxFrames: 4)
         mono.push(AudioPacket(channels: 1, samples: [16384]))

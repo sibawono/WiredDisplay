@@ -140,6 +140,14 @@ The iPad script finds your team from the "Apple Development" certificate in
 the keychain and uses the first iPad connected over USB. Set `TEAM_ID`,
 `DEVICE` and `BUNDLE_PREFIX` to override these.
 
+### Sharpest picture
+
+Set the iPad's **Display Zoom to Default** (Settings › Display & Brightness).
+"More Space" makes the iPad report a larger panel than it has, so the Mac
+encodes about 35% more pixels and the iPad scales them down again. Default
+streams 1:1 to the panel. Measured on an iPad Air 13″: encode went from 16 to
+12 ms, and display latency from about 40 to 30 ms.
+
 ### First run
 
 1. Open WiredDisplay on the Mac. It lives in the menu bar.

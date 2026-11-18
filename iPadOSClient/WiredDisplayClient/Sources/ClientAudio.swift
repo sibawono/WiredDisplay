@@ -276,8 +276,10 @@ final class ClientAudio {
         let format = AVAudioFormat(standardFormatWithSampleRate: SessionConstants.audioSampleRate, channels: 2)!
         return AVAudioSourceNode(format: format) { _, _, frameCount, bufferList -> OSStatus in
             let list = UnsafeMutableAudioBufferListPointer(bufferList)
-            let outputs = list.compactMap { $0.mData?.assumingMemoryBound(to: Float.self) }
-            buffer.pull(into: outputs, frames: Int(frameCount))
+            // No array here: render callbacks must not allocate (audit C-5).
+            let first = list.count > 0 ? list[0].mData?.assumingMemoryBound(to: Float.self) : nil
+            let second = list.count > 1 ? list[1].mData?.assumingMemoryBound(to: Float.self) : nil
+            buffer.pull(first, second, frames: Int(frameCount))
             return noErr
         }
     }

@@ -509,6 +509,7 @@ final class HostController: @unchecked Sendable {
     /// host waited silently until the cable was re-plugged).
     /// Serial of the device the last session ran on (tried first next time).
     private var lastGoodSerial: String?
+    private var lastWiredSeen: String?
 
     private func waitForWiredDevices() -> [UsbmuxDevice]? {
         onState(.waitingForDevice)
@@ -519,9 +520,17 @@ final class HostController: @unchecked Sendable {
                 let devices = try connection.listDevices()
                 let wired = UsbmuxDevice.wiredOnly(devices)
                 if !wired.isEmpty {
-                    noteWait("on USB: " + wired.map { "device \($0.deviceID)" }.joined(separator: ", "))
+                    // Logged only when the set of devices changes: alternating
+                    // with "nothing listens" every second, it defeated
+                    // noteWait's dedupe and wrote 2 lines/s (audit C-8).
+                    let seenNow = wired.map { "device \($0.deviceID)" }.joined(separator: ", ")
+                    if seenNow != lastWiredSeen {
+                        lastWiredSeen = seenNow
+                        Log.info("on USB: \(seenNow)")
+                    }
                     return wired
                 }
+                lastWiredSeen = nil
                 let listed = devices.isEmpty ? "usbmuxd lists no device"
                     : "usbmuxd lists only non-USB devices: " + devices.map { "\($0.deviceID) \($0.connectionType)" }.joined(separator: ", ")
                 // Is the iPad on the USB bus at all? (BUG-037)
@@ -573,7 +582,10 @@ final class HostController: @unchecked Sendable {
             throw error
         }
         let socket = FramedSocket(
-            descriptor: descriptor, sessionID: generator.next(), channel: channel,
+            // At most 4 queued video frames (was 6: 100 ms at 60 Hz) when the
+            // link backs up; beyond that the queue restarts at a keyframe, so a
+            // stall costs less latency (audit B-6). Normally 0-1 are queued.
+            descriptor: descriptor, sessionID: generator.next(), maxVideoFrames: 4, channel: channel,
             onVerified: { [weak self] peer, origin in
                 guard let self else { return }
                 self.queue.async {
@@ -626,6 +638,12 @@ final class HostController: @unchecked Sendable {
                 self.socket = nil
                 self.trusted = false
                 self.pendingControl = []
+                // Give the audio back (BUG: Mac sound stayed on a silent
+                // "iPad Speaker" after unplugging, and another iPad could
+                // never take audio over).
+                if ownsAudio { audioRouter.iPadRoute(speaker: false, microphone: false) }
+                releaseAudio()
+                sessionStatus.withLock { $0.speaker = false; $0.microphone = false }
             }
             socket.close("session teardown")
             Log.info("session cleaned up: \(endReason.withLock { $0 })")
@@ -763,7 +781,6 @@ final class HostController: @unchecked Sendable {
             stopVideo()
             throw error
         }
-        send(.streamConfig(pipeline.config), on: socket)
         let codec = pipeline.config.codec
         onState(.streaming("\(hello.deviceName) · \(config.pixelWidth)×\(config.pixelHeight) \(codec)"))
         let streamed = pipeline.config
@@ -805,18 +822,21 @@ final class HostController: @unchecked Sendable {
             encoder = try VideoEncoder(codec: codec, width: Int(config.pixelWidth), height: Int(config.pixelHeight),
                                        fps: fps, bitrateMbps: options.bitrateMbps,
                                        displayP3: options.displayP3, chroma: current.chroma,
-                                       tenBit: current.tenBit, onUnit: onUnit)
+                                       tenBit: current.tenBit, cursorInVideo: !localCursor, onUnit: onUnit)
         } catch where codec == .hevc {
             Log.warn("HEVC encoder unavailable (\(error)); falling back to H.264")
             codec = .h264
             encoder = try VideoEncoder(codec: codec, width: Int(config.pixelWidth), height: Int(config.pixelHeight),
                                        fps: fps, bitrateMbps: options.bitrateMbps,
                                        displayP3: options.displayP3, chroma: current.chroma,
-                                       tenBit: current.tenBit, onUnit: onUnit)
+                                       tenBit: current.tenBit, cursorInVideo: !localCursor, onUnit: onUnit)
         }
         pipeline.config.codec = codec
         pipeline.encoder = encoder
         queue.sync { self.encoder = encoder }
+        // Config before the first frame can be captured (D-042): the iPad
+        // needs it to place the video, and frames must not overtake it.
+        send(.streamConfig(pipeline.config), on: socket)
         try pipeline.capture.start(displayID: pipeline.captureID, pixelWidth: Int(config.pixelWidth),
                                    pixelHeight: Int(config.pixelHeight), fps: fps, displayP3: options.displayP3,
                                    bgra: encoder.wantsBGRA, showsCursor: !localCursor,

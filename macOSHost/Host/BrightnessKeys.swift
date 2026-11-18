@@ -6,33 +6,63 @@ import CoreGraphics
 /// catches the keys (system-defined events, as MonitorControl does) while an
 /// iPad is connected and leaves them alone otherwise. Option-Shift = fine steps.
 /// Needs Accessibility (an active event tap), which input injection uses too.
-@MainActor
-final class BrightnessKeys {
-    nonisolated private let controller: HostController
-    // Set once on the main thread; the tap callback runs on the main run loop too.
-    nonisolated(unsafe) private var tap: CFMachPort?
-    private var retry: Timer?
+/// One event tap for every iPad (audit C-3), on its own thread: the tap is
+/// active (it swallows brightness keys) and sees every key press, so on the
+/// main thread each keystroke on the Mac waited for the host's UI work, and
+/// there was one tap per iPad.
+final class BrightnessKeys: @unchecked Sendable {
+    static let shared = BrightnessKeys()
+
+    private let lock = NSLock()
+    private var controllers: [HostController] = []
+    private var tap: CFMachPort? // tap thread only, after creation
+    private var runLoop: CFRunLoop?
+    private var started = false
     private var warned = false
 
     // NX_SYSDEFINED event, subtype NX_SUBTYPE_AUX_CONTROL_BUTTONS, keys from ev_keymap.h.
-    nonisolated private static let systemDefined = CGEventType(rawValue: 14)!
-    nonisolated private static let auxControlButtons: Int16 = 8
-    nonisolated private static let brightnessUp = 2, brightnessDown = 3
+    private static let systemDefined = CGEventType(rawValue: 14)!
+    private static let auxControlButtons: Int16 = 8
+    private static let brightnessUp = 2, brightnessDown = 3
     /// Key codes third-party keyboards send for display brightness (HID
     /// consumer "Display Brightness Increment/Decrement").
-    nonisolated private static let brightnessUpKeyCode: Int64 = 144, brightnessDownKeyCode: Int64 = 145
+    private static let brightnessUpKeyCode: Int64 = 144, brightnessDownKeyCode: Int64 = 145
     /// `--trace-keys`: log system-defined events and function-key presses
     /// (never letters or digits) for 10 min, to see what a keyboard sends.
-    nonisolated static let tracing = CommandLine.arguments.contains("--trace-keys")
-    nonisolated private static let traceUntil = Date().addingTimeInterval(600)
-    nonisolated private static let functionKeyCodes: Set<Int64> = [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111,
+    static let tracing = CommandLine.arguments.contains("--trace-keys")
+    private static let traceUntil = Date().addingTimeInterval(600)
+    private static let functionKeyCodes: Set<Int64> = [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111,
                                                                     105, 107, 113, 106, 64, 79, 80, 90, 145, 144, 160, 131, 177, 176]
 
-    init(controller: HostController) {
-        self.controller = controller
+    /// Adds an iPad's controller; starts the tap thread on first use.
+    func add(_ controller: HostController) {
+        let first = lock.withLock { () -> Bool in
+            controllers.append(controller)
+            defer { started = true }
+            return !started
+        }
+        guard first else { return }
+        let thread = Thread { [self] in
+            runLoop = CFRunLoopGetCurrent()
+            install()
+            // Keep the run loop alive while the tap is retried.
+            let keepAlive = CFRunLoopTimerCreateWithHandler(nil, CFAbsoluteTimeGetCurrent() + 1e9, 0, 0, 0) { _ in }
+            CFRunLoopAddTimer(CFRunLoopGetCurrent(), keepAlive, .commonModes)
+            CFRunLoopRun()
+        }
+        thread.name = "wireddisplay.brightness-keys"
+        thread.qualityOfService = .userInteractive
+        thread.start()
     }
 
-    func start() {
+    /// The iPad the keys act on now: the first whose screen has the pointer
+    /// (or the only display).
+    private var target: HostController? {
+        lock.withLock { controllers }.first { $0.brightnessKeysTargetIPad }
+    }
+
+    /// On the tap thread.
+    private func install() {
         guard tap == nil else { return }
         let refcon = Unmanaged.passUnretained(self).toOpaque()
         let callback: CGEventTapCallBack = { _, type, event, refcon in
@@ -59,20 +89,21 @@ final class BrightnessKeys {
                 Log.warn("brightness keys: event tap unavailable (Accessibility not granted); retrying")
                 warned = true
             }
-            retry = Timer.scheduledTimer(withTimeInterval: 10, repeats: false) { [weak self] _ in
-                MainActor.assumeIsolated { self?.start() }
+            let retry = CFRunLoopTimerCreateWithHandler(nil, CFAbsoluteTimeGetCurrent() + 10, 0, 0, 0) { [weak self] _ in
+                self?.install()
             }
+            CFRunLoopAddTimer(CFRunLoopGetCurrent(), retry, .commonModes)
             return
         }
         self.tap = tap
         let source = CFMachPortCreateRunLoopSource(nil, tap, 0)
-        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
         Log.info("brightness keys: listening at \(level) level")
     }
 
-    /// Runs on the main run loop (the tap source is added there).
-    nonisolated private func handle(_ type: CGEventType, _ event: CGEvent) -> Unmanaged<CGEvent>? {
+    /// Runs on the tap thread.
+    private func handle(_ type: CGEventType, _ event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
             return Unmanaged.passUnretained(event)
@@ -90,7 +121,7 @@ final class BrightnessKeys {
         if type == .keyDown || type == .keyUp {
             let code = event.getIntegerValueField(.keyboardEventKeycode)
             guard code == Self.brightnessUpKeyCode || code == Self.brightnessDownKeyCode,
-                  controller.brightnessKeysTargetIPad else { return Unmanaged.passUnretained(event) }
+                  let controller = target else { return Unmanaged.passUnretained(event) }
             if type == .keyDown {
                 let fine = event.flags.contains([.maskAlternate, .maskShift])
                 controller.stepBrightness(up: code == Self.brightnessUpKeyCode, fine: fine)
@@ -106,7 +137,7 @@ final class BrightnessKeys {
         guard key == Self.brightnessUp || key == Self.brightnessDown else { return Unmanaged.passUnretained(event) }
         // No iPad, or the pointer is on another display: that display's own
         // controls (macOS, BetterDisplay, Sidecar) handle it.
-        guard controller.brightnessKeysTargetIPad else { return Unmanaged.passUnretained(event) }
+        guard let controller = target else { return Unmanaged.passUnretained(event) }
         if isDown {
             let fine = ns.modifierFlags.contains([.option, .shift])
             controller.stepBrightness(up: key == Self.brightnessUp, fine: fine)

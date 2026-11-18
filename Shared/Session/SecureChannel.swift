@@ -22,7 +22,9 @@ import WDProtocol
 /// additional data = the encoded header (session ID, stream, sequence, flags,
 /// timestamp, length). With `SequenceValidator`, replay and reordering fail.
 ///
-/// Thread-safe: one lock; seal and receive may run on different threads.
+/// Thread-safe: sending and receiving have separate locks, so sealing a large
+/// video frame never waits for opening one (or the other way round). The
+/// send key is the only state both sides touch, under `sendLock`.
 public final class SecureChannel: @unchecked Sendable {
     public static let tagLength = 16
 
@@ -67,7 +69,8 @@ public final class SecureChannel: @unchecked Sendable {
     private let identity: Curve25519.Signing.PrivateKey
     private let ephemeral = Curve25519.KeyAgreement.PrivateKey()
     private let localHello: AuthHello
-    private let lock = NSLock()
+    private let lock = NSLock()      // receive side and handshake state
+    private let sendLock = NSLock()  // sendKey, sentHello
     private var sendKey: SymmetricKey?
     private var receiveKey: SymmetricKey?
     private var transcript: Data?
@@ -95,7 +98,7 @@ public final class SecureChannel: @unchecked Sendable {
     /// frame is encrypted.
     public func wire(stream: StreamType, keyframe: Bool, sessionID: UInt64, sequence: UInt64,
                      timestampNanos: UInt64, payload: [UInt8]) throws -> [UInt8] {
-        try lock.withLock {
+        try sendLock.withLock {
             // Our authHello always goes in the clear, even if the peer's hello
             // already arrived (keys exist) before we sent ours.
             if !sentHello, stream == .control, payload == authHelloPayload {
@@ -199,7 +202,7 @@ public final class SecureChannel: @unchecked Sendable {
                                            outputByteCount: bytes)
         }
         let hostToClient = derive("host->client"), clientToHost = derive("client->host")
-        sendKey = role == .host ? hostToClient : clientToHost
+        sendLock.withLock { sendKey = role == .host ? hostToClient : clientToHost }
         receiveKey = role == .host ? clientToHost : hostToClient
         let code = derive("pairing code", bytes: 8).withUnsafeBytes { raw in
             raw.reduce(UInt64(0)) { $0 << 8 | UInt64($1) } % 1_000_000

@@ -55,6 +55,7 @@ final class InputInjector {
     /// Diagnostics (E-07): every non-move event is logged with where it was
     /// posted and where the real cursor ended up; moves are counted.
     private var movesSinceLog = 0
+    private var loggedDisabled = false
 
     private func trace(_ what: String, _ point: CGPoint? = nil) {
         let cursor = CGEvent(source: nil)?.location ?? .zero
@@ -66,16 +67,26 @@ final class InputInjector {
     }
 
     func handle(_ event: InputEvent) {
+        firePendingUp() // a held-back mouse-up goes before anything newer
+        // Logged: clicks and gesture boundaries only. Moves, scroll steps and
+        // gesture steps are counted (at 60-120 Hz they filled the log and
+        // slowed the session queue); keystrokes are never logged.
         switch event {
         case .pointer(.move, _, _, _): movesSinceLog += 1
-        case .key: break // never log keystrokes
+        case .key, .scroll, .gestureScroll: break
         case .magnify(_, .changed), .rotate(_, .changed): gestureSteps += 1
-        default: trace("received \(event)")
+        case .magnify, .rotate: break // boundaries are logged when posted
+        case .pointer: break // down/up are logged when posted
+        case .releaseAll: trace("received \(event)")
         }
         guard isEnabled() else {
-            trace("dropped: input disabled")
+            if !loggedDisabled {
+                loggedDisabled = true
+                Log.info("INPUT dropped: input is disabled (logged once until it is enabled again)")
+            }
             return releaseAll()
         }
+        loggedDisabled = false
         guard AXIsProcessTrusted() else {
             if !warnedNoPermission {
                 Log.warn("input dropped: Accessibility permission not granted to this app")
@@ -177,6 +188,7 @@ final class InputInjector {
     }
 
     func releaseAll() {
+        firePendingUp()
         releaseKeys()
         guard heldButton != .none else { return }
         Log.info("releasing held \(heldButton) button")
@@ -230,15 +242,28 @@ final class InputInjector {
 
     private func release(_ button: PointerButton, at point: CGPoint) {
         guard heldButton == button else { return } // unmatched up: ignore
-        if let down = lastDown?.time {
-            let held = ProcessInfo.processInfo.systemUptime - down
-            if held < Self.minimumClickDuration {
-                usleep(useconds_t((Self.minimumClickDuration - held) * 1_000_000))
-            }
-        }
         lastPoint = point
         heldButton = .none
-        post(button == .right ? .rightMouseUp : .leftMouseUp, at: point, button: button, clickState: lastDown?.count ?? 1)
+        let clicks = lastDown?.count ?? 1
+        let up: () -> Void = { [weak self] in
+            self?.post(button == .right ? .rightMouseUp : .leftMouseUp, at: point, button: button, clickState: clicks)
+        }
+        let held = lastDown.map { ProcessInfo.processInfo.systemUptime - $0.time } ?? Self.minimumClickDuration
+        guard held < Self.minimumClickDuration else { up(); return }
+        // Too short: post the release a little later instead of sleeping, so
+        // the session queue (audio, control, other input) never waits on it.
+        // The next event posts it first, which keeps the order.
+        pendingUp = up
+        queue.asyncAfter(deadline: .now() + (Self.minimumClickDuration - held)) { [weak self] in self?.firePendingUp() }
+    }
+
+    /// A mouse-up held back by `release` (minimum click length).
+    private var pendingUp: (() -> Void)?
+
+    private func firePendingUp() {
+        guard let up = pendingUp else { return }
+        pendingUp = nil
+        up()
     }
 
     // MARK: scroll

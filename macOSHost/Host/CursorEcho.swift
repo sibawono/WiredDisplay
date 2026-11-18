@@ -1,4 +1,5 @@
 import AppKit
+import os
 import CoreGraphics
 import WDSession
 
@@ -15,6 +16,10 @@ final class CursorEcho: @unchecked Sendable {
     private var imageTimer: DispatchSourceTimer?
     private var last: (x: Float, y: Float, visible: Bool) = (-1, -1, false)
     private var lastImageKey = 0
+    /// Set by the position poll: the image is only checked while the pointer
+    /// is on this display (audit B-8: it was TIFF-encoded 30 times a second
+    /// on the main thread whatever the pointer did).
+    private let onDisplay = OSAllocatedUnfairLock(initialState: false)
 
     init(displayID: CGDirectDisplayID, send: @escaping @Sendable (ControlMessage) -> Void) {
         self.displayID = displayID
@@ -43,16 +48,14 @@ final class CursorEcho: @unchecked Sendable {
 
     deinit { stop() }
 
-    /// Forces the image to be sent again (new session, new display mode).
-    func resendImage() {
-        DispatchQueue.main.async { [weak self] in self?.lastImageKey = 0 }
-    }
-
     private func pollPosition() {
         guard let location = CGEvent(source: nil)?.location else { return }
         let bounds = CGDisplayBounds(displayID)
         guard bounds.width > 0, bounds.height > 0 else { return }
-        let visible = bounds.contains(location) && Self.cursorShown()
+        let inside = bounds.contains(location)
+        let arrived = onDisplay.withLock { was in defer { was = inside }; return inside && !was }
+        if arrived { DispatchQueue.main.async { [weak self] in self?.pollImage() } } // new shape at once
+        let visible = inside && Self.cursorShown()
         if visible {
             let x = Float((location.x - bounds.minX) / bounds.width)
             let y = Float((location.y - bounds.minY) / bounds.height)
@@ -74,14 +77,25 @@ final class CursorEcho: @unchecked Sendable {
     }
 
     private func pollImage() {
-        guard let cursor = NSCursor.currentSystem else { return }
+        guard onDisplay.withLock({ $0 }), let cursor = NSCursor.currentSystem else { return }
         let display = CGDisplayBounds(displayID).size // points, current mode
         guard display.width > 0, display.height > 0 else { return }
         let image = cursor.image
-        guard let tiff = image.tiffRepresentation else { return }
-        let key = tiff.hashValue ^ (Int(display.width) &* 31)
+        // Key from the bitmap's bytes (cheap) rather than a TIFF encoding;
+        // the PNG is only made when the shape actually changed.
+        var proposed = CGRect(origin: .zero, size: image.size)
+        guard let bitmap = image.cgImage(forProposedRect: &proposed, context: nil, hints: nil),
+              let bytes = bitmap.dataProvider?.data as Data? else { return }
+        var hasher = Hasher()
+        hasher.combine(bytes)
+        hasher.combine(bitmap.width)
+        hasher.combine(cursor.hotSpot.x)
+        hasher.combine(cursor.hotSpot.y)
+        hasher.combine(Int(display.width))
+        let key = hasher.finalize()
         guard key != lastImageKey else { return }
-        guard let rep = NSBitmapImageRep(data: tiff), let png = rep.representation(using: .png, properties: [:]),
+        guard let tiff = image.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
+              let png = rep.representation(using: .png, properties: [:]),
               png.count <= CursorImage.maxPNGBytes else { return }
         lastImageKey = key
         let size = image.size
