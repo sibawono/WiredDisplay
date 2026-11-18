@@ -1,9 +1,9 @@
-WiredDisplay 0.4.0 — Panduan Instalasi
+WiredDisplay 0.4.2 — Panduan Instalasi
 iPad jadi layar Mac lewat kabel USB-C (dengan suara dan input sentuh)
 
 Isi paket
-- WiredDisplay-0.4.0.dmg   → app untuk Mac (host)
-- WiredDisplay-0.4.0.ipa   → app untuk iPad (dipasang lewat AltStore)
+- WiredDisplay-0.4.2.dmg   → app untuk Mac (host)
+- WiredDisplay-0.4.2.ipa   → app untuk iPad (dipasang lewat AltStore)
 - PANDUAN-INSTALASI.txt    → file ini
 
 Yang dibutuhkan
@@ -33,7 +33,7 @@ BAGIAN A — Pasang app iPad lewat AltStore
 5. Nyalakan Developer Mode: Settings › Privacy & Security › Developer Mode → On.
    iPad akan restart; setelah menyala, konfirmasi "Turn On".
 
-6. Kirim file WiredDisplay-0.4.0.ipa ke iPad (AirDrop, atau simpan di app Files).
+6. Kirim file WiredDisplay-0.4.2.ipa ke iPad (AirDrop, atau simpan di app Files).
    Buka AltStore › My Apps › tombol + di kiri atas → pilih file .ipa itu.
    Tunggu sampai WiredDisplay muncul di layar utama.
 
@@ -51,13 +51,13 @@ Perpanjangan 7 hari (penting)
 
 BAGIAN B — Pasang app Mac (host)
 
-1. Buka WiredDisplay-0.4.0.dmg. Seret WiredDisplayHost ke folder Applications.
+1. Buka WiredDisplay-0.4.2.dmg. Seret WiredDisplayHost ke folder Applications.
 
 2. Buka WiredDisplayHost. Karena app ini tidak dinotarisasi Apple, macOS akan
    menolak saat pertama dibuka. Buka System Settings › Privacy & Security,
    gulir ke bawah, klik "Open Anyway", lalu buka app-nya lagi.
 
-3. App ini hidup di menu bar (ikon layar + USB), tidak ada ikon di Dock.
+3. App ini hidup di menu bar (ikon iPad), tidak ada ikon di Dock.
    Ia otomatis terbuka setiap login (bisa dimatikan: menu › Open at Login).
 
 4. Beri izin yang diminta:
