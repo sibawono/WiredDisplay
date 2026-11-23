@@ -4,6 +4,7 @@ import Metal
 import QuartzCore
 import VideoToolbox
 import WDVideo
+import WDSession
 
 /// Where decoded video goes: the system display layer (default) or the
 /// experimental Metal path. Thread-safe; called from the session queue.
@@ -77,12 +78,21 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
     private let decodeQueue = DispatchQueue(label: "wireddisplay.metal.decode", qos: .userInteractive)
     private let presentQueue = DispatchQueue(label: "wireddisplay.metal.present", qos: .userInteractive)
     private let lock = NSLock()
-    private var pending: (buffer: CVPixelBuffer, enqueued: CFTimeInterval, decoded: CFTimeInterval)?
-    private var decodeTimes: [CFTimeInterval] = []
+    private var pending: (buffer: CVPixelBuffer, enqueued: CFTimeInterval, decoded: CFTimeInterval,
+                          sampleID: Int64, transitMS: Double?)?
+    private struct PresentationTiming {
+        let total: CFTimeInterval
+        let decode: CFTimeInterval
+        let readyToSubmit: CFTimeInterval
+        let drawableWait: CFTimeInterval
+        let submitToGlass: CFTimeInterval
+    }
+
+    private var gpuTimes: [CFTimeInterval] = []
     /// Bumped by flush: decodes and presents from before it are dropped.
     private var generation = 0
     /// Presented-frame meter: when frames actually reached the glass.
-    private var presented: [(time: CFTimeInterval, age: CFTimeInterval)] = []
+    private var presented: [PresentationTiming] = []
     private var meterStart = CACurrentMediaTime()
     private var replacedBeforeShown = 0
     private var session: VTDecompressionSession?
@@ -90,8 +100,8 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
     /// The other lane's decoder (decodeQueue only).
     private var spare: [(format: CMFormatDescription, session: VTDecompressionSession)] = []
     private var failed: String?
-    /// Drawable size in pixels, set from the main thread on layout.
-    private var drawableSize = CGSize.zero
+    private var scaledTextStrength: Float = 0
+    private let scaledTextEnabled = !ProcessInfo.processInfo.arguments.contains("--disable-scaled-text-detail")
 
     init?() {
         guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue() else { return nil }
@@ -112,13 +122,32 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
             return o;
         }
         fragment float4 fmain(Out in [[stage_in]], texture2d<float> luma [[texture(0)]],
-                              texture2d<float> chroma [[texture(1)]], constant float2 &siting [[buffer(0)]]) {
+                              texture2d<float> chroma [[texture(1)]],
+                              constant float2 &siting [[buffer(0)]], constant uint &pixelMatched [[buffer(1)]],
+                              constant float &scaledTextStrength [[buffer(2)]]) {
             constexpr sampler s(filter::linear, address::clamp_to_edge);
+            uint2 pixel = uint2(in.position.xy);
+            float lumaCode = pixelMatched ? luma.read(pixel).r : luma.sample(s, in.uv).r;
+            if (pixelMatched && scaledTextStrength > 0) {
+                uint2 last = uint2(luma.get_width() - 1, luma.get_height() - 1);
+                uint2 left = uint2(max(pixel.x, 1u) - 1u, pixel.y);
+                uint2 up = uint2(pixel.x, max(pixel.y, 1u) - 1u);
+                float a = luma.read(left).r;
+                float b = luma.read(min(pixel + uint2(1, 0), last)).r;
+                float c = luma.read(up).r;
+                float d = luma.read(min(pixel + uint2(0, 1), last)).r;
+                float low = min(lumaCode, min(min(a, b), min(c, d)));
+                float high = max(lumaCode, max(max(a, b), max(c, d)));
+                float contrast = smoothstep(0.02f, 0.12f, high - low);
+                float detail = lumaCode - (a + b + c + d) * 0.25f;
+                lumaCode = clamp(lumaCode + scaledTextStrength * contrast * detail, low, high);
+            }
+            bool fullChroma = luma.get_width() == chroma.get_width() && luma.get_height() == chroma.get_height();
+            // 4:2:0 still needs chroma reconstruction at the signalled sample position.
+            float2 chromaCode = pixelMatched && fullChroma ? chroma.read(pixel).rg : chroma.sample(s, in.uv + siting).rg;
             // BT.709 video range (MSB-aligned 10-bit reads the same as 8-bit).
-            float y = (luma.sample(s, in.uv).r - 16.0 / 255.0) * (255.0 / 219.0);
-            // 4:2:0 chroma siting: shift so each chroma sample lands on the
-            // luma position it was taken at (left-sited by default in HEVC).
-            float2 c = (chroma.sample(s, in.uv + siting).rg - 128.0 / 255.0) * (255.0 / 224.0);
+            float y = (lumaCode - 16.0 / 255.0) * (255.0 / 219.0);
+            float2 c = (chromaCode - 128.0 / 255.0) * (255.0 / 224.0);
             float3 rgb = float3(y + 1.5748 * c.y, y - 0.1873 * c.x - 0.4681 * c.y, y + 1.8556 * c.x);
             return float4(saturate(rgb), 1);
         }
@@ -147,9 +176,20 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
     func layout(bounds: CGRect, scale: CGFloat) {
         layer.frame = bounds
         layer.contentsScale = scale
-        let size = CGSize(width: bounds.width * scale, height: bounds.height * scale)
-        layer.drawableSize = size
-        lock.withLock { drawableSize = size }
+        layer.drawableSize = CGSize(width: (bounds.width * scale).rounded(),
+                                    height: (bounds.height * scale).rounded())
+    }
+
+    /// The host scales its oversized HiDPI raster down to the panel before encoding.
+    func setStreamGeometry(_ config: StreamConfig?) {
+        var strength: Float = 0
+        if scaledTextEnabled, let config, config.pixelWidth > 0, config.pixelHeight > 0 {
+            let horizontal = 2 * Float(config.pointWidth) / Float(config.pixelWidth)
+            let vertical = 2 * Float(config.pointHeight) / Float(config.pixelHeight)
+            let overscale = min(horizontal, vertical) - 1
+            if overscale > 0.02 { strength = min(2.8 * overscale, 0.65) }
+        }
+        lock.withLock { scaledTextStrength = strength }
     }
 
     // MARK: VideoSink
@@ -200,6 +240,8 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
             while spare.count > 1 { VTDecompressionSessionInvalidate(spare.removeFirst().session) }
         }
         guard let session else { return }
+        let sampleID = CMTimeConvertScale(sample.presentationTimeStamp, timescale: 1_000_000_000, method: .default).value
+        let transitMS = (CMGetAttachment(sample, key: "WiredDisplayTransitMS" as CFString, attachmentModeOut: nil) as? NSNumber)?.doubleValue
         var flags = VTDecodeInfoFlags()
         let status = VTDecompressionSessionDecodeFrame(session, sampleBuffer: sample, flags: [],
                                                        infoFlagsOut: &flags) { [weak self] status, _, image, _, _ in
@@ -208,16 +250,15 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
                 self.lock.withLock { self.failed = "decode \(status)" }
                 return
             }
-            let replaced = self.lock.withLock { () -> Bool in
+            let needsDraw = self.lock.withLock { () -> Bool in
                 guard self.generation == generation else { return false }
                 let had = self.pending != nil
                 let decoded = CACurrentMediaTime()
-                self.pending = (image, enqueued, decoded)
-                self.decodeTimes.append(decoded - enqueued)
+                self.pending = (image, enqueued, decoded, sampleID, transitMS)
                 if had { self.replacedBeforeShown += 1 }
-                return true
+                return !had
             }
-            if replaced { self.presentQueue.async { self.drawPending() } }
+            if needsDraw { self.presentQueue.async { self.drawPending() } }
         }
         if status != noErr { lock.withLock { failed = "decode submit \(status)" } }
     }
@@ -264,8 +305,31 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
 
     // MARK: draw (presentQueue)
 
-    private func drawPending() {
-        guard let frame = lock.withLock({ () -> (buffer: CVPixelBuffer, enqueued: CFTimeInterval, decoded: CFTimeInterval)? in
+    private func drawPending(retry: Int = 0) {
+        guard lock.withLock({ pending != nil }) else { return }
+        // Drawable acquisition can block. Pick the freshest decoded frame after that wait.
+        let drawableRequested = CACurrentMediaTime()
+        guard let drawable = layer.nextDrawable() else {
+            // No drawable (1 s timeout, zero size while laid out): keep the
+            // frame. Taking it here lost it, and with a still desktop no
+            // newer frame follows, so the iPad kept showing an older one.
+            // A newer decode only schedules a draw when nothing is pending,
+            // so retry here (bounded; the next decode takes over after).
+            if retry < 10 {
+                let generation = lock.withLock { self.generation }
+                presentQueue.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                    guard let self, self.lock.withLock({ self.generation == generation }) else { return }
+                    self.drawPending(retry: retry + 1)
+                }
+            } else {
+                lock.withLock { pending = nil } // the next decoded frame schedules a draw again
+                ClientLog.write("metal: no drawable after \(retry) retries; frame dropped")
+            }
+            return
+        }
+        let drawableAcquired = CACurrentMediaTime()
+        guard let frame = lock.withLock({ () -> (buffer: CVPixelBuffer, enqueued: CFTimeInterval, decoded: CFTimeInterval,
+                          sampleID: Int64, transitMS: Double?)? in
             defer { pending = nil }
             return pending
         }), let cache = textureCache else { return }
@@ -274,7 +338,7 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
         let tenBit = type == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange || type == kCVPixelFormatType_444YpCbCr10BiPlanarVideoRange
         guard let luma = texture(buffer, plane: 0, format: tenBit ? .r16Unorm : .r8Unorm, cache: cache),
               let chroma = texture(buffer, plane: 1, format: tenBit ? .rg16Unorm : .rg8Unorm, cache: cache),
-              let drawable = layer.nextDrawable(), let commands = queue.makeCommandBuffer() else { return }
+              let commands = queue.makeCommandBuffer() else { return }
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = drawable.texture
         pass.colorAttachments[0].loadAction = .clear
@@ -282,7 +346,7 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
         pass.colorAttachments[0].storeAction = .store
         guard let encoder = commands.makeRenderCommandEncoder(descriptor: pass) else { return }
         // Aspect fit, like videoGravity .resizeAspect.
-        let target = lock.withLock { drawableSize }
+        let target = CGSize(width: drawable.texture.width, height: drawable.texture.height)
         let video = CGSize(width: CVPixelBufferGetWidth(buffer), height: CVPixelBufferGetHeight(buffer))
         var rect = SIMD4<Float>(-1, -1, 2, 2)
         if target.width > 0, target.height > 0, video.width > 0, video.height > 0 {
@@ -292,6 +356,10 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
         }
         encoder.setRenderPipelineState(pipeline)
         encoder.setVertexBytes(&rect, length: MemoryLayout<SIMD4<Float>>.size, index: 0)
+        var pixelMatched: UInt32 = target == video ? 1 : 0
+        encoder.setFragmentBytes(&pixelMatched, length: MemoryLayout<UInt32>.size, index: 1)
+        var textStrength = lock.withLock { scaledTextStrength }
+        encoder.setFragmentBytes(&textStrength, length: MemoryLayout<Float>.size, index: 2)
         var siting = Self.chromaSiting(buffer)
         encoder.setFragmentBytes(&siting, length: MemoryLayout<SIMD2<Float>>.size, index: 0)
         encoder.setFragmentTexture(CVMetalTextureGetTexture(luma), index: 0)
@@ -299,12 +367,35 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         encoder.endEncoding()
         let enqueued = frame.enqueued
+        let decoded = frame.decoded
+        let submitted = CACurrentMediaTime()
+        let sampleID = frame.sampleID
+        let transitMS = frame.transitMS
         drawable.addPresentedHandler { [weak self] shown in
-            guard let self, shown.presentedTime > 0 else { return }
-            self.notePresented(at: shown.presentedTime, age: shown.presentedTime - enqueued)
+            let time = shown.presentedTime
+            guard let self, time >= submitted else { return }
+            let timing = PresentationTiming(total: time - enqueued, decode: decoded - enqueued,
+                                            readyToSubmit: submitted - decoded,
+                                            drawableWait: drawableAcquired - drawableRequested,
+                                            submitToGlass: time - submitted)
+            if let transitMS {
+                ClientLog.write(String(format: "frame glass %lld: wire->enqueue %.3f ms; enqueue->glass %.3f; decode %.3f; ready->submit %.3f; submit->glass %.3f",
+                                       sampleID, transitMS, timing.total * 1000, timing.decode * 1000,
+                                       timing.readyToSubmit * 1000, timing.submitToGlass * 1000))
+            }
+            self.notePresented(at: time, timing: timing)
         }
         commands.present(drawable)
-        commands.addCompletedHandler { _ in _ = (luma, chroma) } // keep textures alive until done
+        commands.addCompletedHandler { [weak self] completed in
+            _ = (luma, chroma) // keep textures alive until done
+            let start = completed.gpuStartTime
+            let end = completed.gpuEndTime
+            guard let self, start > 0, end >= start else { return }
+            self.lock.withLock {
+                // Limit samples if commands complete but presentation callbacks stop.
+                if self.gpuTimes.count < 1024 { self.gpuTimes.append(end - start) }
+            }
+        }
         commands.commit()
         // Let the texture cache drop entries for buffers no longer in use
         // (audit: it was never flushed).
@@ -344,22 +435,32 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
 
     /// Logs every 5 s: frames that reached the glass, and how long from
     /// "handed to the renderer" to "on the glass" (decode + GPU + vsync).
-    private func notePresented(at time: CFTimeInterval, age: CFTimeInterval) {
+    private func notePresented(at time: CFTimeInterval, timing: PresentationTiming) {
         let report: String? = lock.withLock {
-            presented.append((time, age))
+            presented.append(timing)
             let elapsed = time - meterStart
             guard elapsed >= 5 else { return nil }
-            let ages = presented.map(\.age).sorted()
-            let decodes = decodeTimes.sorted()
-            let decodeP50 = decodes.isEmpty ? 0 : decodes[decodes.count / 2] * 1000
-            let line = String(format: "metal on glass: %.1f fps, enqueued->glass p50 %.1f p95 %.1f ms (decode p50 %.1f ms), %d replaced before shown",
+            let ages = presented.map(\.total).sorted()
+            func stages(_ label: String, _ samples: [CFTimeInterval]) -> String {
+                guard !samples.isEmpty else { return "\(label) n/a" }
+                let sorted = samples.sorted()
+                return String(format: "%@ %.2f/%.2f", label,
+                              sorted[sorted.count / 2] * 1000,
+                              sorted[min(sorted.count - 1, sorted.count * 95 / 100)] * 1000)
+            }
+            let rate = String(format: "metal on glass: %.1f fps, enqueued->glass p50 %.1f p95 %.1f ms, %d replaced before shown",
                               Double(presented.count) / elapsed, ages[ages.count / 2] * 1000,
-                              ages[min(ages.count - 1, ages.count * 95 / 100)] * 1000, decodeP50, replacedBeforeShown)
-            decodeTimes.removeAll(keepingCapacity: true)
+                              ages[min(ages.count - 1, ages.count * 95 / 100)] * 1000, replacedBeforeShown)
+            let breakdown = [stages("decode", presented.map(\.decode)),
+                             stages("ready->submit", presented.map(\.readyToSubmit)),
+                             stages("nextDrawable", presented.map(\.drawableWait)),
+                             stages("GPU", gpuTimes),
+                             stages("submit->glass", presented.map(\.submitToGlass))].joined(separator: ", ")
             presented.removeAll(keepingCapacity: true)
+            gpuTimes.removeAll(keepingCapacity: true)
             replacedBeforeShown = 0
             meterStart = time
-            return line
+            return rate + " | p50/p95 ms: " + breakdown
         }
         if let report { ClientLog.write(report) }
     }

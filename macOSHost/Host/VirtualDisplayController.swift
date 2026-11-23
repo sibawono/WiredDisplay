@@ -31,6 +31,14 @@ final class VirtualDisplayController {
     /// streamed at its native pixels, so text stays as sharp as the scale allows.
     enum Space: String, CaseIterable, Sendable {
         case native, more, most
+        var title: String {
+            switch self {
+            case .native: return "Default"
+            case .more: return "More Space"
+            case .most: return "Most Space"
+            }
+        }
+
         var factor: Double {
             switch self {
             case .native: return 1
@@ -55,7 +63,7 @@ final class VirtualDisplayController {
     /// Creates a display matching the client's panel. Pixel dimensions are
     /// rounded down to even values (required for @2x modes). `space` picks the
     /// default mode; the others stay selectable in System Settings.
-    func create(for hello: Hello, refreshHz: Double, wideColor: Bool, space: Space = .more,
+    func create(for hello: Hello, refreshHz: Double, wideColor: Bool, space: Space = .native,
                 serialNumber: UInt32 = 1) throws -> StreamConfig {
         if let error = WDVirtualDisplayCheckAvailability() { throw Error.unavailable(error.localizedDescription) }
         let width = UInt32(min(hello.pixelWidth, 8192)) & ~1
@@ -102,6 +110,38 @@ final class VirtualDisplayController {
         }
         return StreamConfig(pixelWidth: width, pixelHeight: height, pointWidth: UInt32(points.width),
                             pointHeight: UInt32(points.height), refreshHz: UInt16(refreshHz), codec: .h264)
+    }
+
+    static func canChangeSpace(on displayID: CGDirectDisplayID) -> Bool {
+        CGDisplayIsOnline(displayID) != 0 && displayID != CGMainDisplayID() &&
+            CGDisplayIsInMirrorSet(displayID) == 0
+    }
+
+    func setSpace(_ space: Space, config: StreamConfig, hiDPI: Bool) -> Bool {
+        guard let displayID, Self.canChangeSpace(on: displayID),
+              let size = Self.modeSizes(panelWidth: config.pixelWidth, panelHeight: config.pixelHeight,
+                                        hiDPI: hiDPI)[space],
+              let current = CGDisplayCopyDisplayMode(displayID),
+              let modes = CGDisplayCopyAllDisplayModes(displayID,
+                    [kCGDisplayShowDuplicateLowResolutionModes: true] as CFDictionary) as? [CGDisplayMode] else {
+            return false
+        }
+        let width = Int(size.width), height = Int(size.height), scale = hiDPI ? 2 : 1
+        guard let mode = modes.first(where: {
+            $0.width == width && $0.height == height &&
+                $0.pixelWidth == width * scale && $0.pixelHeight == height * scale &&
+                abs($0.refreshRate - current.refreshRate) < 0.1
+        }) else { return false }
+        if mode.ioDisplayModeID == current.ioDisplayModeID { return true }
+
+        var change: CGDisplayConfigRef?
+        guard CGBeginDisplayConfiguration(&change) == .success, let change else { return false }
+        guard CGConfigureDisplayWithDisplayMode(change, displayID, mode, nil) == .success,
+              Self.canChangeSpace(on: displayID) else {
+            CGCancelDisplayConfiguration(change)
+            return false
+        }
+        return CGCompleteDisplayConfiguration(change, .forSession) == .success
     }
 
     func destroy() {

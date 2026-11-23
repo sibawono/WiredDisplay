@@ -9,7 +9,11 @@ struct PanelSnapshot {
     struct Paired: Identifiable, Equatable {
         var id: String { key }
         var name: String
+        var model: String?
         var key: String
+        /// "iPad Air 13-inch (M2) · Key 0d7238ca"; the key alone when the
+        /// model was never read (paired before it was recorded).
+        var detail: String { [model, "Key \(key)"].compactMap { $0 }.joined(separator: " · ") }
     }
 
     var stateText = "Waiting for the iPad on USB"
@@ -18,6 +22,9 @@ struct PanelSnapshot {
     /// Other iPads streaming at the same time (D-041).
     var otherIPads: [String] = []
     var looksLike: String?
+    var displaySpace: VirtualDisplayController.Space?
+    var canChangeDisplaySpace = false
+    var displaySpaceError = false
     var pixels: String?
     var encoding: String?
     var limitNote: String?
@@ -40,6 +47,7 @@ struct PanelSnapshot {
 }
 
 struct PanelActions {
+    var setDisplaySpace: (VirtualDisplayController.Space) -> Void = { _ in }
     var setBrightness: (Float) -> Void = { _ in }
     var setQuality: (QualityPreset) -> Void = { _ in }
     var setInput: (Bool) -> Void = { _ in }
@@ -93,12 +101,17 @@ struct StatusPanelView: View {
     private var s: PanelSnapshot { model.snapshot }
 
     var body: some View {
-        VStack(spacing: 14) {
+        GlassGroup(spacing: 10) { panel }
+    }
+
+    private var panel: some View {
+        VStack(spacing: 8) {
             header
             tabBar
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 6) {
                 Text(model.tab.title.uppercased())
                     .font(.system(size: 11, weight: .semibold))
+                    .tracking(0.6)
                     .foregroundStyle(.secondary)
                     .padding(.leading, 4)
                 content
@@ -106,55 +119,65 @@ struct StatusPanelView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             footer
         }
-        .padding(16)
-        .frame(width: 360)
+        .padding(10)
+        .frame(width: 320)
     }
 
     // MARK: header and tabs
 
     private var header: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 10) {
             Image(nsImage: NSApp?.applicationIconImage ?? NSImage(named: NSImage.applicationIconName) ?? NSImage())
                 .resizable()
-                .frame(width: 40, height: 40)
-            VStack(alignment: .leading, spacing: 3) {
-                Text("WiredDisplay").font(.system(size: 14, weight: .semibold))
+                .frame(width: 30, height: 30)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("WiredDisplay").font(.system(size: 13, weight: .semibold))
                 HStack(spacing: 6) {
                     Circle().fill(s.stateColor).frame(width: 7, height: 7)
                     Text(s.stateText).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
                 }
                 if let connectedFor = s.connectedFor {
                     Text(connectedFor).font(.system(size: 11)).foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
                 }
                 if !s.otherIPads.isEmpty {
                     Text("Also: " + s.otherIPads.joined(separator: ", ") + " · settings apply to all")
-                        .font(.system(size: 11)).foregroundStyle(.tertiary).lineLimit(1)
+                        .font(.system(size: 11)).foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true).lineLimit(1)
                 }
             }
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 4)
+        .padding(.horizontal, 10).padding(.vertical, 7)
+        .groupBox()
     }
 
+    /// macOS 27 kit "Utility Panel Tab Bar" (Toolbars page): 44 x 30 pt
+    /// buttons side by side with no track; the selected one stands on a
+    /// small Liquid Glass plate (9 pt corners), glyphs keep the label colour.
+    /// Switching is instant, with no animation (user request).
     private var tabBar: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 0) {
             ForEach(PanelModel.Tab.allCases) { tab in
+                let selected = model.tab == tab
                 Button { model.tab = tab } label: {
                     Image(systemName: tab.symbol)
-                        .font(.system(size: 16))
-                        .frame(maxWidth: .infinity, minHeight: 36)
-                        .foregroundStyle(model.tab == tab ? Color.accentColor : .secondary)
-                        .background(model.tab == tab ? Color.accentColor.opacity(0.15) : .clear,
-                                    in: RoundedRectangle(cornerRadius: 9))
+                        .font(.system(size: 15))
+                        .foregroundStyle(Color.primary.opacity(selected ? 1 : 0.7))
+                        .frame(width: 44, height: 30)
+                        .background { if selected { GlassPlate() } }
+                        // Even spacing across the panel width (user request: balanced layout).
+                        .frame(maxWidth: .infinity)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .help(tab.title)
+                .accessibilityLabel(tab.title)
+                .accessibilityAddTraits(selected ? .isSelected : [])
             }
         }
-        .padding(5)
-        .background(RoundedRectangle(cornerRadius: 13).fill(.quaternary.opacity(0.5)))
-        .overlay(RoundedRectangle(cornerRadius: 13).strokeBorder(.separator.opacity(0.6)))
+        .frame(maxWidth: .infinity)
+        .transaction { $0.animation = nil }
     }
 
     @ViewBuilder private var content: some View {
@@ -168,7 +191,7 @@ struct StatusPanelView: View {
     }
 
     private var footer: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             FooterButton(title: "Show Log", symbol: "doc.text.magnifyingglass", action: model.actions.showLog)
             FooterButton(title: "Quit", symbol: "power", action: model.actions.quit)
         }
@@ -177,10 +200,26 @@ struct StatusPanelView: View {
     // MARK: tabs
 
     private var displayTab: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 8) {
             Card {
                 if let looksLike = s.looksLike {
                     InfoLine(symbol: "rectangle.on.rectangle", title: "Looks like \(looksLike)", detail: s.pixels)
+                    NativeSegmented(
+                        segments: VirtualDisplayController.Space.allCases.map { .title($0.title) },
+                        selection: Binding(
+                            get: { s.displaySpace.flatMap { VirtualDisplayController.Space.allCases.firstIndex(of: $0) } ?? -1 },
+                            set: { index in
+                                let spaces = VirtualDisplayController.Space.allCases
+                                guard spaces.indices.contains(index) else { return }
+                                model.actions.setDisplaySpace(spaces[index])
+                            }),
+                        controlSize: .regular, fontSize: 11, isEnabled: s.canChangeDisplaySpace
+                    )
+                    .frame(maxWidth: .infinity)
+                    .accessibilityLabel("Display space")
+                    if s.displaySpaceError {
+                        Text("Couldn’t change display space.").font(.system(size: 11)).foregroundStyle(.secondary)
+                    }
                     if let encoding = s.encoding {
                         CardDivider()
                         InfoLine(symbol: "film", title: encoding, detail: s.limitNote)
@@ -191,33 +230,36 @@ struct StatusPanelView: View {
                 }
                 CardDivider()
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Brightness").font(.system(size: 12, weight: .medium))
+                    Text("Brightness").font(.system(size: 11, weight: .semibold))
                     HStack(spacing: 10) {
                         Image(systemName: "sun.min").foregroundStyle(.secondary)
-                        Slider(value: Binding(get: { Double(s.brightness ?? 0.5) },
-                                              set: { model.snapshot.brightness = Float($0); model.actions.setBrightness(Float($0)) }),
-                               in: 0...1)
-                            .controlSize(.small)
-                            .disabled(s.brightness == nil)
+                        NativeSlider(value: Binding(get: { Double(s.brightness ?? 0.5) },
+                                                    set: { model.snapshot.brightness = Float($0); model.actions.setBrightness(Float($0)) }),
+                                     isEnabled: s.brightness != nil)
+                            .frame(height: NativeSlider.sliderHeight + 2 * NativeSlider.overflow)
+                            .padding(.horizontal, -NativeSlider.overflow)
+                            .frame(height: NativeSlider.sliderHeight)
                         Image(systemName: "sun.max").foregroundStyle(.secondary)
                     }
                     Text(s.brightness == nil ? "Available while an iPad is connected"
-                         : "The iPad's real backlight · also the Mac's brightness keys")
+                         : "Real iPad backlight · the brightness keys work too")
                         .font(.system(size: 11)).foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
                 }
             }
             Card {
-                Text("Quality").font(.system(size: 12, weight: .medium))
-                LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
-                    ForEach(QualityPreset.allCases, id: \.self) { preset in
-                        Chip(title: preset.shortTitle, subtitle: preset.formatTitle, selected: preset == s.quality) {
-                            model.snapshot.quality = preset
-                            model.actions.setQuality(preset)
-                        }
-                    }
-                }
+                Text("Quality").font(.system(size: 11, weight: .semibold))
+                NativeSegmented(segments: QualityPreset.allCases.map { .titled($0.shortTitle, symbol: $0.symbol) },
+                                selection: Binding(get: { s.quality.flatMap { QualityPreset.allCases.firstIndex(of: $0) } ?? -1 },
+                                                   set: { index in
+                                                       let preset = QualityPreset.allCases[index]
+                                                       model.snapshot.quality = preset
+                                                       model.actions.setQuality(preset)
+                                                   }),
+                                controlSize: .regular, fontSize: 11)
+                    .frame(maxWidth: .infinity)
                 if let quality = s.quality {
-                    Text(quality.detail).font(.system(size: 11)).foregroundStyle(.tertiary)
+                    Text("\(quality.formatTitle) · \(quality.detail)").font(.system(size: 10.5)).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -239,7 +281,7 @@ struct StatusPanelView: View {
     }
 
     private var inputTab: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 8) {
             Card {
                 ToggleLine(title: "Allow Input from iPad", detail: "Touch, Magic Keyboard and trackpad",
                            isOn: Binding(get: { s.inputEnabled },
@@ -251,19 +293,20 @@ struct StatusPanelView: View {
                 }
             }
             Card {
-                Text("Shortcuts on the iPad keyboard").font(.system(size: 12, weight: .medium))
+                Text("Shortcuts on the iPad keyboard").font(.system(size: 11, weight: .semibold))
                 ShortcutLine(keys: "⌃ Tab", mac: "⌘ Tab", what: "Switch apps")
                 ShortcutLine(keys: "⌃ Space", mac: "⌘ Space", what: "Spotlight")
                 ShortcutLine(keys: "⌃ ⇧ 3 / 4 / 5", mac: "⌘ ⇧ 3 / 4 / 5", what: "Screenshot")
                 ShortcutLine(keys: "⌃ ↑  ⌃ ← →", mac: nil, what: "Mission Control · Spaces")
                 Text("Pinch and rotate work on the touch screen and the trackpad.")
                     .font(.system(size: 11)).foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
 
     private var audioTab: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 8) {
             Card {
                 StatusLine(symbol: s.speaker ? "speaker.wave.2.fill" : "speaker.slash", title: "Mac sound on iPad",
                            detail: "Output device “iPad Speaker”", on: s.speaker)
@@ -272,6 +315,7 @@ struct StatusPanelView: View {
                            detail: "Input device “iPad Microphone”", on: s.microphone)
                 Text("Turn these on or off in the WiredDisplay app on the iPad.")
                     .font(.system(size: 11)).foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Card {
                 ToggleLine(title: "Switch to headphones automatically",
@@ -293,23 +337,24 @@ struct StatusPanelView: View {
     }
 
     private var securityTab: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 8) {
             if let code = s.connectionCode {
                 Card {
-                    Text("Connection code").font(.system(size: 12, weight: .medium))
-                    Text(code).font(.system(size: 26, weight: .semibold, design: .rounded)).monospacedDigit()
+                    Text("Connection code").font(.system(size: 11, weight: .semibold))
+                    Text(code).font(.system(size: 22, weight: .semibold, design: .rounded)).monospacedDigit()
                     Text("Matches the code on the iPad: this session is encrypted end to end.")
                         .font(.system(size: 11)).foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
                 }
             }
             Card {
-                Text("Paired iPads").font(.system(size: 12, weight: .medium))
+                Text("Paired iPads").font(.system(size: 11, weight: .semibold))
                 if s.paired.isEmpty {
                     Text("None yet. The next iPad that connects pairs automatically.")
                         .font(.system(size: 12)).foregroundStyle(.secondary)
                 } else {
                     ForEach(s.paired) { peer in
-                        InfoLine(symbol: "ipad.landscape", title: peer.name, detail: "Key \(peer.key)")
+                        InfoLine(symbol: "ipad.landscape", title: peer.name, detail: peer.detail)
                     }
                 }
                 CardDivider()
@@ -317,7 +362,7 @@ struct StatusPanelView: View {
                     Label("Forget Paired iPads…", systemImage: "trash")
                         .font(.system(size: 12))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.bordered)
                 .foregroundStyle(s.paired.isEmpty ? Color.secondary : Color.red)
                 .disabled(s.paired.isEmpty)
             }
@@ -325,9 +370,9 @@ struct StatusPanelView: View {
     }
 
     private var generalTab: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 8) {
             Card {
-                Text("Permissions").font(.system(size: 12, weight: .medium))
+                Text("Permissions").font(.system(size: 11, weight: .semibold))
                 PermissionLine(name: "Screen Recording", purpose: "Shows the Mac screen on the iPad",
                                granted: s.screenRecording, action: model.actions.openScreenRecording)
                 CardDivider()
@@ -342,6 +387,7 @@ struct StatusPanelView: View {
             }
             Text("WiredDisplay \(s.version)")
                 .font(.system(size: 11)).foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity)
         }
     }
@@ -353,11 +399,10 @@ private struct Card<Content: View>: View {
     @ViewBuilder var content: Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) { content }
-            .padding(12)
+        VStack(alignment: .leading, spacing: 7) { content }
+            .padding(.horizontal, 11).padding(.vertical, 9)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(RoundedRectangle(cornerRadius: 12).fill(.background.opacity(0.55)))
-            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.separator.opacity(0.6)))
+            .groupBox()
     }
 }
 
@@ -374,8 +419,8 @@ private struct InfoLine: View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             Image(systemName: symbol).foregroundStyle(.secondary).frame(width: 18)
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.system(size: 13))
-                if let detail { Text(detail).font(.system(size: 11)).foregroundStyle(.secondary) }
+                Text(title).font(.system(size: 12))
+                if let detail { Text(detail).font(.system(size: 10.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
             }
             Spacer(minLength: 0)
         }
@@ -392,15 +437,16 @@ private struct StatusLine: View {
         HStack(spacing: 10) {
             Image(systemName: symbol).foregroundStyle(on ? Color.accentColor : .secondary).frame(width: 18)
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.system(size: 13))
-                Text(detail).font(.system(size: 11)).foregroundStyle(.secondary)
+                Text(title).font(.system(size: 12))
+                Text(detail).font(.system(size: 10.5)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 8)
             Text(on ? "On" : "Off")
                 .font(.system(size: 11, weight: .semibold))
                 .padding(.horizontal, 8).padding(.vertical, 3)
                 .foregroundStyle(on ? Color.green : .secondary)
-                .background(Capsule().fill(on ? Color.green.opacity(0.15) : Color.secondary.opacity(0.12)))
+                .background(Capsule().fill(on ? Color.green.opacity(0.18) : Color(nsColor: .quaternarySystemFill)))
         }
     }
 }
@@ -413,11 +459,18 @@ private struct ToggleLine: View {
     var body: some View {
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.system(size: 13))
-                Text(detail).font(.system(size: 11)).foregroundStyle(.secondary)
+                Text(title).font(.system(size: 12))
+                Text(detail).font(.system(size: 10.5)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true) // always wraps, never truncates
             }
             Spacer(minLength: 8)
-            Toggle("", isOn: $isOn).toggleStyle(.switch).controlSize(.small).labelsHidden()
+            // Laid out at the switch's own size; the lens room around it is
+            // drawn outside that frame (frames do not clip) (user report: the
+            // negative padding truncated the text beside it).
+            // SwiftUI's own switch at the regular size: the size that gets
+            // the macOS 27 glass lens while pressed (self-check: an NSSwitch
+            // hosted in SwiftUI toggled without ever showing the lens).
+            KitSwitch(isOn: $isOn)
         }
     }
 }
@@ -433,12 +486,13 @@ private struct PermissionLine: View {
             Image(systemName: granted ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
                 .foregroundStyle(granted ? Color.green : .orange).frame(width: 18)
             VStack(alignment: .leading, spacing: 2) {
-                Text(name).font(.system(size: 13))
-                Text(purpose).font(.system(size: 11)).foregroundStyle(.secondary)
+                Text(name).font(.system(size: 12))
+                Text(purpose).font(.system(size: 10.5)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 8)
             if !granted {
-                Button("Grant…", action: action).controlSize(.small)
+                Button("Grant…", action: action).controlSize(.small).buttonStyle(.bordered)
             }
         }
     }
@@ -454,7 +508,7 @@ private struct WarningLine: View {
             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange).frame(width: 18)
             Text(text).font(.system(size: 12)).foregroundStyle(.secondary)
             Spacer(minLength: 8)
-            Button(button, action: action).controlSize(.small)
+            Button(button, action: action).controlSize(.small).buttonStyle(.bordered)
         }
     }
 }
@@ -468,8 +522,8 @@ private struct ShortcutLine: View {
         HStack(spacing: 8) {
             Text(keys)
                 .font(.system(size: 11, weight: .semibold, design: .rounded))
-                .padding(.horizontal, 7).padding(.vertical, 3)
-                .background(RoundedRectangle(cornerRadius: 5).fill(.quaternary))
+                .padding(.horizontal, 8).padding(.vertical, 3)
+                .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Color(nsColor: .tertiarySystemFill)))
             if let mac {
                 Image(systemName: "arrow.right").font(.system(size: 9)).foregroundStyle(.tertiary)
                 Text(mac).font(.system(size: 11, design: .rounded)).foregroundStyle(.secondary)
@@ -480,30 +534,8 @@ private struct ShortcutLine: View {
     }
 }
 
-private struct Chip: View {
-    let title: String
-    let subtitle: String
-    let selected: Bool
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            VStack(spacing: 2) {
-                Text(title).font(.system(size: 12, weight: .semibold))
-                Text(subtitle).font(.system(size: 10)).foregroundStyle(selected ? Color.accentColor : .secondary)
-            }
-            .frame(maxWidth: .infinity, minHeight: 40)
-            .foregroundStyle(selected ? Color.accentColor : .primary)
-            .background(RoundedRectangle(cornerRadius: 9)
-                .fill(selected ? Color.accentColor.opacity(0.15) : Color.secondary.opacity(0.1)))
-            .overlay(RoundedRectangle(cornerRadius: 9)
-                .strokeBorder(selected ? Color.accentColor.opacity(0.6) : .clear))
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
-}
-
+/// macOS 27 kit "Buttons" (push, content area): AppKit's own bordered
+/// button, stretched to the width it is given.
 private struct LinkRow: View {
     let title: String
     let symbol: String
@@ -512,16 +544,14 @@ private struct LinkRow: View {
     var body: some View {
         Button(action: action) {
             HStack {
-                Text(title).font(.system(size: 12))
+                Text(title)
                 Spacer()
-                Image(systemName: symbol).font(.system(size: 11))
+                Image(systemName: symbol)
             }
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 12).padding(.vertical, 8)
-            .background(RoundedRectangle(cornerRadius: 10).strokeBorder(.separator.opacity(0.6)))
-            .contentShape(Rectangle())
+            .frame(maxWidth: .infinity)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.bordered)
+        .controlSize(.large)
     }
 }
 
@@ -532,18 +562,22 @@ private struct FooterButton: View {
 
     var body: some View {
         Button(action: action) {
-            Label(title, systemImage: symbol)
-                .font(.system(size: 13))
-                .frame(maxWidth: .infinity, minHeight: 34)
-                .foregroundStyle(.secondary)
-                .background(RoundedRectangle(cornerRadius: 10).strokeBorder(.separator.opacity(0.8)))
-                .contentShape(Rectangle())
+            Label(title, systemImage: symbol).frame(maxWidth: .infinity)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.bordered)
+        .controlSize(.large)
     }
 }
 
 extension QualityPreset {
+    var symbol: String {
+        switch self {
+        case .balanced: return "circle.lefthalf.filled"
+        case .pro: return "bolt.fill"
+        case .ultra: return "sparkles"
+        case .highColor: return "paintpalette.fill"
+        }
+    }
     var shortTitle: String { title.components(separatedBy: " — ").first ?? title }
     var formatTitle: String {
         switch self {
@@ -551,6 +585,105 @@ extension QualityPreset {
         case .pro: return "4:2:0 · 10-bit"
         case .ultra: return "4:4:4 · 10-bit"
         case .highColor: return "4:4:4 · 8-bit"
+        }
+    }
+}
+
+// MARK: macOS 27 kit surfaces
+
+/// macOS 27 kit "Toggles - Switches" (medium): 54 x 24 track, a 32 x 20
+/// white knob; while pressed the knob becomes a 50 x 31 Liquid Glass lens
+/// that overflows the track and follows the finger. The system switch did not
+/// show this lens in the popover (user report), so it is drawn here.
+private struct KitSwitch: View {
+    @Binding var isOn: Bool
+    @State private var pressed = false
+    @State private var dragX: CGFloat? // knob centre while dragging
+    @Environment(\.isEnabled) private var enabled
+
+    private let track = CGSize(width: 54, height: 24)
+    private let knob = CGSize(width: 32, height: 20)
+    private let lens = CGSize(width: 50, height: 31)
+
+    var body: some View {
+        let restX = isOn ? track.width - 2 - knob.width / 2 : 2 + knob.width / 2
+        let x = min(max(dragX ?? restX, knob.width / 2), track.width - knob.width / 2)
+        ZStack(alignment: .leading) {
+            Capsule()
+                .fill(isOn ? Color(nsColor: .controlAccentColor) : Color.primary.opacity(0.1))
+                .frame(width: track.width, height: track.height)
+            knobView
+                .frame(width: pressed ? lens.width : knob.width, height: pressed ? lens.height : knob.height)
+                .position(x: x, y: track.height / 2)
+        }
+        .frame(width: track.width, height: track.height)
+        .opacity(enabled ? 1 : 0.5)
+        .contentShape(Rectangle())
+        .gesture(DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) { pressed = true }
+                if abs(value.translation.width) > 2 { dragX = restX + value.translation.width }
+            }
+            .onEnded { value in
+                let moved = abs(value.translation.width) > 2
+                let newValue = moved ? (restX + value.translation.width) > track.width / 2 : !isOn
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
+                    pressed = false
+                    dragX = nil
+                    if newValue != isOn { isOn = newValue }
+                }
+            })
+        .accessibilityElement()
+        .accessibilityAddTraits(.isToggle)
+        .accessibilityValue(isOn ? "On" : "Off")
+        .accessibilityAction { isOn.toggle() }
+    }
+
+    @ViewBuilder private var knobView: some View {
+        if pressed, #available(macOS 26.0, *) {
+            Color.clear.glassEffect(.clear.interactive(), in: Capsule())
+        } else {
+            Capsule().fill(Color.white).shadow(color: .black.opacity(0.12), radius: 2, y: 1)
+        }
+    }
+}
+
+/// Kit "Liquid Glass - Small": the selected utility-panel tab's plate.
+private struct GlassPlate: View {
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 9, style: .continuous)
+        if #available(macOS 26.0, *) {
+            Color.clear.glassEffect(.regular, in: shape)
+        } else {
+            shape.fill(Color(nsColor: .quaternarySystemFill))
+                .overlay(shape.strokeBorder(Color(nsColor: .separatorColor), lineWidth: 0.5))
+        }
+    }
+}
+
+/// Keeps the panel's children grouped (layout only; the controls inside
+/// bring their own Liquid Glass).
+private struct GlassGroup<Content: View>: View {
+    let spacing: CGFloat
+    @ViewBuilder var content: Content
+    var body: some View { content }
+}
+
+private extension View {
+    /// A section: a frosted, lighter layer on the clear glass panel (user
+    /// request, like the system display menu's top section), 12 pt corners.
+    func groupBox() -> some View { modifier(SectionBackground()) }
+}
+
+private struct SectionBackground: ViewModifier {
+    @Environment(\.colorScheme) private var colorScheme
+
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        content.background {
+            // Mostly opaque window colour: readable over any wallpaper.
+            shape.fill(Color(nsColor: .windowBackgroundColor).opacity(0.75))
+                .overlay(shape.strokeBorder(Color.white.opacity(colorScheme == .dark ? 0.12 : 0.6), lineWidth: 0.5))
         }
     }
 }

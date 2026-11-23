@@ -33,14 +33,37 @@ final class ChromaConverter: @unchecked Sendable {
         // of the full 8/10-bit scale (Y 16..235, C 16..240 in 8-bit terms).
         static float lumaOf(float3 rgb) { return dot(rgb, float3(0.2126, 0.7152, 0.0722)); }
 
+        // Area (box) filter: the average of the source pixels an output
+        // pixel covers, weighted by coverage. At scale 1 it returns the
+        // pixel itself; for "more/most space" (source 1.12-1.25x the panel)
+        // it is a proper anti-aliased downscale, done here instead of
+        // ScreenCaptureKit's fixed scaler.
+        static float3 area(texture2d<float, access::read> src, float2 s, int ox, int oy) {
+            if (s.x == 1.0 && s.y == 1.0) return src.read(uint2(ox, oy)).rgb;
+            int w = int(src.get_width()), h = int(src.get_height());
+            float x0 = float(ox) * s.x, x1 = x0 + s.x, y0 = float(oy) * s.y, y1 = y0 + s.y;
+            float3 acc = float3(0);
+            float total = 0;
+            for (int y = int(floor(y0)); y < int(ceil(y1)); y++) {
+                float wy = min(y1, float(y + 1)) - max(y0, float(y));
+                for (int x = int(floor(x0)); x < int(ceil(x1)); x++) {
+                    float wx = min(x1, float(x + 1)) - max(x0, float(x));
+                    acc += src.read(uint2(clamp(x, 0, w - 1), clamp(y, 0, h - 1))).rgb * (wx * wy);
+                    total += wx * wy;
+                }
+            }
+            return acc / total;
+        }
+
         kernel void convert(texture2d<float, access::read> src [[texture(0)]],
                             texture2d<float, access::write> luma [[texture(1)]],
                             texture2d<float, access::write> chroma [[texture(2)]],
                             constant uint &tenBit [[buffer(0)]],
+                            constant float2 &scale [[buffer(1)]],
                             uint2 gid [[thread_position_in_grid]]) {
             uint cw = chroma.get_width(), ch = chroma.get_height();
             if (gid.x >= cw || gid.y >= ch) return;
-            int w = int(src.get_width()), h = int(src.get_height());
+            int w = int(luma.get_width()), h = int(luma.get_height());
             int x0 = int(gid.x) * 2, y0 = int(gid.y) * 2;
             float3 sum = float3(0);
             float weight = 0;
@@ -49,7 +72,7 @@ final class ChromaConverter: @unchecked Sendable {
                 // [1 2 1] centred on the even column (left-sited chroma).
                 for (int dx = -1; dx <= 1; dx++) {
                     int x = clamp(x0 + dx, 0, w - 1);
-                    float3 rgb = src.read(uint2(x, y)).rgb;
+                    float3 rgb = area(src, scale, x, y);
                     float k = dx == 0 ? 2.0 : 1.0;
                     sum += rgb * k;
                     weight += k;
@@ -97,6 +120,9 @@ final class ChromaConverter: @unchecked Sendable {
         encoder.setTexture(chromaTex, index: 2)
         var flag: UInt32 = tenBit ? 1 : 0
         encoder.setBytes(&flag, length: 4, index: 0)
+        // Source pixels per output pixel (1 = same size; >1 = downscale).
+        var scale = SIMD2<Float>(Float(inputTex.width) / Float(lumaTex.width), Float(inputTex.height) / Float(lumaTex.height))
+        encoder.setBytes(&scale, length: MemoryLayout<SIMD2<Float>>.size, index: 1)
         let group = MTLSize(width: 16, height: 16, depth: 1)
         let grid = MTLSize(width: chromaTex.width, height: chromaTex.height, depth: 1)
         encoder.dispatchThreads(grid, threadsPerThreadgroup: group)

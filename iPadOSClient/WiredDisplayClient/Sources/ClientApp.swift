@@ -295,6 +295,7 @@ struct VideoSurface: UIViewRepresentable {
     func updateUIView(_ uiView: VideoView, context: Context) {
         uiView.streamSize = streamConfig.map { CGSize(width: Int($0.pointWidth), height: Int($0.pointHeight)) }
         uiView.streamRefreshHz = streamConfig.map { Int($0.refreshHz) } ?? 0
+        uiView.metalRenderer?.setStreamGeometry(streamConfig)
     }
 }
 

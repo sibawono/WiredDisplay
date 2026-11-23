@@ -12,6 +12,9 @@ public final class TrustStore: @unchecked Sendable {
         public var identityKey: [UInt8]
         public var name: String
         public var added: Date
+        /// Model name ("iPad Air 13-inch (M2)"); nil for peers saved before it
+        /// was recorded, or when the model could not be read.
+        public var model: String? = nil
         public var fingerprint: String { SecureChannel.fingerprint(identityKey) }
     }
 
@@ -68,6 +71,20 @@ public final class TrustStore: @unchecked Sendable {
             var peers = loadPeers()
             guard let index = peers.firstIndex(where: { $0.identityKey == identityKey }), peers[index].name != name else { return }
             peers[index].name = name
+            try? storage.write(Self.peersAccount, (try? JSONEncoder().encode(peers)) ?? Data())
+        }
+    }
+
+    /// Updates name and model together (the host reads both from the device).
+    /// A nil `model` keeps the stored one.
+    public func update(_ identityKey: [UInt8], name: String, model: String?) {
+        lock.withLock {
+            var peers = loadPeers()
+            guard let index = peers.firstIndex(where: { $0.identityKey == identityKey }) else { return }
+            let newModel = model ?? peers[index].model
+            guard peers[index].name != name || peers[index].model != newModel else { return }
+            peers[index].name = name
+            peers[index].model = newModel
             try? storage.write(Self.peersAccount, (try? JSONEncoder().encode(peers)) ?? Data())
         }
     }

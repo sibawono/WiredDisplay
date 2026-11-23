@@ -91,10 +91,10 @@ final class HostController: @unchecked Sendable {
         var chroma: ChromaMode = .hybrid
         /// 10-bit HEVC against gradient banding (BUG-035); `--depth 8|10`.
         var tenBit = true
-        /// Default "looks like" size: one step more space than native @2x
-        /// (user request); `--space native|more|most`. All three stay selectable
+        /// Default to native @2x so the desktop raster matches the iPad panel.
+        /// `--space native|more|most`. All three stay selectable
         /// in System Settings › Displays.
-        var space: VirtualDisplayController.Space = .more
+        var space: VirtualDisplayController.Space = .native
     }
 
     enum State: Equatable, Sendable {
@@ -178,8 +178,11 @@ final class HostController: @unchecked Sendable {
     /// What the menu shows about the session; updated as things change.
     struct SessionStatus: Sendable {
         var iPadName: String?
+        var iPadModel: String?
         var pixelSize: String?
         var pointSize: String?
+        var displaySpace: VirtualDisplayController.Space?
+        var displaySpaceError = false
         var refreshHz: Int?
         var codec: String?
         var encoding: String?
@@ -193,6 +196,21 @@ final class HostController: @unchecked Sendable {
 
     /// The WiredDisplay screen while video runs (for brightness keys).
     private let currentDisplay = OSAllocatedUnfairLock<CGDirectDisplayID?>(initialState: nil)
+
+    var canChangeDisplaySpace: Bool {
+        currentDisplay.withLock { $0 }.map(VirtualDisplayController.canChangeSpace(on:)) ?? false
+    }
+
+    func setDisplaySpace(_ space: VirtualDisplayController.Space) {
+        videoQueue.async { [self] in
+            guard let pipeline = video, let hello = pipeline.hello,
+                  pipeline.display.displayID == pipeline.captureID else { return }
+            let applied = pipeline.display.setSpace(space, config: pipeline.config, hiDPI: hello.scale >= 2)
+            sessionStatus.withLock { $0.displaySpaceError = !applied }
+            if applied { followDisplayMode() }
+            else { Log.warn("could not set WiredDisplay space to \(space.rawValue)") }
+        }
+    }
 
     /// Brightness keys belong to the iPad when it is the only display, or
     /// when the pointer is on it; otherwise they go to the display they are
@@ -411,6 +429,16 @@ final class HostController: @unchecked Sendable {
     let deviceSerial: String?
     /// The device of the current session (its display serial is derived from it).
     private var sessionDeviceSerial: String?
+    /// Name and model of the connected iPad, read from lockdownd.
+    private let sessionIdentity = OSAllocatedUnfairLock<(name: String, model: String?)?>(initialState: nil)
+
+    /// The owner's device name when the app only knows the generic one.
+    static func displayName(hello: String, identity: DeviceIdentity) -> String {
+        let sent = hello.trimmingCharacters(in: .whitespacesAndNewlines)
+        let generic = sent.isEmpty || sent == "iPad" || sent == identity.deviceClass
+        if generic, let name = identity.name { return name }
+        return sent.isEmpty ? "iPad" : sent
+    }
 
     func start() {
         if deviceSerial == nil { audioRouter.start() }
@@ -419,6 +447,7 @@ final class HostController: @unchecked Sendable {
 
     func stop() {
         stopping.withLock { $0 = true }
+        wakeSignal.signal()
         helloArrived.signal()
         queue.async { [self] in socket?.close("host stopping") }
     }
@@ -437,11 +466,128 @@ final class HostController: @unchecked Sendable {
         Log.info("touch input \(enabled ? "ENABLED" : "disabled") by user")
     }
 
+    // MARK: power, lock, sleep (docs/POWER_LOCK_WAKE.md)
+
+    /// True from "will sleep" until "did wake": no session, no reconnects.
+    private let systemAsleep = OSAllocatedUnfairLock(initialState: false)
+    private let wakeSignal = DispatchSemaphore(value: 0)
+    private let resetBackoff = OSAllocatedUnfairLock(initialState: false)
+
+    /// Main queue, from PowerMonitor (every controller of the fleet).
+    func powerChanged(from old: PowerState, to new: PowerState) {
+        if old.allowsInput && !new.allowsInput {
+            // Nothing stays held while the Mac is locked, asleep or switched
+            // away; the injector also drops every event until input is allowed.
+            queue.async { [self] in injector?.releaseAll() }
+        }
+        if new.systemAsleep && !old.systemAsleep {
+            systemAsleep.withLock { $0 = true }
+            queue.async { [self] in socket?.close("Mac is going to sleep") }
+        }
+        if old.systemAsleep && !new.systemAsleep {
+            systemAsleep.withLock { $0 = false }
+            resetBackoff.withLock { $0 = true }
+            wakeSignal.signal()
+        }
+        if (old.displaysAsleep && !new.displaysAsleep) || (old.systemAsleep && !new.systemAsleep) {
+            videoQueue.async { [self] in
+                guard captureRestartPending, let socket = video?.socket else { return }
+                captureRestartPending = false
+                recoverCapture(attempt: 0, socket: socket)
+            }
+        }
+        let visibleAgain = (old.locked && !new.locked) || (old.screensaver && !new.screensaver)
+            || (old.displaysAsleep && !new.displaysAsleep)
+        if visibleAgain && new.allowsInput {
+            // Reconcile instead of assuming: the mode may have changed while
+            // away, and a fresh keyframe replaces whatever the iPad holds.
+            videoQueue.async { [self] in followDisplayMode() }
+            queue.async { [self] in encoder?.requestKeyframe() }
+        }
+    }
+
+    // MARK: capture loss and recovery (videoQueue)
+
+    /// A capture stopped while the displays slept; restart it on wake.
+    private var captureRestartPending = false
+
+    /// ScreenCaptureKit stopped. The iPad gets a black frame at once (it must
+    /// not keep showing the desktop while the Mac's displays are dark or
+    /// locked), then the capture is restarted: now, with bounded backoff, or
+    /// when the displays wake. Only a capture that cannot be restarted while
+    /// the displays are on ends the session, as before.
+    private func captureLost(_ reason: String, socket: FramedSocket) {
+        guard let pipeline = video, pipeline.socket === socket, !socket.isClosed else { return }
+        // A capture that stops again right after each restart (it never
+        // runs) must not restart without end: back off, then give up.
+        let streak = captureFailures.failed(at: ProcessInfo.processInfo.systemUptime)
+        guard streak < 4 else {
+            Log.warn("capture stopped \(streak + 1) times right after recovering (\(reason)); ending the session")
+            queue.async { socket.close("capture keeps stopping: \(reason)") }
+            return
+        }
+        Log.warn("capture stopped (\(reason)); keeping the session and recovering the capture")
+        pipeline.encoder?.encodeBlackFrame(width: Int(pipeline.config.pixelWidth), height: Int(pipeline.config.pixelHeight))
+        if streak == 0 {
+            recoverCapture(attempt: 0, socket: socket)
+        } else {
+            let delay = 0.5 * pow(2, Double(streak - 1)) // 0.5, 1, 2 s
+            Log.info("capture stopped again soon after recovering; next restart in \(delay) s")
+            videoQueue.asyncAfter(deadline: .now() + delay) { [weak self, weak socket] in
+                guard let socket else { return }
+                self?.recoverCapture(attempt: 0, socket: socket)
+            }
+        }
+    }
+
+    /// Counts captures that stop again soon after a recovery (videoQueue).
+    private var captureFailures = QuickFailureCounter(window: 2)
+
+    /// `socket` is the session the recovery belongs to: a delayed retry must
+    /// not restart the capture of a later session.
+    private func recoverCapture(attempt: Int, socket expected: FramedSocket) {
+        guard let pipeline = video, let socket = pipeline.socket, socket === expected, !socket.isClosed else { return }
+        let state = currentPowerState.withLock { $0 }
+        if state.displaysAsleep || state.systemAsleep {
+            captureRestartPending = true
+            Log.info("capture recovery waits for the displays to wake")
+            return
+        }
+        do {
+            try restartEncoding()
+            captureFailures.recovered(at: ProcessInfo.processInfo.systemUptime)
+            Log.info("capture recovered (attempt \(attempt + 1))")
+        } catch {
+            guard attempt < 4 else {
+                Log.warn("capture could not be recovered: \(error)")
+                queue.async { socket.close("capture could not be recovered: \(error)") }
+                return
+            }
+            let delay = 0.5 * pow(2, Double(attempt)) // 0.5, 1, 2, 4 s
+            Log.info("capture recovery attempt \(attempt + 1) failed (\(error)); retrying in \(delay) s")
+            videoQueue.asyncAfter(deadline: .now() + delay) { [weak self, weak socket] in
+                guard let socket else { return }
+                self?.recoverCapture(attempt: attempt + 1, socket: socket)
+            }
+        }
+    }
+
+    /// Blocks the session thread while the Mac sleeps (bounded waits, so a
+    /// missed signal only costs a minute, never a stuck controller).
+    private func waitWhileAsleep() {
+        guard systemAsleep.withLock({ $0 }) else { return }
+        Log.info("session paused: Mac is asleep")
+        while systemAsleep.withLock({ $0 }) && !isStopping { _ = wakeSignal.wait(timeout: .now() + 60) }
+        Log.info("session resuming after wake")
+    }
+
     // MARK: lifecycle
 
     private func runLoop() {
         var backoff: TimeInterval = 1
         while !isStopping {
+            waitWhileAsleep()
+            if resetBackoff.withLock({ value -> Bool in defer { value = false }; return value }) { backoff = 1 }
             guard let wired = waitForWiredDevices() else { break }
             // Several cabled devices can be present (another iPad on Sidecar,
             // an iPhone): try each, the one that worked last time first, and
@@ -456,7 +602,7 @@ final class HostController: @unchecked Sendable {
             onState(.connecting)
             let started = Date()
             var sessionRan = false
-            for device in devices where !isStopping {
+            for device in devices where !isStopping && !systemAsleep.withLock({ $0 }) {
                 do {
                     try runSession(device)
                     sessionRan = true
@@ -569,6 +715,15 @@ final class HostController: @unchecked Sendable {
         Log.info("connected to device \(device.deviceID) over USB, port \(SessionConstants.clientPort)")
         lastGoodSerial = device.serialNumber
         sessionDeviceSerial = device.serialNumber
+        // Name and model from lockdownd, read while the handshake runs so a
+        // slow answer never delays the picture (audit AUD-04).
+        let identityResult = OSAllocatedUnfairLock<DeviceIdentity?>(initialState: nil)
+        let identityRead = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .utility).async {
+            let identity = Lockdown.readIdentity(of: device)
+            identityResult.withLock { $0 = identity }
+            identityRead.signal()
+        }
 
         var generator = SystemRandomNumberGenerator()
         let ended = DispatchSemaphore(value: 0)
@@ -617,6 +772,7 @@ final class HostController: @unchecked Sendable {
             lastHeard = Date()
             iPadBrightness.withLock { $0 = nil }
             sessionStatus.withLock { $0 = SessionStatus() }
+            sessionIdentity.withLock { $0 = nil }
             if ownsAudio { audioRouter.iPadRoute(speaker: false, microphone: false) }
             releaseAudio()
         }
@@ -629,7 +785,12 @@ final class HostController: @unchecked Sendable {
         keepalive.schedule(deadline: .distantFuture)
         keepalive.resume()
         defer {
-            // Fixed teardown order: input, video, audio, socket.
+            // Closed first (audit AUD-01): once closed, `handle` drops every
+            // frame from it, so no late audio route can start the speaker or
+            // microphone again after `stopAll` below (a session that ended
+            // during setup left the bridge running, holding the audio device).
+            // Then a fixed order: input, video, audio.
+            socket.close("session teardown")
             keepalive.cancel()
             videoQueue.sync { stopVideo() }
             audioQueue.sync { audio.stopAll() }
@@ -645,7 +806,6 @@ final class HostController: @unchecked Sendable {
                 releaseAudio()
                 sessionStatus.withLock { $0.speaker = false; $0.microphone = false }
             }
-            socket.close("session teardown")
             Log.info("session cleaned up: \(endReason.withLock { $0 })")
             connectionCode.withLock { $0 = nil }
         }
@@ -693,7 +853,14 @@ final class HostController: @unchecked Sendable {
             throw SessionError.incompatible("protocol \(hello.protocolVersion), expected \(SessionConstants.protocolVersion)")
         }
         guard hello.codecs.contains(VideoCodec.h264) else { throw SessionError.incompatible("client lacks H.264") }
-        trust.rename(peer.identityKey, to: hello.deviceName)
+        // The iPad app can only send the generic "iPad" (iPadOS 16+), so the
+        // name and model come from the device's lockdownd over the same USB.
+        _ = identityRead.wait(timeout: .now() + 1)
+        let identity = identityResult.withLock { $0 } ?? DeviceIdentity()
+        let name = Self.displayName(hello: hello.deviceName, identity: identity)
+        trust.update(peer.identityKey, name: name, model: identity.modelName)
+        sessionIdentity.withLock { $0 = (name, identity.modelName) }
+        Log.info("iPad identity: model \(identity.productType ?? "unknown") (\(identity.modelName ?? "-"))")
 
         // Keep the Mac's displays awake while the iPad is connected; released
         // when the session ends (user request, step 1).
@@ -745,7 +912,7 @@ final class HostController: @unchecked Sendable {
         let fps = options.forceRefresh ?? max(min(cap, Int(hello.maxRefreshHz)), 24)
         Log.info("refresh: iPad up to \(hello.maxRefreshHz) Hz, \(options.fpsOverride != nil ? "fixed" : refreshFollowsIPad ? "following the iPad" : "60 Hz chosen") -> \(fps) Hz")
         var config = try pipeline.display.create(for: hello, refreshHz: Double(fps), wideColor: options.displayP3,
-                                                 space: options.space,
+                                                 space: Self.rememberedSpace(for: sessionDeviceSerial) ?? options.space,
                                                  serialNumber: Self.displaySerial(for: sessionDeviceSerial))
         guard let displayID = pipeline.display.displayID else {
             pipeline.display.destroy()
@@ -758,10 +925,12 @@ final class HostController: @unchecked Sendable {
         // The arrangement itself is never changed (D-015).
         Thread.sleep(forTimeInterval: 0.3) // let WindowServer apply a remembered arrangement
         let captureID = CGDisplayPrimaryDisplay(displayID)
-        if captureID != displayID {
-            let source = CGDisplayBounds(captureID)
+        let source = CGDisplayBounds(captureID)
+        if source.width > 0, source.height > 0 {
             config.pointWidth = UInt32(source.width.rounded())
             config.pointHeight = UInt32(source.height.rounded())
+        }
+        if captureID != displayID {
             Log.info("WiredDisplay is mirroring display \(captureID) (\(source.size)); capturing that display")
         }
 
@@ -772,7 +941,9 @@ final class HostController: @unchecked Sendable {
         pipeline.socket = socket
 
         let inputEnabled = inputEnabled
-        let injector = InputInjector(displayID: displayID, queue: queue, isEnabled: { inputEnabled.withLock { $0 } })
+        let injector = InputInjector(displayID: displayID, queue: queue,
+                                     isEnabled: { inputEnabled.withLock { $0 } },
+                                     power: { currentPowerState.withLock { $0 } })
         queue.sync { self.injector = injector }
         video = pipeline
         do {
@@ -785,9 +956,12 @@ final class HostController: @unchecked Sendable {
         onState(.streaming("\(hello.deviceName) · \(config.pixelWidth)×\(config.pixelHeight) \(codec)"))
         let streamed = pipeline.config
         sessionStatus.withLock {
-            $0.iPadName = hello.deviceName
+            $0.iPadName = sessionIdentity.withLock { $0?.name } ?? hello.deviceName
+            $0.iPadModel = sessionIdentity.withLock { $0?.model }
             $0.pixelSize = "\(streamed.pixelWidth) × \(streamed.pixelHeight)"
             $0.pointSize = "\(streamed.pointWidth) × \(streamed.pointHeight)"
+            $0.displaySpace = Self.displaySpace(for: streamed, hiDPI: hello.scale >= 2)
+            $0.displaySpaceError = false
             $0.refreshHz = Int(streamed.refreshHz)
             $0.streamingSince = Date()
         }
@@ -809,10 +983,10 @@ final class HostController: @unchecked Sendable {
         let current = effectiveQuality()
         // Diagnostics for stutter: capture cadence vs encoded output.
         let captureMeter = FrameRateMeter(), encodeMeter = FrameRateMeter()
-        let onUnit: @Sendable (AccessUnit) -> Void = { [weak self, weak socket] unit in
+        let onUnit: @Sendable (AccessUnit, UInt64) -> Void = { [weak self, weak socket] unit, sent in
             guard let self, let socket else { return }
             if let report = encodeMeter.tick(bytes: unit.annexB.count) { Log.info("video encoded: \(report)") }
-            if socket.sendVideo(unit.annexB, isKeyframe: unit.isKeyframe) == .needKeyframe {
+            if socket.sendVideo(unit.annexB, isKeyframe: unit.isKeyframe, timestampNanos: sent) == .needKeyframe {
                 self.queue.async { self.encoder?.requestKeyframe() }
             }
         }
@@ -837,14 +1011,27 @@ final class HostController: @unchecked Sendable {
         // Config before the first frame can be captured (D-042): the iPad
         // needs it to place the video, and frames must not overtake it.
         send(.streamConfig(pipeline.config), on: socket)
-        try pipeline.capture.start(displayID: pipeline.captureID, pixelWidth: Int(config.pixelWidth),
-                                   pixelHeight: Int(config.pixelHeight), fps: fps, displayP3: options.displayP3,
+        let captureSize = Self.captureSize(for: pipeline, wantsBGRA: encoder.wantsBGRA)
+        pipeline.captureSize = captureSize
+        if Int(captureSize.width) != Int(config.pixelWidth) {
+            Log.info("capture \(Int(captureSize.width))x\(Int(captureSize.height)) (HiDPI framebuffer) -> " +
+                     "encode \(config.pixelWidth)x\(config.pixelHeight) with the area-filter downscale")
+        }
+        try pipeline.capture.start(displayID: pipeline.captureID, pixelWidth: Int(captureSize.width),
+                                   pixelHeight: Int(captureSize.height), fps: fps, displayP3: options.displayP3,
                                    bgra: encoder.wantsBGRA, showsCursor: !localCursor,
-                                   onFrame: { buffer, time, dirty in
+                                   onFrame: { buffer, time, dirty, deliveredAt in
                                        if let report = captureMeter.tick() { Log.info("video captured: \(report)") }
-                                       encoder.encode(buffer, presentationTime: time, dirtyFraction: dirty)
+                                       encoder.encode(buffer, presentationTime: time, dirtyFraction: dirty, captureTime: deliveredAt)
                                    },
-                                   onStop: { reason in socket.close("capture stopped: \(reason)") })
+                                   onStop: { [weak self, weak socket] reason in
+                                       // Not fatal (docs/POWER_LOCK_WAKE.md): display sleep stops
+                                       // ScreenCaptureKit ("no displays to capture"), measured to
+                                       // arrive before screensDidSleep. Keep the session and
+                                       // display; recover the capture instead.
+                                       guard let self, let socket else { return }
+                                       self.videoQueue.async { self.captureLost(reason, socket: socket) }
+                                   })
         let chroma = current.chroma == .c420 ? "4:2:0" : current.chroma == .c444 ? "4:4:4" : "4:2:0 + 4:4:4"
         let codecName = codec == .hevc ? "HEVC" : "H.264"
         sessionStatus.withLock {
@@ -859,16 +1046,76 @@ final class HostController: @unchecked Sendable {
     /// session; tell the iPad (its labels and scroll scale use the point size).
     /// The pixel stream does not change. On `videoQueue`.
     private func followDisplayMode() {
-        guard let pipeline = video, let socket = pipeline.socket, pipeline.captureID != 0 else { return }
+        guard let pipeline = video, let socket = pipeline.socket, let hello = pipeline.hello,
+              pipeline.captureID != 0 else { return }
         let bounds = CGDisplayBounds(pipeline.captureID)
         let width = UInt32(bounds.width.rounded()), height = UInt32(bounds.height.rounded())
         guard width > 0, height > 0,
               width != pipeline.config.pointWidth || height != pipeline.config.pointHeight else { return }
         pipeline.config.pointWidth = width
         pipeline.config.pointHeight = height
-        sessionStatus.withLock { $0.pointSize = "\(width) × \(height)" }
+        let space = Self.displaySpace(for: pipeline.config, hiDPI: hello.scale >= 2)
+        if let space { Self.rememberSpace(space, for: sessionDeviceSerial) }
+        sessionStatus.withLock {
+            $0.pointSize = "\(width) × \(height)"
+            $0.displaySpace = space
+            $0.displaySpaceError = false
+        }
         Log.info("display mode changed: now looks like \(width)x\(height) pt; telling the iPad")
         send(.streamConfig(pipeline.config), on: socket)
+        // A new "looks like" mode has a new framebuffer size: capture it at
+        // its own size again (own downscale).
+        if let encoder = pipeline.encoder,
+           Self.captureSize(for: pipeline, wantsBGRA: encoder.wantsBGRA) != pipeline.captureSize {
+            do { try restartEncoding() } catch {
+                Log.warn("capture resize after the mode change failed: \(error)")
+                queue.async { socket.close("capture resize failed: \(error)") }
+            }
+        }
+    }
+
+    /// What to capture: the display's full HiDPI framebuffer when it is
+    /// larger than the panel ("more/most space"), so the downscale to the
+    /// panel happens in the encoder's area filter (ChromaConverter, or
+    /// VideoToolbox's averaging downsampler on 4:4:4 lanes) instead of
+    /// ScreenCaptureKit's scaler. Otherwise, or when the aspect differs
+    /// (mirroring another display), or `--own-downscale off`, the panel size.
+    private static func captureSize(for pipeline: VideoPipeline, wantsBGRA: Bool) -> CGSize {
+        let panel = CGSize(width: Int(pipeline.config.pixelWidth), height: Int(pipeline.config.pixelHeight))
+        guard VideoEncoder.ownDownscale, wantsBGRA, let mode = CGDisplayCopyDisplayMode(pipeline.captureID) else { return panel }
+        let source = CGSize(width: mode.pixelWidth, height: mode.pixelHeight)
+        guard source.width > panel.width, source.height > panel.height, source.width <= 8192, source.height <= 8192,
+              abs(source.width / source.height - panel.width / panel.height) < 0.005 else { return panel }
+        return source
+    }
+
+    /// The "looks like" space the user last chose for each iPad (System
+    /// Settings or the panel). A display recreated after sleep, rotation or a
+    /// replug comes back in it instead of the default (user report: after
+    /// waking, the iPad was back at native and looked zoomed). `--space`
+    /// on the command line still wins.
+    private static let spacesKey = "displaySpaces"
+
+    static func rememberedSpace(for device: String?) -> VirtualDisplayController.Space? {
+        guard !CommandLine.arguments.contains("--space"), let device,
+              let raw = (UserDefaults.standard.dictionary(forKey: spacesKey) as? [String: String])?[device] else { return nil }
+        return VirtualDisplayController.Space(rawValue: raw)
+    }
+
+    private static func rememberSpace(_ space: VirtualDisplayController.Space, for device: String?) {
+        guard let device else { return }
+        var map = UserDefaults.standard.dictionary(forKey: spacesKey) as? [String: String] ?? [:]
+        guard map[device] != space.rawValue else { return }
+        map[device] = space.rawValue
+        UserDefaults.standard.set(map, forKey: spacesKey)
+        Log.info("remembered \(space.rawValue) space for this iPad")
+    }
+
+    private static func displaySpace(for config: StreamConfig, hiDPI: Bool) -> VirtualDisplayController.Space? {
+        let sizes = VirtualDisplayController.modeSizes(panelWidth: config.pixelWidth, panelHeight: config.pixelHeight,
+                                                       hiDPI: hiDPI)
+        let points = CGSize(width: Int(config.pointWidth), height: Int(config.pointHeight))
+        return VirtualDisplayController.Space.allCases.first { sizes[$0] == points }
     }
 
     /// Quality switch: new encoder and capture on the same display. The iPad
@@ -887,6 +1134,9 @@ final class HostController: @unchecked Sendable {
     private func stopVideo() {
         guard let pipeline = video else { return }
         video = nil
+        // Recovery state belongs to this session only.
+        captureRestartPending = false
+        captureFailures.reset()
         queue.sync {
             injector?.releaseAll()
             injector = nil
@@ -903,6 +1153,8 @@ final class HostController: @unchecked Sendable {
         sessionStatus.withLock {
             $0.pixelSize = nil; $0.pointSize = nil; $0.refreshHz = nil; $0.codec = nil; $0.encoding = nil
             $0.streamingSince = nil
+            $0.displaySpace = nil
+            $0.displaySpaceError = false
         }
         Log.info("video stopped")
     }
@@ -913,6 +1165,8 @@ final class HostController: @unchecked Sendable {
         var encoder: VideoEncoder?
         var config = StreamConfig(pixelWidth: 1, pixelHeight: 1, pointWidth: 1, pointHeight: 1, refreshHz: 60, codec: .h264)
         var captureID: CGDirectDisplayID = 0
+        /// Pixels ScreenCaptureKit delivers (panel size, or the framebuffer).
+        var captureSize = CGSize.zero
         var fps = 60
         var hello: Hello?
         weak var socket: FramedSocket?
@@ -1010,6 +1264,8 @@ final class HostController: @unchecked Sendable {
             guard let audio else { return }
             Log.info("audio route from iPad: speaker \(speaker), microphone \(microphone)")
             audioQueue.async {
+                // The session may have ended since: never start audio for it.
+                guard !socket.isClosed else { return }
                 // Each direction independently: one failing must not block the
                 // other, and audio failing never takes the display down (spec §7).
                 do {

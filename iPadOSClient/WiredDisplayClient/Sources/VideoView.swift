@@ -115,7 +115,7 @@ final class VideoView: UIView, UIPointerInteractionDelegate, UIGestureRecognizer
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        metalRenderer?.layout(bounds: bounds, scale: window?.screen.scale ?? 2)
+        metalRenderer?.layout(bounds: bounds, scale: window?.screen.nativeScale ?? 2)
         layoutCursor()
         guard bounds.width > 0, bounds.height > 0 else { return }
         let portrait = bounds.height > bounds.width

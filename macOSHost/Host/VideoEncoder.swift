@@ -67,6 +67,10 @@ final class VideoEncoder: @unchecked Sendable {
     nonisolated(unsafe) static var periodicKeyframes = false
     /// Filtered 4:2:0 chroma on the GPU (sharper coloured edges); `--chroma-filter off`.
     nonisolated(unsafe) static var filteredChroma = true
+    /// "More/most space": capture the full HiDPI framebuffer and downscale it
+    /// to the panel here (area filter) instead of in ScreenCaptureKit;
+    /// `--own-downscale off` for A/B tests.
+    nonisolated(unsafe) static var ownDownscale = true
 
     let codec: VideoCodec
     let chroma: ChromaMode
@@ -78,7 +82,7 @@ final class VideoEncoder: @unchecked Sendable {
     let tenBit: Bool
     private let motion: Lane
     private let still: Lane?
-    private let onUnit: @Sendable (AccessUnit) -> Void
+    private let onUnit: @Sendable (AccessUnit, UInt64) -> Void
     private let invalidated = OSAllocatedUnfairLock(initialState: false)
 
     /// Frame state. Last captured frame (unconverted), re-encoded for keyframe
@@ -117,7 +121,7 @@ final class VideoEncoder: @unchecked Sendable {
 
     init(codec: VideoCodec, width: Int, height: Int, fps: Int, bitrateMbps: Int, displayP3: Bool,
          chroma requested: ChromaMode = .c420, tenBit requestedTenBit: Bool = false, cursorInVideo: Bool = true,
-         onUnit: @escaping @Sendable (AccessUnit) -> Void) throws {
+         onUnit: @escaping @Sendable (AccessUnit, UInt64) -> Void) throws {
         self.codec = codec
         self.cursorInVideo = cursorInVideo
         self.onUnit = onUnit
@@ -211,6 +215,12 @@ final class VideoEncoder: @unchecked Sendable {
                              value: kCVImageBufferColorPrimaries_ITU_R_709_2)
         VTSessionSetProperty(transferSession, key: kVTPixelTransferPropertyKey_DestinationTransferFunction,
                              value: kCVImageBufferTransferFunction_sRGB)
+        // When the capture is larger than the panel ("more/most space", own
+        // downscale): scale to fill exactly (same aspect) with an averaging
+        // downsampler, the quality counterpart of ChromaConverter's area filter.
+        VTSessionSetProperty(transferSession, key: kVTPixelTransferPropertyKey_ScalingMode, value: kVTScalingMode_Normal)
+        VTSessionSetProperty(transferSession, key: kVTPixelTransferPropertyKey_DownsamplingMode,
+                             value: kVTDownsamplingMode_Average)
         var pool: CVPixelBufferPool?
         let format = switch (full444, c.tenBit) {
         case (true, true): kCVPixelFormatType_444YpCbCr10BiPlanarVideoRange
@@ -252,7 +262,10 @@ final class VideoEncoder: @unchecked Sendable {
     }
 
     /// What one submission needs, decided atomically under `stateLock`.
+    private var lastCaptureTime = CMTime.invalid
+
     private struct Job {
+        let captureTime: CMTime
         let source: CVPixelBuffer
         let lane: Lane
         let force: Bool
@@ -264,7 +277,7 @@ final class VideoEncoder: @unchecked Sendable {
         guard let source = lastSource else { return nil }
         let force = pendingKeyframe
         pendingKeyframe = false
-        return Job(source: source, lane: stillActive ? still! : motion, force: force,
+        return Job(captureTime: lastCaptureTime, source: source, lane: stillActive ? still! : motion, force: force,
                    epoch: outputLock.withLock { epoch })
     }
 
@@ -319,12 +332,36 @@ final class VideoEncoder: @unchecked Sendable {
     }
 
     /// A new captured frame. `dirtyFraction` is the changed share of the frame.
-    func encode(_ source: CVPixelBuffer, presentationTime: CMTime, dirtyFraction: Double = 1) {
+    /// One black keyframe (capture lost: display sleep, lock), so the iPad
+    /// shows what the Mac's own displays show instead of a stale desktop.
+    func encodeBlackFrame(width: Int, height: Int) {
+        // Every preset converts from BGRA; the CLI-only 4:2:0 8-bit path
+        // feeds the encoder directly and is left alone.
+        guard wantsBGRA, !invalidated.withLock({ $0 }) else { return }
+        var buffer: CVPixelBuffer?
+        let attributes: [CFString: Any] = [kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
+                                           kCVPixelBufferMetalCompatibilityKey: true]
+        guard CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32BGRA, attributes as CFDictionary, &buffer) == kCVReturnSuccess,
+              let buffer else { return }
+        CVPixelBufferLockBaseAddress(buffer, [])
+        if let base = CVPixelBufferGetBaseAddress(buffer) {
+            memset(base, 0, CVPixelBufferGetDataSize(buffer))
+            // Opaque black: alpha 255 in BGRA.
+            let pixels = base.assumingMemoryBound(to: UInt8.self), row = CVPixelBufferGetBytesPerRow(buffer)
+            for y in 0..<height { for x in 0..<width { pixels[y * row + x * 4 + 3] = 255 } }
+        }
+        CVPixelBufferUnlockBaseAddress(buffer, [])
+        stateLock.withLock { pendingKeyframe = true }
+        encode(buffer, presentationTime: CMClockGetTime(CMClockGetHostTimeClock()))
+    }
+
+    func encode(_ source: CVPixelBuffer, presentationTime: CMTime, dirtyFraction: Double = 1, captureTime: CMTime = .invalid) {
         guard !invalidated.withLock({ $0 }) else { return }
         let now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         let cursor = cursorInVideo ? CGEvent(source: nil)?.location ?? .zero : .zero
         let (job, motionFrame, reason): (Job?, Bool, String) = stateLock.withLock {
             lastSource = source
+            lastCaptureTime = captureTime
             frameGeneration &+= 1
             if cursorInVideo, cursor != lastCursor { lastCursor = cursor; lastCursorMove = now }
             let reason = still == nil ? "single-lane" : dirtyFraction > Self.motionDirtyShare ? "dirty"
@@ -344,8 +381,11 @@ final class VideoEncoder: @unchecked Sendable {
     private func submit(_ job: Job, presentationTime: CMTime) {
         guard !invalidated.withLock({ $0 }) else { return }
         let lane = job.lane
+        let hostAtSubmit = CMClockGetTime(CMClockGetHostTimeClock())
+        let sourceAgeAtSubmit = CMTimeGetSeconds(CMTimeSubtract(hostAtSubmit, job.captureTime))
         let convertStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         let prepared = lane.prepare(job.source)
+        let converted = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         if lane.transfer != nil { stats.converted(nanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) &- convertStart) }
         guard let pixelBuffer = prepared else {
             Log.warn("\(lane.label) conversion failed; frame dropped")
@@ -374,7 +414,14 @@ final class VideoEncoder: @unchecked Sendable {
                     outputLock.lock()
                     defer { outputLock.unlock() }
                     guard self?.epoch == frameEpoch else { return } // superseded lane
-                    onUnit(unit)
+                    let sent = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+                    if sent % 30 == 0, sourceAgeAtSubmit.isFinite {
+                        let beforeWire = Double(sent &- convertStart) / 1e6
+                        Log.info(String(format: "frame host %llu: capture->wire %.3f ms; capture->convert %.3f; convert %.3f; encode+pack %.3f",
+                                        sent, sourceAgeAtSubmit * 1000 + beforeWire, sourceAgeAtSubmit * 1000,
+                                        Double(converted &- convertStart) / 1e6, Double(sent &- converted) / 1e6))
+                    }
+                    onUnit(unit, sent)
                 } catch {
                     Log.warn("encoded sample not convertible: \(error)")
                 }

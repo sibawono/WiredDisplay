@@ -107,14 +107,14 @@ public struct SessionFramer: Sendable {
         self.clock = clock
     }
 
-    public mutating func frame(_ stream: StreamType, payload: [UInt8], keyframe: Bool = false) throws -> [UInt8] {
+    public mutating func frame(_ stream: StreamType, payload: [UInt8], keyframe: Bool = false, timestampNanos: UInt64? = nil) throws -> [UInt8] {
         let sequence = sequences[stream, default: 0]
         sequences[stream] = sequence + 1
         if let channel {
             return try channel.wire(stream: stream, keyframe: keyframe, sessionID: sessionID, sequence: sequence,
-                                    timestampNanos: clock(), payload: payload)
+                                    timestampNanos: timestampNanos ?? clock(), payload: payload)
         }
         return try Frame(stream: stream, flags: keyframe ? [.keyframe] : [], sessionID: sessionID,
-                         sequence: sequence, timestampNanos: clock(), payload: payload).encoded()
+                         sequence: sequence, timestampNanos: timestampNanos ?? clock(), payload: payload).encoded()
     }
 }

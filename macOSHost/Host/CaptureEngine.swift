@@ -29,7 +29,7 @@ final class CaptureEngine: @unchecked Sendable {
 
     func start(displayID: CGDirectDisplayID, pixelWidth: Int, pixelHeight: Int, fps: Int, displayP3: Bool, bgra: Bool = false,
                showsCursor: Bool = true,
-               onFrame: @escaping @Sendable (CVPixelBuffer, CMTime, Double) -> Void,
+               onFrame: @escaping @Sendable (CVPixelBuffer, CMTime, Double, CMTime) -> Void,
                onStop: @escaping @Sendable (String) -> Void) throws {
         let display = try findDisplay(displayID, timeout: 3)
 
@@ -90,7 +90,12 @@ final class CaptureEngine: @unchecked Sendable {
                 box.error = error
                 done.signal()
             }
-            done.wait()
+            // Bounded (audit AUD-03): this runs on the video queue, which the
+            // session teardown waits for; a query that never answers must not
+            // wedge the controller.
+            guard done.wait(timeout: .now() + 5) == .success else {
+                throw Error.screenCapture("shareable content did not answer within 5 s")
+            }
             if let display = box.displays.first(where: { $0.displayID == id }) { return display }
             if Date() >= deadline {
                 if let error = box.error { throw Error.screenCapture(error.localizedDescription) }
@@ -114,15 +119,18 @@ final class CaptureEngine: @unchecked Sendable {
     }
 
     private final class Output: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
-        let onFrame: @Sendable (CVPixelBuffer, CMTime, Double) -> Void
+        let onFrame: @Sendable (CVPixelBuffer, CMTime, Double, CMTime) -> Void
         let onStop: @Sendable (String) -> Void
+        private var callbackTimes: [Double] = []
+        private var reportStart = ProcessInfo.processInfo.systemUptime
 
-        init(onFrame: @escaping @Sendable (CVPixelBuffer, CMTime, Double) -> Void, onStop: @escaping @Sendable (String) -> Void) {
+        init(onFrame: @escaping @Sendable (CVPixelBuffer, CMTime, Double, CMTime) -> Void, onStop: @escaping @Sendable (String) -> Void) {
             self.onFrame = onFrame
             self.onStop = onStop
         }
 
         func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+            let deliveredAt = CMClockGetTime(CMClockGetHostTimeClock())
             guard type == .screen, sampleBuffer.isValid, let pixelBuffer = sampleBuffer.imageBuffer else { return }
             // Only complete frames carry new pixels; idle/blank/suspended do not.
             if let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false)
@@ -134,6 +142,7 @@ final class CaptureEngine: @unchecked Sendable {
             // Share of the frame that changed (dirty rects are in pixels of the
             // output buffer); 1 when unknown, which counts as motion.
             var dirty = 1.0
+
             if let info = (CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false)
                             as? [[SCStreamFrameInfo: Any]])?.first,
                let rects = info[.dirtyRects] as? [NSDictionary] {
@@ -142,7 +151,18 @@ final class CaptureEngine: @unchecked Sendable {
                     .reduce(0.0) { $0 + Double($1.width * $1.height) }
                 dirty = total > 0 ? min(changed / total, 1) : 1
             }
-            onFrame(pixelBuffer, sampleBuffer.presentationTimeStamp, dirty)
+            let started = ProcessInfo.processInfo.systemUptime
+            onFrame(pixelBuffer, sampleBuffer.presentationTimeStamp, dirty, deliveredAt)
+            let ended = ProcessInfo.processInfo.systemUptime
+            callbackTimes.append((ended - started) * 1000)
+            if ended - reportStart >= 5 {
+                let sorted = callbackTimes.sorted()
+                Log.info(String(format: "capture callback: p50 %.2f p95 %.2f max %.2f ms; %d/%d over 16.67 ms",
+                                sorted[sorted.count / 2], sorted[min(sorted.count - 1, sorted.count * 95 / 100)],
+                                sorted.last ?? 0, sorted.filter { $0 > 16.67 }.count, sorted.count))
+                callbackTimes.removeAll(keepingCapacity: true)
+                reportStart = ended
+            }
         }
 
         func stream(_ stream: SCStream, didStopWithError error: Swift.Error) {

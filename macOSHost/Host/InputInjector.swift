@@ -46,10 +46,16 @@ final class InputInjector {
     private var repeatTimer: DispatchSourceTimer?
     private var keysSinceLog = 0
 
-    init(displayID: CGDirectDisplayID, queue: DispatchQueue, isEnabled: @escaping @Sendable () -> Bool) {
+    /// The Mac's power/lock state (docs/POWER_LOCK_WAKE.md).
+    private let power: @Sendable () -> PowerState
+    private var loggedPowerBlock = false
+
+    init(displayID: CGDirectDisplayID, queue: DispatchQueue, isEnabled: @escaping @Sendable () -> Bool,
+         power: @escaping @Sendable () -> PowerState = { PowerState() }) {
         self.displayID = displayID
         self.queue = queue
         self.isEnabled = isEnabled
+        self.power = power
     }
 
     /// Diagnostics (E-07): every non-move event is logged with where it was
@@ -82,11 +88,32 @@ final class InputInjector {
         guard isEnabled() else {
             if !loggedDisabled {
                 loggedDisabled = true
-                Log.info("INPUT dropped: input is disabled (logged once until it is enabled again)")
+                Log.info("INPUT dropped: input from the iPad is off (logged once until it is enabled again)")
             }
             return releaseAll()
         }
         loggedDisabled = false
+        // Locked (macOS also reports the screensaver as locked), asleep or
+        // another user in front: nothing may be clicked, scrolled or typed —
+        // no keystroke reaches the password field and no tap made to wake the
+        // Mac is replayed as a click afterwards. A pointer move alone still
+        // passes while the session is ours and awake: it wakes the display or
+        // dismisses the screensaver, like nudging the Mac's own mouse.
+        let state = power()
+        if !state.allowsInput {
+            if !loggedPowerBlock {
+                loggedPowerBlock = true
+                Log.info("INPUT limited: Mac \(state); only pointer moves pass until it is unlocked and awake")
+            }
+            releaseAll()
+            guard case .pointer(.move, _, let x, let y) = event, !state.systemAsleep, state.sessionActive,
+                  withinRateLimit(), let bounds = liveBounds() else { return }
+            lastPoint = clamp(CGPoint(x: bounds.minX + CGFloat(x) * bounds.width,
+                                      y: bounds.minY + CGFloat(y) * bounds.height), to: bounds)
+            post(.mouseMoved, at: lastPoint!, button: .none, clickState: 0)
+            return
+        }
+        loggedPowerBlock = false
         guard AXIsProcessTrusted() else {
             if !warnedNoPermission {
                 Log.warn("input dropped: Accessibility permission not granted to this app")
@@ -161,6 +188,7 @@ final class InputInjector {
         }
         let name = hidType == Self.hidZoom ? "magnify" : "rotate"
         if phase == .began { gestureSteps = 0 }
+        gestures.note(hidType == Self.hidZoom ? .magnify : .rotate, phase: phase)
         guard let type = Self.gestureEventType, let hid = Self.fieldHIDType, let zoom = Self.fieldZoomValue,
               let rotation = Self.fieldRotationValue, let phaseField = Self.fieldPhase,
               let event = CGEvent(source: nil) else {
@@ -190,11 +218,39 @@ final class InputInjector {
     func releaseAll() {
         firePendingUp()
         releaseKeys()
+        endOpenGestures()
         guard heldButton != .none else { return }
         Log.info("releasing held \(heldButton) button")
         let point = lastPoint ?? CGEvent(source: nil)?.location ?? .zero
         post(heldButton == .right ? .rightMouseUp : .leftMouseUp, at: point, button: heldButton, clickState: 1)
         heldButton = .none
+    }
+
+    /// Trackpad gestures begun on the Mac but never ended (audit AUD-02).
+    private var gestures = GestureTracker()
+
+    /// Ends every gesture the Mac still sees as running, so no app stays
+    /// mid-scroll (rubber band held) or mid-pinch after input stops.
+    private func endOpenGestures() {
+        for kind in gestures.takeOpen() {
+            switch kind {
+            case .scroll: postScrollBoundary(phase: Int64(CGScrollPhase.cancelled.rawValue),
+                                             momentum: Int64(CGMomentumScrollPhase.none.rawValue))
+            case .momentum: postScrollBoundary(phase: 0, momentum: Int64(CGMomentumScrollPhase.end.rawValue))
+            case .magnify: transform(hidType: Self.hidZoom, value: 0, phase: .cancelled)
+            case .rotate: transform(hidType: Self.hidRotation, value: 0, phase: .cancelled)
+            }
+            Log.info("INPUT ended open \(kind) gesture")
+        }
+    }
+
+    private func postScrollBoundary(phase: Int64, momentum: Int64) {
+        guard let event = CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 2,
+                                  wheel1: 0, wheel2: 0, wheel3: 0) else { return }
+        event.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
+        event.setIntegerValueField(.scrollWheelEventScrollPhase, value: phase)
+        event.setIntegerValueField(.scrollWheelEventMomentumPhase, value: momentum)
+        event.post(tap: .cghidEventTap)
     }
 
     // MARK: geometry
@@ -327,6 +383,8 @@ final class InputInjector {
         event.setIntegerValueField(.scrollWheelEventScrollPhase, value: scrollPhase)
         event.setIntegerValueField(.scrollWheelEventMomentumPhase, value: momentumPhase)
         event.post(tap: .cghidEventTap)
+        gestures.note(.scroll, phase: phase)
+        gestures.note(momentum: momentum)
     }
 
     private func post(_ type: CGEventType, at point: CGPoint, button: PointerButton, clickState: Int64) {

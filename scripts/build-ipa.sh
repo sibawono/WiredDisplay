@@ -23,6 +23,8 @@ xcodebuild -project "$PROJECT" -scheme "$SCHEME" -configuration Release \
 APP="$STAGE/dd/Build/Products/Release-iphoneos/$SCHEME.app"
 mkdir -p "$STAGE/pkg/Payload" dist
 ditto "$APP" "$STAGE/pkg/Payload/$SCHEME.app"
+# No debug map: it holds absolute build paths (see build-host-app.sh).
+strip -S "$STAGE/pkg/Payload/$SCHEME.app/$SCHEME"
 xattr -cr "$STAGE/pkg"
 IPA="dist/WiredDisplay-$VERSION.ipa"
 rm -f "$IPA"

@@ -162,12 +162,13 @@ final class SendSchedulerTests: XCTestCase {
         var framer = SessionFramer(sessionID: 42, clock: { 7 })
         var parser = FrameParser()
         try parser.append(try framer.frame(.input, payload: [1]))
-        try parser.append(try framer.frame(.video, payload: [2], keyframe: true))
+        try parser.append(try framer.frame(.video, payload: [2], keyframe: true, timestampNanos: 5))
         try parser.append(try framer.frame(.input, payload: [3]))
         let frames = try (0..<3).compactMap { _ in try parser.next() }
         XCTAssertEqual(frames.map(\.header.sequence), [0, 0, 1])
         XCTAssertEqual(frames.map(\.header.sessionID), [42, 42, 42])
         XCTAssertTrue(frames[1].header.flags.contains(.keyframe))
+        XCTAssertEqual(frames.map(\.header.timestampNanos), [7, 5, 7])
         var validator = SequenceValidator(sessionID: 42)
         for frame in frames { try validator.accept(frame.header) }
     }

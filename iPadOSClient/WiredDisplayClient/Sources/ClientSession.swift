@@ -568,7 +568,14 @@ final class ClientSession: @unchecked Sendable {
         }
         do {
             let time = CMTime(value: CMTimeValue(timestamp), timescale: 1_000_000_000)
-            renderer.enqueue(try SampleBuffers.sampleBuffer(for: unit, format: format, presentationTime: time))
+            let sample = try SampleBuffers.sampleBuffer(for: unit, format: format, presentationTime: time)
+            if timestamp % 30 == 0, let offset = clockOffset {
+                let hostNow = Int64(bitPattern: clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) &+ offset
+                let transit = Double(hostNow &- Int64(bitPattern: timestamp)) / 1e6
+                CMSetAttachment(sample, key: "WiredDisplayTransitMS" as CFString,
+                                value: NSNumber(value: transit), attachmentMode: kCMAttachmentMode_ShouldNotPropagate)
+            }
+            renderer.enqueue(sample)
             countFrame(shown: true)
             if let offset = clockOffset {
                 // Mac sent it -> iPad hands it to the display layer (transport,

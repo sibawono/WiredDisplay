@@ -366,3 +366,295 @@
 - 1-pixel red line on an odd column: chroma Cr 28 / 28 (8-bit) where VideoToolbox gave 0.
 - Live A/B, Pro, 60 fps test pattern: conversion p50 VideoToolbox 4.65–5.42 ms, GPU 3.87–4.11 ms (p95 5.3–6.6 vs 4.2–4.6). Encode p50 unchanged at ~12 ms; 60 fps.
 - Not judged by eye yet: coloured text edges in Pro.
+
+## CHANGE ID: P1-031 — Host panel: Liquid Glass, compact
+
+**FILES CHANGED:** `macOSHost/Host/{StatusPanel,main}.swift`, `docs/CHANGELOG.md`.
+
+**SUMMARY:** every panel element uses Liquid Glass on macOS 26+, all inside one `GlassEffectContainer`:
+- Header, cards, quality chips, link row and footer buttons: glass surfaces.
+- Tab bar: a glass capsule. The selected tab is a tinted glass capsule that morphs between tabs (`glassEffectID`).
+- On/Off pills, shortcut key caps and the version badge: glass. The Grant and Forget buttons use the `.glass` button style.
+
+Before macOS 26 the previous fills and hairlines remain. The panel is more compact: 320 pt wide instead of 360, tighter padding and smaller rows; the Display tab is 646 pt tall instead of 810. In dark mode the selected tab icon and the selected quality chip are white instead of accent blue, because blue blended into the dark glass (user feedback). New `--render-panel-live <dir>`: Liquid Glass does not render offscreen, so this shows each tab in a real window and captures it with ScreenCaptureKit. Launch it with `open -n … --args` so the app's own Screen Recording permission applies.
+
+**Native controls (user request, same change):** the tab bar, the Quality picker, the switches and the brightness slider are AppKit's own controls: `NSSegmentedControl`, `NSSwitch` and `NSSlider` in `NativeControls.swift`. On macOS 26 they bring the system Liquid Glass behaviour themselves: the knob or thumb becomes a glass lens while held, and the segment selection slides as glass. A SwiftUI restyle does not reproduce that. The link and footer buttons use the native `.glass` button style. Quality is now one segmented control; the format is shown in the line below it.
+
+**Reference layout (user request, same change):**
+- Icon tabs in one rounded glass container. The selected tab sits on a tinted glass rounded square that slides to the tab you pick (`matchedGeometryEffect`, spring).
+- The tab name is shown in capitals above the content.
+- Quality is a row of four glass pills.
+- The link and footer buttons are rounded-rectangle glass.
+- Switches and the brightness slider stay native `NSSwitch` / `NSSlider`, for the system glass lens while held. The native segmented control was used briefly and is no longer used.
+
+**VERIFIED:** builds; live renders of all 5 tabs, light and dark. The render window is inactive, so switches and glass tints appear grey. Not checked yet: tints, the tab slide and the press and drag glass lens in the real menu-bar popover.
+
+## CHANGE ID: P1-032 — Host panel follows the macOS 27 UI kit (Figma community)
+
+**FILES CHANGED:** `macOSHost/Host/StatusPanel.swift`, `docs/CHANGELOG.md`.
+
+**SUMMARY:** every element follows the components in the macOS 27 community kit. The specs were read from its Segmented Controls, Group Boxes, Buttons, Toggles and Popovers pages.
+- **Cards and header:** kit Group Box, a flat quaternary fill with 12 pt corners and no border. No glass surfaces.
+- **Tab bar:** kit "Utility Panel Tab Bar" (Toolbars page). Each tab is a 44 × 30 pt button; the selected one stands on a small Liquid Glass plate with 9 pt corners, and the glyphs keep the label colour. The buttons are spread evenly across the panel width (user request: balanced layout). Switching is instant, with no animation (user request).
+- **Quality:** the native NSSegmentedControl, which is the kit component.
+- **Link, footer, Grant and Forget buttons:** native bordered push buttons.
+- **Switches and the brightness slider:** native NSSwitch and NSSlider.
+  - Kit Toggles page: when pressed, the 32 × 20 knob becomes a 50 × 31 glass lens that overflows the 54 × 24 track.
+  - SwiftUI's representable host clipped it, so not every toggle showed the glass (user report).
+  - Fix: the switch sits in an unclipped container with 14 pt of room, and clicks in that room fall through.
+  - Kit Sliders page: the slider knob also becomes a larger glass lens when clicked (25 × 20 pt). The slider gets the same treatment, with 10 pt of room.
+  - Layout: the first version took the room back with negative padding, which truncated the toggle descriptions to one line (user report). The switch and slider are now laid out at their own size, with the lens room drawn outside that frame, and the descriptions always wrap.
+  - Self-check in the real popover (new `--self-check-panel <dir>`): it opens the popover, captures every tab, and presses a switch and the slider with real mouse events. The slider knob turned into a larger lens, unclipped. The hosted NSSwitch toggled without ever showing a lens, so the switches are SwiftUI's own `Toggle(.switch)` at the regular size: the system switch without a representable wrapper, no `.controlSize(.small)`. The lens has to be checked by hand, because synthetic clicks skip the press-and-hold phase.
+  - Captions wrap to their full height (`fixedSize(vertical:)`); in the popover they were truncated to one line. A root-level `fixedSize` was tried first, but it broke the popover's size and position (it opened above the screen, user report), so it was reverted.
+- **Quality:** the selected segment uses the accent colour (`selectedSegmentBezelColor`), as in the kit; AppKit's default in the popover was grey.
+- **On/Off pills and key caps:** flat kit fills.
+
+This replaces the glass and reference styling of P1-031.
+
+**VERIFIED:** builds; live renders of all 5 tabs, light and dark. The render window is inactive, so the native controls draw their inactive (white or grey) look. Not checked yet in the real popover.
+
+**Popover position (P1-032 follow-up):** the popover was placed for a 320 pt content size and then grew upward past the menu bar: its top at y 1697 on a 1440 pt screen (user report). It is now sized to its content before showing (`fittingSize`), and `sizingOptions = .preferredContentSize` keeps it in step when a tab changes height. Measured after the fix: top at y 1414, directly under the menu bar (visible area ends at 1410).
+
+**Switch (P1-032 follow-up):** the system switch never showed its glass lens in the popover (user report), so the toggles are a SwiftUI `KitSwitch` drawn to the kit's "Toggles - Switches" spec:
+- 54 × 24 track (accent when on, primary at 10 % when off) and a 32 × 20 white knob.
+- While pressed, the knob becomes a 50 × 31 `.glassEffect(.clear.interactive())` lens that overflows the track and follows a drag.
+- On release it toggles (tap) or settles on the side it was dragged to.
+- Accessibility: it is announced as a toggle with an On/Off value.
+
+**Quality picker:** 11 pt labels, each with an SF Symbol: Balanced `circle.lefthalf.filled`, Pro `bolt.fill`, Ultra `sparkles`, High Color `paintpalette.fill` (user request).
+
+**Panel as clear Liquid Glass (user request, with the system menu bar menus as reference):** `GlassPopover.swift` replaces NSPopover, whose material was much more opaque. It is a borderless key panel at menu level, with an `NSGlassEffectView` (clear style, 18 pt corners) on macOS 26+ and the popover material before. It opens 6 pt under the status item, clamped to the screen, and follows the content’s preferred height with its top edge fixed. A click in another app or Escape closes it, and so does the status item. Not judged by eye yet; the window-only capture cannot show the glass over the desktop.
+
+**Section backgrounds on the clear panel (user request):** each card and the header sit on a lighter layer: white at 45 % (10 % in dark mode) with a 0.5 pt white hairline and 12 pt corners, like the top section of the system display menu.
+
+**Readability fix:** the clear glass and the 45 % section layers left the text unreadable over a busy wallpaper (user report). The panel now uses regular glass, and the sections the window background colour at 75 %.
+
+## CHANGE ID: P1-033 — Native pixel mapping and freshest-frame presentation
+
+**SUMMARY:** Default the virtual display to Native @2x. More and Most Space remain selectable. On the 13-inch iPad Air, Native renders 1366×1024 points at 2732×2048 pixels; More Space renders 1536×1152 points at 3072×2304 and ScreenCaptureKit scales that raster to 2732×2048. Metal sizes the drawable using the screen's native scale and uses direct texel reads for pixel-matched luma and full-resolution chroma. Scaled video retains aspect fit, and 4:2:0 chroma retains interpolation at the signalled sample position. The draw queue coalesces pending frames and takes the latest decoded frame after drawable acquisition.
+
+**VERIFIED:** Host build and 146 Swift tests passed; host built, installed, and restarted. The Release iPad app installed and launched on the USB-connected iPad. The production shader preserved all 3,072 black/white pixels of an offscreen checkerboard on the Mac GPU.
+
+**REAL DEVICE A/B:** Used the same moving pattern and HEVC 4:4:4 8-bit preset on the iPad. Screenshots were 2732×2048 in both modes. In a 32×32 crop of the one-pixel checkerboard, More Space produced only midtones (sRGB red channel 122–131). Native preserved all 1,024 positions with 512 dark (≤16) and 512 light (≥239) samples. In steady motion, Native presented 60.0 fps for three consecutive five-second windows; More Space presented 59.6–59.8 fps. Host encode p50 was 8.0–9.5 ms in Native, compared with 11.6 ms in the first full motion window in More Space. Conversion p50 was 2.1–2.3 ms versus 3.9 ms in that window.
+
+**LATENCY LIMIT:** Native client enqueued-to-glass latency was p50 46.6–48.1 ms and p95 50.1–50.6 ms in the steady windows. More Space had p50 28.3–42.4 ms and p95 45.7–47.7 ms. There were zero pending-frame replacements during steady motion in either run, so these runs do not show the effect of coalescing under drawable contention. End-to-end input latency and a direct Studio Display match were not measured.
+
+## CHANGE ID: P1-034 — Measure iPad presentation latency by stage
+
+**SUMMARY:** The Metal renderer logs five-second p50/p95 windows for enqueue-to-decode completion, decode completion to submission, CPU time waiting for `nextDrawable()`, command-buffer GPU execution, and submission to actual drawable presentation. Drawable wait overlaps decode-to-submit, and GPU execution is part of submit-to-presentation. GPU samples are capped if presentation callbacks stop. Frame scheduling and pixel mapping are unchanged.
+
+**REAL DEVICE:** Two USB runs on iPad Air 13-inch, Native @2x at 2732×2048, HEVC 4:4:4 8-bit, using scripted typing, scrolling 13 pt text, and moving a window. In the full steady windows below, the two runs showed:
+
+| Workload | Presented fps | Enqueue to glass p50 / p95 | Submit to glass p50 | Drawable wait p50 |
+| --- | ---: | ---: | ---: | ---: |
+| Typing | 6.8–8.0 | 25.5–27.7 / 30.5–37.2 ms | 20.7–22.9 ms | 0.04–0.06 ms |
+| Scrolling | 59.8–60.0 | 33.6–50.2 / 34.9–52.3 ms | 28.5–32.4 ms | 0.04–12.84 ms |
+| Moving a window | 55.4–55.6 | 42.9–44.3 / 47.7–48.0 ms | 32.2–32.4 ms | 5.44–7.29 ms |
+
+GPU execution p50 stayed below 1 ms and decode p50 was about 4–5 ms. The largest measured interval was submission to presentation; the metric includes command scheduling, GPU execution, and system presentation. Keypress-to-photon latency was not measured.
+
+**VERIFIED:** Host build, all 146 Swift tests, host installation/restart, and Release iPad installation and launch. Both USB runs returned the new timing breakdown.
+
+## CHANGE ID: P1-035 — Compare CAMetalDisplayLink with on-demand Metal presentation
+
+**EXPERIMENT:** On the USB-connected 13-inch iPad Air, alternated A/B/A/B with Native @2x at 2732×2048 and HEVC 4:4:4 8-bit. A used the existing on-demand Metal renderer. B used `CAMetalDisplayLink` at 60 Hz and preferred frame latency 1, using the drawable supplied by each update and selecting the newest decoded frame. Each run used the same scripted typing, text scroll, and moving-window workload.
+
+| Workload | A — displayed FPS | B — displayed FPS | A — enqueue-to-glass p95 | B — enqueue-to-glass p95 |
+| --- | ---: | ---: | ---: | ---: |
+| Typing | 6.7–8.0 | Sparse updates | 34.2–36.2 ms | 49.3–52.1 ms |
+| Scrolling | 59.6–60.0 | 52.2–58.4 | 36.3–37.9 ms | 53.2–53.3 ms |
+| Moving window | 54.2–55.0 | 52.0–55.2 | 45.2–47.9 ms | 50.3–52.6 ms |
+
+Rows use complete or nearly complete five-second workload windows. B removed the explicit `nextDrawable()` wait, but decode-complete to submission p50 while scrolling rose from 0.33–0.69 ms to 14.30–15.37 ms. Submission to actual presentation remained around 32 ms in B. The two displayed checkerboard screenshots both preserved all 1,024 black/white positions in the sampled region.
+
+**OUTCOME:** Kept the on-demand renderer and restored the exact pre-experiment source. Retained the Native @2x rendering and per-stage diagnostics. Host build, 146 Swift tests, host installation/restart, and iPad Release install/launch were verified after restoration.
+
+## CHANGE ID: P1-036 — Recover text-edge contrast in More and Most Space
+
+**SUMMARY:** Enable a contrast-gated four-neighbour luma filter in the iPad Metal renderer when the Mac renders an oversized HiDPI desktop and the video matches the iPad drawable pixel for pixel. Strength increases with the overscale ratio and is bounded, and output luma stays within the local input range. Chroma sampling and Native @2x keep their previous paths. The diagnostic launch argument `--disable-scaled-text-detail` provides the unfiltered comparison in the same build.
+
+**REAL DEVICE:** Verified the actual backing sizes during each run on the 13-inch iPad Air (264 PPI, 2732×2048 at 60 Hz, HEVC 4:4:4 8-bit). Used fixed 9–19 pt black, red and blue text, plus black text scaled by the logical-width ratio for like-for-like physical size. RMS adjacent-pixel luminance gradient on the screenshot text crops increased as follows:
+
+| Mode | Desktop backing raster | Same point sizes | Matched physical size | Displayed FPS with filter |
+| --- | ---: | ---: | ---: | ---: |
+| More Space, 1536×1152 | 3072×2304 | +7.5% | +8.2% | 59.6–59.8 |
+| Most Space, 1708×1280 | 3416×2560 | +13.0% | +13.2% | 60.0 |
+
+Median GPU work increased by about 0.5 ms. Enqueued-to-glass p95 was 42.5–42.9 ms in More Space and 41.5–43.7 ms in Most Space in the steady moving-pattern windows. RMS gradient measures local contrast, not glyph fidelity; detail removed by the host's downscale remains unrecoverable. Native preserved all 1,024 positions in the physical iPad checkerboard crop and all 3,072 pattern pixels in an offscreen GPU test. The Native control run had about 52 fps of host capture from this pattern, so it served as a pixel-fidelity check.
+
+**VERIFIED:** Host build and all 146 Swift tests passed. Host installed and restarted. Release iPad build installed, launched, and tested in all three modes. The virtual display was returned to Native after the test.
+
+## CHANGE ID: P1-037 — Display-space selector in the Mac host panel
+
+**SUMMARY:** Added Default, More Space, and Most Space to the Display tab below “Looks like.” The selection reflects the resolution macOS reports, including a mode selected in System Settings. The action targets the focused iPad’s virtual display, matches the current refresh rate, and is unavailable for the main display or a mirrored arrangement. It applies the mode for the current display session and sends the updated logical size through the existing stream configuration path.
+
+**VERIFIED:** Host build and all 146 Swift tests passed. The host was installed, restarted, and reconnected to the iPad. Rendered the Display tab in light and dark. A hardware harness using the same CoreGraphics mode-selection code switched the active iPad through 1366×1024, 1536×1152, and 1708×1280 at 60 Hz and restored 1366×1024. The live host observed the changes and sent the updated sizes without reconnecting. The menu-bar button interaction itself was not verified because desktop automation timed out.
+
+## CHANGE ID: P1-038 — Measure host capture callback and compare queue depths
+
+**SUMMARY:** Added five-second capture callback duration statistics (p50, p95, maximum, and count above a 16.67 ms frame period). Compared ScreenCaptureKit queue depths 4 and 2 on a USB-connected iPad at Native @2x, HEVC 4:4:4 10-bit, using an 18-second constant-speed window movement driven by the Mac display link. Retained queue depth 4 after the experiment.
+
+**REAL DEVICE:** With depth 2, capture ran at 59.2–59.8 fps. The first run included an iPad window at 54.0 fps and enqueue-to-glass p95 64.8 ms. The repeat presented 59.2–59.4 fps with p95 46.5–46.6 ms. With depth 4 restored, the iPad presented 59.0–59.8 fps with p95 42.9–43.1 ms in steady windows. Capture callback p95 was 6.02–6.38 ms with depth 4; none of 897 sampled callbacks exceeded 16.67 ms. These runs do not demonstrate a consistent latency benefit from reducing capture depth.
+
+**LIMITS:** The earlier sinusoidal movement workload still produced about 53 fps at capture and 52 fps on the iPad. The constant-speed workload is a different input, so its higher frame rate does not establish an application performance improvement. Keypress-to-photon measurement still requires optical recording.
+
+**VERIFIED:** Host build and all 146 Swift tests passed after restoring depth 4. Host installed, restarted, and streamed the physical test successfully.
+
+## CHANGE ID: P1-039 — Correlate capture delivery with actual iPad presentation
+
+**SUMMARY:** Record the host-clock time when ScreenCaptureKit delivers a frame. Keep that time with the source through still-frame refinement. Sample encoded outputs and correlate their existing wire timestamps with iPad drawable presentation callbacks. Host samples report capture delivery to conversion, conversion, and encode/pack time. Client samples report wire submission to enqueue (including queueing, encryption, USB, decryption and parsing), decode, submission, and actual presentation. SessionFramer and FramedSocket accept an optional explicit timestamp, with existing clock-based behaviour retained for callers that omit it. The existing framing test now verifies both timestamp paths and independent stream sequences.
+
+**REAL DEVICE:** USB iPad Air 13-inch, Native @2x, HEVC 4:4:4 10-bit. Used scripted typing, text scrolling, sinusoidal window movement, then constant-speed display-link-driven window movement.
+
+| Workload | Matched displayed frames | Capture delivery → glass p50 / p95 |
+| --- | ---: | ---: |
+| Typing | 17 | 66.1 / 90.5 ms |
+| Text scroll | 18 | 57.1 / 57.8 ms |
+| Sinusoidal movement | 22 | 56.7 / 72.7 ms |
+| Constant-speed movement | 35 | 56.4 / 89.7 ms |
+
+During scrolling, sampled medians were 0.05 ms capture-delivery-to-conversion, 4.13 ms conversion, 10.66 ms encode/pack, 0.93 ms submission-to-enqueue, 4.53 ms decode, 3.75 ms decoded-to-submission, and 32.45 ms submission-to-glass. Stage medians are reported individually and do not sum to the median total. The largest sampled interval was submission-to-presentation. Constant-speed movement included a presentation stall with 28 superseded pending frames in one five-second window. The steady windows presented 59.0–59.6 fps; the sinusoidal workload included 55.4 fps.
+
+**MEASUREMENT BOUNDARY:** Both ScreenCaptureKit presentation timestamps and displayTime metadata could lead the host callback clock on this machine. The final measurement therefore starts at callback delivery, not the original WindowServer update or physical input. Cross-device intervals use the existing recent-ping clock-offset estimate and have clock-sync uncertainty. Sparse per-frame samples and short workloads do not establish sustained latency. Physical keypress-to-photon measurement remains unverified.
+
+**VERIFIED:** Host build and all 146 Swift tests passed. Host installed and restarted, iPad Release build installed and launched, and correlated samples were obtained for every workload.
+
+## CHANGE ID: P1-040 — Bilingual WiredDisplay landing page
+
+**SUMMARY:** Recreated the public Dinta landing-page styling for WiredDisplay using its base stylesheet, blue gradient headline, rounded download buttons, and product sections. Added Indonesian and English pages, a workspace-size demo, setup guidance, and FAQ. The hero and a dedicated audio section explain using the iPad speakers as Mac output and the iPad microphone as Mac input. Downloads point to existing v0.4.2 release assets. The development panel screenshot is labelled.
+
+**DELIVERY:** Source is in the separate website directory of the current Mac host & iPad workspace. Published to Cloudflare Pages at https://wireddisplay.pages.dev/ and /en/. Registered the owner's custom domain. Custom-domain activation awaits a DNS CNAME to wireddisplay.pages.dev; the available Cloudflare session has Pages deployment access but no DNS write scope.
+
+**VERIFIED:** Browser checks on the deployed Indonesian and English pages, mobile navigation and language switch, resolution-demo controls, FAQ expansion, internal assets/anchors, and JavaScript syntax. No browser-console errors were observed. No app binaries were changed for this website.
+
+
+## CHANGE ID: P1-041 — Product-page redesign and bilingual inline CMS
+
+**SUMMARY:** Rebuilt the website around the observed Apple product-page structure: sticky product navigation, large product imagery, horizontal highlight and detail galleries, plus-button dialogs, audio selection, and a scroll-driven USB explanation. Added family coverage for iPad, iPad mini, iPad Air and iPad Pro while retaining physical-testing limitations. Removed the interactive iPad-resolution demo at the owner's request.
+
+**ASSETS:** Used the owner-supplied Mac mini photograph. Portrait and landscape mockups contain actual macOS TextEdit captures with a public sample document. Audio graphics use cropped native Sound settings rows for iPad Speaker and iPad Microphone, excluding account and personal device details. Apple bezel resources were used after explicit owner acceptance of the license. Standalone resources remain outside the deployment; website mockups are flattened PNGs. Inspected the Shakuro Figma reference for composition; no Figma assets were exported because export required login.
+
+**CMS:** Added a Dinta-style inline editor with separate Indonesian/English content, D1 persistence, signed HttpOnly sessions, salted password hashes, login rate limits, same-origin writes, URL/field validation, JSON export, and revision-conflict detection. Fixed activation links opened in an existing admin tab by handling fragment changes. The owner activated the production administrator and opened the authenticated editor. Actual production content publishing remains untested; both language revisions were zero at verification.
+
+**DELIVERY:** The custom domain and /en/ are live with HTTPS. CMS is at /admin/. Latest deployment: https://88e618b1.wireddisplay.pages.dev/. Website source, build scripts, tests and local source assets remain in the separate website directory of the Mac host & iPad workspace.
+
+**VERIFIED:** Pass A: site build, JavaScript syntax, SQLite-backed Worker integration test covering setup/authentication/persistence/language isolation/conflicts and invalid requests, local links/assets and personal-identifier scan. Pass B: browser checks of public custom domain, native screenshot mockups, desktop/local 390 px layouts, ID/EN navigation, detail modal, keyboard audio selection and the authenticated inline CMS. No broken images or horizontal page overflow were observed in checked layouts. Physical portrait behavior on every iPad was NOT RUN. No app binaries changed; no Git commit, push, or GitHub release was made.
+
+
+## CHANGE ID: P1-042 — Keep the hero composition inside desktop and mobile bounds
+
+**SUMMARY:** Replaced independent rotated device layers with one bounded 2400×1680 product composition using the same actual macOS captures and owner-provided Mac mini photo. The iPad frames retain their image proportions, and the image scales as one unit. Desktop image width follows viewport height so every device is visible in the initial viewport. Mobile uses 92% of the page width. The following heading has a separate layout boundary and 28 px gap. The first highlight card also uses the bounded composition. Image/link CMS field keys now derive from their default URL to prevent unrelated image-order changes from reassigning keys. Both production language revisions were still zero before this schema update.
+
+**VERIFIED:** Pass A: image export, site build and SQLite-backed Worker test passed. Pass B: browser checks at 1280×720 and 390×844 found the complete hero within the initial viewport, no horizontal page overflow and a 28 px gap before the following text. Verified the new image loaded at 2400 px natural width on the public custom domain. Deployment: https://cd560cae.wireddisplay.pages.dev/. No app binaries, commits, pushes or GitHub releases changed.
+
+## CHANGE ID: P1-043 — "More/most space" downscaled with an area filter on the host (closer to native @2x)
+
+**FILES CHANGED:** `macOSHost/Host/{ChromaConverter,VideoEncoder,HostController,main}.swift`, `docs/CHANGELOG.md`.
+
+**SUMMARY:**
+- In "more/most space" the virtual display renders at 2× a point size larger than half the panel (framebuffer 3072 × 2304 or 3416 × 2560 for a 2732 × 2048 panel). ScreenCaptureKit used to scale that to the panel with its own fixed scaler. The host now captures the full HiDPI framebuffer and does the downscale itself.
+- 4:2:0 lanes: `ChromaConverter` resamples every output pixel with an area (box) filter, the coverage-weighted average of the source pixels it covers, in the same pass as the colour conversion. At scale 1 it reads the pixel as before.
+- 4:4:4 lanes: VideoToolbox scales with `kVTDownsamplingMode_Average`.
+- When it applies: only when the framebuffer is larger than the panel with the same aspect (not when mirroring another display) and every lane converts from BGRA (all presets).
+- A "looks like" change during a session restarts the capture at the new framebuffer size.
+- `--own-downscale off` restores ScreenCaptureKit scaling for A/B tests. The encoded size and bitrate are unchanged.
+
+**VERIFIED:**
+- Kernel tests (standalone harness):
+  - Same-size flat colours: at most 1 code from VideoToolbox, unchanged; the 1-px red line keeps its chroma (Cr 28/28).
+  - Downscales of 1.25× (most) and 1.125× (more): 0 codes from a CPU area-filter reference, and grey stays neutral.
+- `swift test`: all suites pass. The host is built, installed and relaunched.
+- **Live, iPad Air 13″ portrait in most space** (1280 × 1708 pt, framebuffer 2560 × 3416 → encode 2048 × 2732, Pro preset, 20 s test pattern, several runs):
+  - Capture fps: own downscale on, 58.8–59.8 fps steady in two runs; off, 59.0–59.8 fps. No frame drops.
+  - Conversion p50: on, 1.2–3.4 ms; off, 3.9–4.9 ms. The spread comes from the GPU's power state, not the downscale.
+  - Encode p50: about 12 ms either way.
+  - A "looks like" change restarts the capture at the right size in both directions (native to most, and back).
+  - The first run saw only 35–44 fps; it was the test window, as in earlier soaks.
+- Judged by eye on the iPad in most space: sharper than ScreenCaptureKit's scaling (user confirmed).
+- The iPad's contrast filter for oversized desktops (P1-036) still runs on top of this host downscale. The user's judgement was made with both.
+
+## CHANGE ID: P1-044 — Sleep, wake, lock and screensaver handling (audit PLW-01…07)
+
+**FILES CHANGED:** `macOSHost/Host/{PowerMonitor (new),HostController,InputInjector,VideoEncoder,main}.swift`, `docs/POWER_LOCK_WAKE.md` (new), `docs/CHANGELOG.md`.
+
+**SUMMARY:**
+- `PowerMonitor` tracks system sleep, display sleep, lock, screensaver and user switching as independent states. It reconciles them every 2 s against the session dictionary and the running ScreenSaverEngine.
+- Display sleep no longer ends the session or destroys the display. The iPad gets a black keyframe, and the capture restarts on wake or after a bounded backoff.
+- System sleep closes the session cleanly and pauses reconnects until wake.
+- iPad input while locked or in a screensaver: pointer moves only. Clicks and keys are dropped, and anything held is released.
+- The "looks like" space is remembered per iPad.
+
+**VERIFIED:** `swift test` 146/146. Physical:
+- Display sleep 20/20: 0 sessions ended (21 before the fix); recovery p50 86 ms, p95 312 ms.
+- Lock: the iPad showed the lock screen, no desktop.
+- System sleep: picture back 2.4 s after wake.
+- Screensaver: dismissed by a move on the iPad.
+- Space remembered across display recreation.
+
+**NOT RUN:** the 20-cycle lock/sleep/screensaver series and a 2-hour soak. Details are in `docs/POWER_LOCK_WAKE.md`.
+
+## CHANGE ID: P1-045 — High-risk review of b6944b0: frame kept without a drawable, capture-restart loop guard
+
+**FILES CHANGED:** `iPadOSClient/WiredDisplayClient/Sources/MetalVideoRenderer.swift`, `macOSHost/Host/HostController.swift`, `Shared/Session/QuickFailureCounter.swift` (new), `Tests/Unit/WDSessionTests/QuickFailureCounterTests.swift` (new), `docs/HIGH_RISK_REVIEW.md` (new), `docs/CHANGELOG.md`.
+
+**SUMMARY:**
+- HR-01: when there is no drawable, the iPad renderer keeps the decoded frame and retries, up to 10 × 50 ms. Before, it dropped the frame, so a still desktop could stay on an older picture.
+- HR-02: a capture that stops again within 2 s of every recovery backs off (0.5, 1, 2 s), and the 4th time the session ends. Before, it restarted without end. Display-sleep stops are unaffected.
+- HR-03: capture recovery is tied to its session; `stopVideo` clears the recovery state.
+
+**VERIFIED:**
+- `swift test` 152/152. Host build has no warnings; iPad Release build succeeded.
+- Physical: 5/5 display-sleep cycles recovered on the first attempt, no session ended.
+
+**NOT RUN:** the quick-stop loop on hardware (it needs TCC withdrawn), a nil drawable on the iPad, a 2-hour soak. Details are in `docs/HIGH_RISK_REVIEW.md`.
+
+
+## CHANGE ID: P1-046 — Paired iPads show the device name and model
+
+**FILES CHANGED:** `Shared/Usbmux/Lockdown.swift` (new), `Shared/Session/TrustStore.swift`, `macOSHost/Host/{HostController,StatusPanel,main}.swift`, `Tests/Unit/WDUsbmuxTests/LockdownTests.swift` (new), `docs/CHANGELOG.md`.
+
+**SUMMARY:**
+- Every paired iPad was listed as "iPad". Since iPadOS 16, `UIDevice.current.name` returns only the generic name.
+- The host now reads `DeviceName`, `ProductType` and `DeviceClass` from the iPad's lockdownd over the same USB mux (port 62078, `GetValue`, no pairing session needed; measured on iPadOS 27.3). It shows "Alex’s iPad" with "iPad Air 13-inch (M2) · Key 0d7238ca".
+- An unknown identifier shows as the identifier itself.
+- The model is stored with the trusted peer (an optional field, so old entries still decode).
+- A peer paired earlier keeps showing only its key until it connects again.
+- The status line uses the same name.
+
+**VERIFIED:**
+- `swift test` 156/156 (4 new).
+- Physical: the log shows "iPad identity: model iPad14,10 (iPad Air 13-inch (M2))".
+- The live panel render shows the new row.
+
+## CHANGE ID: P1-047 — Audit A–F: teardown audio race, open gestures, bounded capture query, parallel identity read
+
+**FILES CHANGED:** `macOSHost/Host/{HostController,InputInjector,CaptureEngine}.swift`, `Shared/Session/GestureTracker.swift` (new), `Tests/Unit/WDSessionTests/GestureTrackerTests.swift` (new), `docs/AUDIT_A_F.md` (new), `docs/CHANGELOG.md`.
+
+**SUMMARY:**
+- AUD-01: session teardown closes the socket first, so a late audio route can no longer start the speaker or microphone after `stopAll`.
+- AUD-02: `releaseAll` ends trackpad scroll, momentum, pinch and rotate gestures that were left open.
+- AUD-03: the shareable-content query is bounded to 5 s, so it cannot hang the video queue.
+- AUD-04: the lockdownd identity is read in parallel with the handshake, with at most 1 s of waiting.
+
+**VERIFIED:**
+- `swift test` 161/161.
+- Host reinstalled: session up; 3/3 display-sleep cycles recovered.
+
+**NOT RUN:** AUD-01 and AUD-02 on hardware, 2-hour soak. Details are in `docs/AUDIT_A_F.md`.
+
+## CHANGE ID: P1-048 — Release 0.5.0 (build 9)
+
+**FILES CHANGED:**
+- `scripts/build-host-app.sh` and the iPad `project.pbxproj`: version 0.5.0, build 9.
+- `docs/share/PANDUAN-INSTALASI.txt`: display space, paired iPad names, and a section on sleep, lock and screensaver.
+- `AGENTS.md`: state.
+- Personal identifiers removed from sample data, tests and docs before publishing.
+- `scripts/build-host-app.sh` and `scripts/build-ipa.sh` now run `strip -S`. The shipped binaries had debug-map entries with absolute build paths, which included the builder's home folder; 0.4.2 contained them too.
+
+**CONTENTS:** P1-043 to P1-047, together with the panel redesign (5a249cb).
+
+**VERIFIED:**
+- `swift test` passed.
+- IPA and DMG built (the DMG ad-hoc signed).
+- The identifier scan of the public tree and of both artifacts came back clean.
+
