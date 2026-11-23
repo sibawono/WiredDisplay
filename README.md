@@ -17,14 +17,34 @@ input back from the iPad. It works like Sidecar, but it runs only over the
 cable, has its own pairing, and can be the main display of a Mac with no
 monitor attached.
 
+## Screenshots
+
+**Mac:** the menu bar panel (Display, Input and General tabs).
+
+<p align="center">
+  <img src="docs/images/host-display.png" width="260" alt="Menu bar panel, Display tab: display size, encoding, iPad brightness and quality preset">
+  <img src="docs/images/host-input.png" width="260" alt="Menu bar panel, Input tab: allow input from the iPad and keyboard shortcuts">
+  <img src="docs/images/host-general.png" width="260" alt="Menu bar panel, General tab: permissions, keep the display on, keep the Mac awake, open at login">
+</p>
+
+**iPad:** the app while it waits for the Mac. Once connected, the whole
+screen is the Mac display.
+
+<p align="center">
+  <img src="docs/images/ipad-waiting.png" width="640" alt="iPad app waiting for the Mac, with the three setup steps">
+</p>
+
 ## Features
 
 - **Wired only.** Video, audio and input travel through `usbmuxd` over the
   USB‑C cable. The app never falls back to Wi‑Fi, and the Mac opens no
   network port.
 - **A real display.** A virtual display at the iPad's native resolution with
-  HiDPI "looks like" sizes, including "more space" steps. It can be the main
-  display of a headless Mac.
+  HiDPI "looks like" sizes: **Default**, **More Space** and **Most Space**,
+  chosen from the menu bar panel and remembered for each iPad. For the larger
+  sizes the Mac renders at the full HiDPI size and scales it down to the panel
+  with its own area filter, which keeps text closer to native Retina. It can
+  be the main display of a headless Mac.
 - **Picture quality presets.** HEVC with low-latency and full-detail lanes:
   - **Balanced**
   - **Pro:** 4:2:0, 10-bit
@@ -32,7 +52,18 @@ monitor attached.
   - **High Color:** 4:4:4, 8-bit
 
   You can switch presets live from the menu bar. If an iPad can't decode a
-  format, the Mac steps down for that iPad automatically.
+  format, or can't decode it fast enough, the Mac steps down for that iPad
+  automatically.
+- **Follows the Mac's sleep and lock.**
+  - Display sleep keeps the session: the iPad goes black and the picture
+    comes back when the displays wake.
+  - System sleep closes the session cleanly, and it reconnects after wake.
+  - While the Mac is locked or in a screensaver, the iPad shows the lock
+    screen, never the desktop. A tap or key on the iPad wakes the displays,
+    but nothing is clicked or typed into the lock screen.
+  - **Keep the display on** and **Keep the Mac awake** choose whether the
+    displays, or the Mac itself, may sleep on their own while an iPad is
+    connected.
 - **Audio both ways.** Mac sound plays on the iPad speakers, and the iPad
   microphone can be used on the Mac. Both are optional and use an included
   audio driver.
@@ -75,16 +106,19 @@ monitor attached.
 - **Real iPad brightness.** The Mac's brightness keys and a slider in the menu
   bar panel set the iPad's actual backlight instead of dimming the picture.
   This works with Apple keyboards and third-party keyboards.
-- **Menu bar panel.** A tabbed popover with the following tabs:
-  - Display: resolution, brightness and quality.
+- **Menu bar panel.** A Liquid Glass panel with the following tabs:
+  - Display: resolution, display size, brightness and quality.
   - Input
   - Audio
-  - Security: connection code and paired iPads.
-  - General: permissions and login.
+  - Security: connection code, and the paired iPads with their names and
+    models.
+  - General: permissions, staying awake while connected, and login.
 - **Local cursor.** The pointer is drawn on the iPad from a separate position
   stream, about 1 ms behind the Mac, instead of travelling inside the video.
 - **Metal renderer.** The iPad decodes and shows each frame the moment it is
-  ready. The system video layer is available as an option.
+  ready. It never lets more than about 100 ms of frames wait for the decoder,
+  so a slower iPad skips ahead instead of falling behind. The system video
+  layer is available as an option.
 - **Portrait.** Rotate the iPad, and the Mac display becomes a vertical
   monitor.
 - **ProMotion.** Up to 120 Hz on iPad Pro, or a fixed 60 Hz.
@@ -171,7 +205,7 @@ Mac (WiredDisplayHost)                              iPad (WiredDisplay)
 CGVirtualDisplay ─► ScreenCaptureKit ─► VideoToolbox HEVC ─┐
 CoreAudio loopback ───────────────────────────────────────┤  usbmuxd over USB‑C
 CGEvent injection ◄── touch · keys · trackpad · gestures ──┤  encrypted, framed
-                                                           └─► decode ─► AVSampleBufferDisplayLayer
+                                                           └─► VideoToolbox decode ─► Metal
 ```
 
 | Path | What's there |
@@ -195,10 +229,15 @@ CGEvent injection ◄── touch · keys · trackpad · gestures ──┤  enc
   cable is unplugged for about 10 seconds and plugged back in. This is
   platform behaviour (BUG‑037).
 - **Free Apple ID signing** expires after 7 days. AltStore renews it.
-- **Older iPads** may not decode 4:4:4 or 10-bit video. If an iPad keeps
-  failing, the Mac drops to 4:2:0 and then to 8-bit for that iPad
-  automatically, and shows the limit in the Quality menu. Only an iPad Air
-  13″ (M2) has been tested.
+- **Older iPads** may not decode 4:4:4 or 10-bit video, or not fast enough.
+  If an iPad keeps failing or falling behind, the Mac drops to 4:2:0 and
+  then to 8-bit for that iPad automatically, and shows the limit in the menu
+  bar panel. Only an iPad Air 13″ (M2) has been tested.
+- **The iPad cannot wake a sleeping Mac.** During system sleep the Mac app
+  and the USB connection are frozen, so wake it with its own keyboard or
+  mouse. Turn on **Keep the Mac awake** to keep it from sleeping on its own
+  while an iPad is connected. Display sleep and the screensaver can be
+  woken from the iPad.
 
 ## License
 

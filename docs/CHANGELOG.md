@@ -738,3 +738,13 @@ During scrolling, sampled medians were 0.05 ms capture-delivery-to-conversion, 4
 - IPA and DMG built (the DMG ad-hoc signed, binaries stripped of debug paths).
 - The identifier scan of the public tree and of both artifacts came back clean.
 
+
+## CHANGE ID: P1-053 — README brought up to 0.5.1, with screenshots
+
+**FILES CHANGED:** `README.md`, `docs/images/` (new), `docs/CHANGELOG.md`.
+
+**SUMMARY:**
+- New feature entries: display size (Default / More / Most Space, remembered per iPad, area-filter downscale); following the Mac's sleep, lock and screensaver; the keep-awake switches; paired iPad names and models; the bounded decode queue.
+- Corrected entries: the diagram now ends in the Metal renderer, not AVSampleBufferDisplayLayer; the panel is the Liquid Glass panel; a step-down also happens when an iPad decodes too slowly.
+- New limitation: the iPad cannot wake a Mac from system sleep.
+- Screenshots: the Mac menu bar panel (Display, Input and General tabs, rendered with sample data) and the iPad app's waiting screen (`docs/images/`). The Security tab is left out because its sample data carries real key prefixes.
