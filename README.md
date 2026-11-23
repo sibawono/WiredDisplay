@@ -19,12 +19,13 @@ monitor attached.
 
 ## Screenshots
 
-**Mac:** the menu bar panel (Display, Input and General tabs).
+**Mac:** the menu bar panel (Display, Input, Audio and General tabs).
 
 <p align="center">
-  <img src="docs/images/host-display.png" width="260" alt="Menu bar panel, Display tab: display size, encoding, iPad brightness and quality preset">
-  <img src="docs/images/host-input.png" width="260" alt="Menu bar panel, Input tab: allow input from the iPad and keyboard shortcuts">
-  <img src="docs/images/host-general.png" width="260" alt="Menu bar panel, General tab: permissions, keep the display on, keep the Mac awake, open at login">
+  <img src="docs/images/host-display.png" width="200" alt="Menu bar panel, Display tab: display size, encoding, iPad brightness and quality preset">
+  <img src="docs/images/host-input.png" width="200" alt="Menu bar panel, Input tab: allow input from the iPad and keyboard shortcuts">
+  <img src="docs/images/host-audio.png" width="200" alt="Menu bar panel, Audio tab: Mac sound on the iPad, the iPad microphone, automatic headphone switching">
+  <img src="docs/images/host-general.png" width="200" alt="Menu bar panel, General tab: permissions, keep the display on, keep the Mac awake, open at login">
 </p>
 
 **iPad:** the app while it waits for the Mac. Once connected, the whole
