@@ -53,8 +53,9 @@ git update-ref refs/heads/public $C && git push github public:main
 ```
 To release: bump `CFBundleShortVersionString`/`CFBundleVersion` in `scripts/build-host-app.sh` and `MARKETING_VERSION`/`CURRENT_PROJECT_VERSION` in the iPad `project.pbxproj`, update the guide, build the IPA and DMG, scan their contents, publish, then run `gh release create vX.Y.Z --latest dist/*.dmg dist/*.ipa docs/share/PANDUAN-INSTALASI.txt`.
 
-## State (2026-11-23)
-- v0.5.0 (build 9) is released on GitHub. Local `main` and the published `public` tree match, except `docs/evidence`.
+## State (2026-11-23, evening)
+- v0.5.1 (build 10) is released on GitHub. Local `main` and the published `public` tree match, except `docs/evidence`.
+- 0.5.1 adds: the fix for GitHub issue #1 (capture no longer waits for the encoder; bounded iPad decode queue), "Keep the display on" / "Keep the Mac awake", and golden protocol vectors for a second (Android) client (`Tests/Vectors`, `docs/ANDROID_COMPATIBILITY.md`).
 - New since 0.4.2:
   - the host panel redesign: a Liquid Glass panel and controls following the macOS 27 Figma kit (file `EH8VzuvPVZgEkKlgeBTvDs`);
   - the area-filter downscale for "more/most space";

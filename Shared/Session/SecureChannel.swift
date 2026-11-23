@@ -67,7 +67,7 @@ public final class SecureChannel: @unchecked Sendable {
 
     public let role: PeerRole
     private let identity: Curve25519.Signing.PrivateKey
-    private let ephemeral = Curve25519.KeyAgreement.PrivateKey()
+    private let ephemeral: Curve25519.KeyAgreement.PrivateKey
     private let localHello: AuthHello
     private let lock = NSLock()      // receive side and handshake state
     private let sendLock = NSLock()  // sendKey, sentHello
@@ -79,9 +79,16 @@ public final class SecureChannel: @unchecked Sendable {
     private var verifiedPeer: Peer?
     private var sentHello = false
 
-    public init(role: PeerRole, identity: Curve25519.Signing.PrivateKey) {
+    public convenience init(role: PeerRole, identity: Curve25519.Signing.PrivateKey) {
+        self.init(role: role, identity: identity, ephemeral: Curve25519.KeyAgreement.PrivateKey())
+    }
+
+    /// A fixed ephemeral key makes the handshake reproducible. Protocol test
+    /// vectors only (`ProtocolVectorTests`); product code always uses a fresh key.
+    init(role: PeerRole, identity: Curve25519.Signing.PrivateKey, ephemeral: Curve25519.KeyAgreement.PrivateKey) {
         self.role = role
         self.identity = identity
+        self.ephemeral = ephemeral
         localHello = AuthHello(role: role, identityKey: Array(identity.publicKey.rawRepresentation),
                                ephemeralKey: Array(ephemeral.publicKey.rawRepresentation))
     }

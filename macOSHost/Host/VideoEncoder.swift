@@ -119,6 +119,16 @@ final class VideoEncoder: @unchecked Sendable {
 
     private let repeatQueue = DispatchQueue(label: "wireddisplay.host.encoder.repeat")
 
+    /// Conversion and encode submission run here, one frame at a time, never
+    /// on ScreenCaptureKit's callback (GitHub issue #1: on a Mac mini M1 a
+    /// slow 4:4:4 submission held the capture callback, so capture fell to
+    /// 15 fps with gaps of seconds). While one frame is being submitted, only
+    /// the newest waiting frame is kept: the iPad never gets a backlog of old
+    /// frames. Guarded by `stateLock`.
+    private let submitQueue = DispatchQueue(label: "wireddisplay.host.encoder.submit", qos: .userInteractive)
+    private var submitting = false
+    private var waitingSubmit: (job: Job, time: CMTime)?
+
     init(codec: VideoCodec, width: Int, height: Int, fps: Int, bitrateMbps: Int, displayP3: Bool,
          chroma requested: ChromaMode = .c420, tenBit requestedTenBit: Bool = false, cursorInVideo: Bool = true,
          onUnit: @escaping @Sendable (AccessUnit, UInt64) -> Void) throws {
@@ -257,19 +267,57 @@ final class VideoEncoder: @unchecked Sendable {
                 return self.takeJob()
             }
             guard let job else { return } // a new frame already carried the keyframe
-            self.submit(job, presentationTime: CMClockGetTime(CMClockGetHostTimeClock()))
+            self.schedule(job, presentationTime: CMClockGetTime(CMClockGetHostTimeClock()))
         }
     }
 
     /// What one submission needs, decided atomically under `stateLock`.
     private var lastCaptureTime = CMTime.invalid
 
-    private struct Job {
+    /// Crosses to the submit queue; its buffer is only read there.
+    private struct Job: @unchecked Sendable {
         let captureTime: CMTime
         let source: CVPixelBuffer
         let lane: Lane
         let force: Bool
         let epoch: UInt64
+
+        /// This job, carrying the keyframe of one it replaces.
+        func forcing(_ also: Bool) -> Job {
+            Job(captureTime: captureTime, source: source, lane: lane, force: force || also, epoch: epoch)
+        }
+    }
+
+    /// Hands a job to the submit queue; a job already waiting there is
+    /// replaced by this newer one (its keyframe request carries over).
+    private func schedule(_ job: Job, presentationTime: CMTime) {
+        let start: Bool = stateLock.withLock {
+            if submitting {
+                let replaced = waitingSubmit
+                waitingSubmit = (job.forcing(replaced?.job.force ?? false), presentationTime)
+                if replaced != nil { stats.coalesced() }
+                return false
+            }
+            submitting = true
+            return true
+        }
+        guard start else { return }
+        submitQueue.async { [weak self] in self?.drainSubmits(job, presentationTime) }
+    }
+
+    private func drainSubmits(_ first: Job, _ time: CMTime) {
+        var next: (job: Job, time: CMTime)? = (first, time)
+        while let current = next {
+            submit(current.job, presentationTime: current.time)
+            next = stateLock.withLock {
+                guard let waiting = waitingSubmit else {
+                    submitting = false
+                    return nil
+                }
+                waitingSubmit = nil
+                return waiting
+            }
+        }
     }
 
     /// Call with `stateLock` held. Lock order: stateLock, then outputLock.
@@ -374,11 +422,17 @@ final class VideoEncoder: @unchecked Sendable {
             return (takeJob(), isMotion, reason)
         }
         stats.frame(dirty: dirtyFraction, motion: motionFrame, reason: reason)
-        if let job { submit(job, presentationTime: presentationTime) }
+        if let job { schedule(job, presentationTime: presentationTime) }
         if motionFrame { scheduleRefinement(step: 0) }
     }
 
+    /// Held for a whole submission and while the sessions are invalidated, so
+    /// `invalidate` never tears a session down under a running encode call.
+    private let submitLock = NSLock()
+
     private func submit(_ job: Job, presentationTime: CMTime) {
+        submitLock.lock()
+        defer { submitLock.unlock() }
         guard !invalidated.withLock({ $0 }) else { return }
         let lane = job.lane
         let hostAtSubmit = CMClockGetTime(CMClockGetHostTimeClock())
@@ -467,7 +521,7 @@ final class VideoEncoder: @unchecked Sendable {
                 return
             case .submit(let ready): job = ready
             }
-            self.submit(job, presentationTime: CMClockGetTime(CMClockGetHostTimeClock()))
+            self.schedule(job, presentationTime: CMClockGetTime(CMClockGetHostTimeClock()))
             self.scheduleRefinement(step: step + 1)
         }
     }
@@ -475,6 +529,8 @@ final class VideoEncoder: @unchecked Sendable {
     func invalidate() {
         let first = invalidated.withLock { value -> Bool in defer { value = true }; return !value }
         guard first else { return }
+        submitLock.lock()
+        defer { submitLock.unlock() }
         motion.invalidate()
         still?.invalidate()
         stateLock.withLock { lastSource = nil }
@@ -507,6 +563,10 @@ private final class LaneStats: @unchecked Sendable {
 
     func laneSwitch() { lock.withLock { switches += 1 } } // caller may hold stateLock; this lock is a leaf
 
+    /// A waiting frame replaced by a newer one before it was encoded.
+    private var replaced = 0
+    func coalesced() { lock.withLock { replaced += 1 } } // leaf lock, like laneSwitch
+
     func encoded(label: String, nanos: UInt64, bytes count: Int) {
         lock.withLock {
             latencies[label, default: []].append(Double(nanos) / 1e6)
@@ -534,8 +594,8 @@ private final class LaneStats: @unchecked Sendable {
                 parts.append(String(format: "convert p50 %.2f p95 %.2f ms", c[c.count / 2], c[min(c.count - 1, c.count * 95 / 100)]))
                 conversions = []
             }
-            let line = "lanes: \(parts.joined(separator: "; ")); motion frames \(motionFrames)/\(d.count) (\(reasons.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", "))), switches \(switches), \(dirtyText)"
-            latencies = [:]; bytes = [:]; dirty = []; motionFrames = 0; switches = 0; reasons = [:]
+            let line = "lanes: \(parts.joined(separator: "; ")); motion frames \(motionFrames)/\(d.count) (\(reasons.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", "))), switches \(switches), replaced before encode \(replaced), \(dirtyText)"
+            latencies = [:]; bytes = [:]; dirty = []; motionFrames = 0; switches = 0; reasons = [:]; replaced = 0
             return line
         }
         if let report { Log.info(report) }

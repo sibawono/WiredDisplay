@@ -14,6 +14,15 @@ protocol VideoSink: AnyObject, Sendable {
     var failureDescription: String? { get }
     func enqueue(_ sample: CMSampleBuffer)
     func flush(removingImage: Bool)
+    /// Since the last call: whether frames were dropped because the decoder
+    /// fell behind (the session asks the Mac for a keyframe), and how many
+    /// separate stalls that was (issue #1).
+    func takeBacklogEvents() -> (keyframeWanted: Bool, stalls: Int)
+}
+
+extension VideoSink {
+    /// The system display layer manages its own queue.
+    func takeBacklogEvents() -> (keyframeWanted: Bool, stalls: Int) { (false, 0) }
 }
 
 /// AVSampleBufferDisplayLayer's renderer, as before.
@@ -61,6 +70,7 @@ final class SwitchableSink: VideoSink, @unchecked Sendable {
     var failureDescription: String? { current.failureDescription }
     func enqueue(_ sample: CMSampleBuffer) { current.enqueue(sample) }
     func flush(removingImage: Bool) { current.flush(removingImage: removingImage) }
+    func takeBacklogEvents() -> (keyframeWanted: Bool, stalls: Int) { current.takeBacklogEvents() }
 }
 
 /// Experimental low-latency path (D-040, after OpenDisplay): decode with
@@ -100,6 +110,16 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
     /// The other lane's decoder (decodeQueue only).
     private var spare: [(format: CMFormatDescription, session: VTDecompressionSession)] = []
     private var failed: String?
+    /// Frames waiting for the decoder, bounded (issue #1); under `lock`.
+    /// 6 frames = 100 ms at 60 Hz: one large 4:4:4 keyframe that decodes
+    /// slowly passes; only a decoder that stays behind trips it.
+    private var backlog = DecodeBacklog(limit: 6)
+    /// Admission order; frames below `skipBelow` were overtaken by a keyframe
+    /// while the decoder was behind and are skipped. Under `lock`.
+    private var nextToken = 0
+    private var skipBelow = 0
+    private var keyframeWanted = false
+    private var backlogStalls = 0
     private var scaledTextStrength: Float = 0
     private let scaledTextEnabled = !ProcessInfo.processInfo.arguments.contains("--disable-scaled-text-detail")
 
@@ -203,6 +223,8 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
             failed = nil
             pending = nil
             generation += 1
+            backlog.reset()
+            keyframeWanted = false
         }
         presentQueue.async { [self] in if let textureCache { CVMetalTextureCacheFlush(textureCache, 0) } }
         decodeQueue.async { [self] in
@@ -216,14 +238,46 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
 
     func enqueue(_ sample: CMSampleBuffer) {
         let enqueued = CACurrentMediaTime()
-        let generation = lock.withLock { self.generation }
-        decodeQueue.async { [self] in decode(sample, enqueued: enqueued, generation: generation) }
+        let isKeyframe = !Self.isNotSync(sample)
+        // At most a few frames wait for the decoder (issue #1): a decoder
+        // slower than the stream otherwise built a queue of seconds.
+        let admitted: (generation: Int, token: Int)? = lock.withLock {
+            let decision = backlog.admit(isKeyframe: isKeyframe)
+            if case .drop(let overflow) = decision {
+                keyframeWanted = true
+                if overflow { backlogStalls += 1 }
+                return nil
+            }
+            let token = nextToken
+            nextToken += 1
+            if decision == .decodeSkippingQueued { skipBelow = token }
+            return (generation, token)
+        }
+        guard let admitted else { return }
+        decodeQueue.async { [self] in
+            decode(sample, enqueued: enqueued, generation: admitted.generation, token: admitted.token)
+            lock.withLock { backlog.finished() }
+        }
+    }
+
+    func takeBacklogEvents() -> (keyframeWanted: Bool, stalls: Int) {
+        lock.withLock {
+            defer { keyframeWanted = false; backlogStalls = 0 }
+            return (keyframeWanted, backlogStalls)
+        }
+    }
+
+    private static func isNotSync(_ sample: CMSampleBuffer) -> Bool {
+        guard let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: false)
+                as? [[CFString: Any]], let first = attachments.first else { return false }
+        return (first[kCMSampleAttachmentKey_NotSync] as? Bool) ?? false
     }
 
     // MARK: decode (decodeQueue)
 
-    private func decode(_ sample: CMSampleBuffer, enqueued: CFTimeInterval, generation: Int) {
-        guard lock.withLock({ self.generation == generation }) else { return } // flushed meanwhile
+    private func decode(_ sample: CMSampleBuffer, enqueued: CFTimeInterval, generation: Int, token: Int) {
+        // Flushed meanwhile, or overtaken by a keyframe while behind.
+        guard lock.withLock({ self.generation == generation && token >= skipBelow }) else { return }
         guard let format = CMSampleBufferGetFormatDescription(sample) else { return }
         if session == nil || sessionFormat.map({ !CMFormatDescriptionEqual($0, otherFormatDescription: format) }) ?? true {
             // Balanced switches 4:2:0 <-> 4:4:4 lanes: keep the previous

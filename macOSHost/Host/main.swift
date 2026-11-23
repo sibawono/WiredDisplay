@@ -188,6 +188,8 @@ final class StatusMenu: NSObject {
             waiting.accessibility = AXIsProcessTrusted()
             waiting.screenRecording = CGPreflightScreenCaptureAccess()
             waiting.openAtLogin = LoginItem.isEnabled
+            waiting.keepDisplayAwake = HostController.keepDisplayAwake
+            waiting.keepMacAwake = HostController.keepMacAwake
             waiting.autoSwitchAudio = fleet?.audioRouter.isEnabled ?? true
             waiting.autoSwitchMicrophone = fleet?.audioRouter.usesHeadsetMicrophone ?? true
             waiting.version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
@@ -238,6 +240,8 @@ final class StatusMenu: NSObject {
         s.paired = controller.trust.peers.map { .init(name: $0.name, model: $0.model, key: String($0.fingerprint.prefix(8))) }
         if status.iPadName != nil { s.connectionCode = controller.connectionCode.withLock { $0 } }
         s.openAtLogin = LoginItem.isEnabled
+        s.keepDisplayAwake = HostController.keepDisplayAwake
+        s.keepMacAwake = HostController.keepMacAwake
         s.loginNeedsApproval = LoginItem.needsApproval
         s.version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
         return s
@@ -266,6 +270,8 @@ final class StatusMenu: NSObject {
         }
         a.setAutoSwitchAudio = { fleet.audioRouter.isEnabled = $0 }
         a.setMatchRefresh = { fleet.setRefreshFollowsIPad($0) }
+        a.setKeepDisplayAwake = { fleet.setKeepAwake(display: $0) }
+        a.setKeepMacAwake = { fleet.setKeepAwake(mac: $0) }
         a.setLocalCursor = { fleet.setLocalCursor($0) }
         a.setAutoSwitchMicrophone = { fleet.audioRouter.usesHeadsetMicrophone = $0 }
         a.openDisplaySettings = { Self.open("x-apple.systempreferences:com.apple.Displays-Settings.extension") }

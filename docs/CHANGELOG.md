@@ -658,3 +658,83 @@ During scrolling, sampled medians were 0.05 ms capture-delivery-to-conversion, 4
 - IPA and DMG built (the DMG ad-hoc signed).
 - The identifier scan of the public tree and of both artifacts came back clean.
 
+
+## CHANGE ID: P1-049 — "Keep the display on" / "Keep the Mac awake"; a tap or key on the iPad wakes the displays
+
+**FILES CHANGED:** `macOSHost/Host/{HostController,HostFleet,InputInjector,StatusPanel,main}.swift`, `docs/CHANGELOG.md`.
+
+**SUMMARY:**
+- General tab, two new switches:
+  - **Keep the display on** (default on, the earlier behaviour) holds `PreventUserIdleDisplaySleep` while an iPad is connected.
+  - **Keep the Mac awake** (default off) holds `PreventUserIdleSystemSleep`, so the iPad can always wake the displays. A sleep the user asks for still happens.
+- While the Mac is locked, in a screensaver or with its displays asleep, a tap, click, key or scroll start on the iPad wakes the displays (`IOPMAssertionDeclareUserActivity` and a one-point pointer nudge). The event itself is still dropped, so nothing is clicked or typed.
+
+**VERIFIED:**
+- `swift test` 161/161.
+- `pmset -g assertions` shows both assertions with Mac awake on, and only the display one by default.
+- The panel render shows both switches.
+
+**NOT RUN:** waking the displays with a tap or key on the iPad (needs the user's hand on the iPad).
+
+## CHANGE ID: P1-050: Golden protocol vectors (for a second client)
+
+**FILES CHANGED:**
+- `scripts/gen-protocol-vectors.py` (new): an independent implementation of the v6 wire format in Python (`cryptography`), written from the Swift sources. It writes `Tests/Vectors/protocol-v6.json`; `--check` fails if the file is stale.
+- `Tests/Vectors/protocol-v6.json` (new): fixed keys derived from public labels (no secret), the handshake (transcript, direction keys, pairing code, proof messages, fingerprints), clear and encrypted frames both ways, every control message and input event, and the little-endian audio packets.
+- `Tests/Unit/WDSessionTests/ProtocolVectorTests.swift` (new): the real `SessionCodec`, `AudioPacket`, `FrameParser` and `SecureChannel` (host and client) against the vectors, plus a tampered frame.
+- `Shared/Session/SecureChannel.swift`: an internal initializer with a fixed ephemeral key, for the vectors only. The public initializer is unchanged and still creates a fresh key.
+- `scripts/verify.sh`: checks that the vectors match the generator when `cryptography` is installed.
+- `docs/ANDROID_COMPATIBILITY.md`: section 4.3 points to the vectors.
+
+**WHY:** a Kotlin client is a second implementation of the protocol; the vectors are the contract both must meet. The pairing-code vector has its top bit set, so a signed 64-bit modulo (Kotlin `Long %`) gives a wrong code; session IDs and one sequence number also exceed the signed and 32-bit ranges.
+
+**VERIFIED:** the generator's self-checks (every sealed frame opens with its key and header as AAD; every Ed25519 proof verifies; X25519 agrees both ways) and `--check` passed on Linux.
+
+**VERIFIED ON THE MAC:** `swift test`: all 7 ProtocolVectorTests passed; 0 failures in every suite.
+
+## CHANGE ID: P1-051 — GitHub issue #1: no capture stalls behind the encoder, bounded decode queue on the iPad
+
+**REPORT:**
+- Setup: Mac mini M1 with an iPad 10th gen (A14), running 0.4.0.
+- With Balanced, the picture lagged about 5 s behind the Mac and stuttered while typing.
+- The host captured at only 15–30 fps, with gaps up to 3 s. The largest gaps lined up with lane switches to 4:4:4.
+- Encode time and the link were fine.
+
+**ROOT CAUSES (from the source; reproduced only partly, since there is no M1 or A14 here):**
+1. **Host.** The capture callback converted the frame on the GPU and submitted it to VideoToolbox synchronously. On this M6 the callback cost p50 2.5 ms (max 4.4 ms). Any slow submission, such as a 4:4:4 10-bit keyframe on an M1, held ScreenCaptureKit's callback, so capture itself fell behind. The capture and repeat queues could also submit at the same time.
+2. **iPad.** The Metal renderer put every frame on the decode queue with no limit. A decoder slower than the stream (HEVC 4:4:4 10-bit on an A14) built a queue that never drains, which explains a picture seconds behind the Mac.
+
+**FIX:**
+- **Host (`VideoEncoder`).** Conversion and submission run on their own serial queue, one frame at a time. While one frame is being submitted, only the newest waiting frame is kept, and its keyframe flag is carried over. A lock keeps invalidation away from a running submission. The lane statistics now log "replaced before encode".
+- **iPad (`DecodeBacklog`, `MetalVideoRenderer`, `ClientSession`).**
+  - At most 6 frames (100 ms) wait for the decoder.
+  - Beyond that, frames are dropped until the next keyframe, which is requested from the Mac. A P-frame without its reference would only decode into garbage.
+  - The keyframe skips the older frames still queued.
+  - Repeated stalls count as decode failures (D-031). After 3 stalls in 10 s, the Mac steps this iPad down: no 4:4:4, then 8-bit. The step-down is remembered and shown in the panel.
+
+**VERIFIED (Mac18,5 M6 + iPad Air 13-inch M2):**
+- `swift test`: all pass, with 6 new `DecodeBacklog` tests.
+- Capture callback after the fix: p50 0.04 ms, max 0.35 ms (before: p50 2.5 ms, max 4.4 ms).
+- 60 Hz full-screen animation:
+  - Pro: capture, encode and the iPad's glass all at 59.8–60 fps, 0 gaps over 25 ms in steady state, decode p50 3.7 ms.
+  - Balanced with 5 motion/still cycles and lane switches: steady 59.8 fps, 0 iPad stalls, 4:4:4 decode 5–11 ms.
+
+**NOT RUN:**
+- The reporter's hardware (M1, A14).
+- A decoder actually slower than the stream (the drop path is covered by unit tests only).
+- The A/B with the released 0.5.0 binary: an ad-hoc-signed copy has no Screen Recording permission here.
+
+## CHANGE ID: P1-052 — Release 0.5.1 (build 10)
+
+**FILES CHANGED:**
+- `scripts/build-host-app.sh` and the iPad `project.pbxproj`: version 0.5.1, build 10.
+- `docs/share/PANDUAN-INSTALASI.txt`: the two keep-awake switches, and a tap or key on the iPad waking the displays.
+- `AGENTS.md`: state.
+
+**CONTENTS:** P1-049 to P1-051 (keep-awake switches, protocol vectors, the issue #1 fix) and the Android compatibility audit (`docs/ANDROID_COMPATIBILITY.md`).
+
+**VERIFIED:**
+- `swift test` passed.
+- IPA and DMG built (the DMG ad-hoc signed, binaries stripped of debug paths).
+- The identifier scan of the public tree and of both artifacts came back clean.
+

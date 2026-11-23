@@ -466,6 +466,58 @@ final class HostController: @unchecked Sendable {
         Log.info("touch input \(enabled ? "ENABLED" : "disabled") by user")
     }
 
+    // MARK: staying awake while connected
+
+    /// On (default, the behaviour since step 1): the Mac's displays do not
+    /// sleep on their own while an iPad is connected.
+    static let keepDisplayAwakeKey = "keepDisplayAwake"
+    /// On: the Mac itself does not sleep on its own while an iPad is
+    /// connected, so the iPad can always wake the displays (it cannot wake a
+    /// sleeping Mac: the host and USB are frozen then). A sleep the user asks
+    /// for (Apple menu, closing the lid) still happens.
+    static let keepMacAwakeKey = "keepMacAwake"
+    static var keepDisplayAwake: Bool { UserDefaults.standard.object(forKey: keepDisplayAwakeKey) as? Bool ?? true }
+    static var keepMacAwake: Bool { UserDefaults.standard.object(forKey: keepMacAwakeKey) as? Bool ?? false }
+
+    private struct AwakeState {
+        /// The connected iPad's name while a session runs.
+        var session: String?
+        var display: IOPMAssertionID?
+        var system: IOPMAssertionID?
+    }
+    private let awake = OSAllocatedUnfairLock(initialState: AwakeState())
+
+    /// Holds or releases the two idle-sleep assertions to match the settings
+    /// and whether an iPad is connected. Any thread.
+    func updateAwakeAssertions() {
+        let keepDisplay = Self.keepDisplayAwake, keepMac = Self.keepMacAwake
+        awake.withLock { state in
+            let active = state.session != nil
+            let name = "WiredDisplay: \(state.session ?? "iPad") is connected" as CFString
+            Self.hold(&state.display, active && keepDisplay, type: kIOPMAssertionTypePreventUserIdleDisplaySleep,
+                      name: name, label: "display sleep")
+            Self.hold(&state.system, active && keepMac, type: kIOPMAssertionTypePreventUserIdleSystemSleep,
+                      name: name, label: "Mac sleep")
+        }
+    }
+
+    private static func hold(_ id: inout IOPMAssertionID?, _ wanted: Bool, type: String, name: CFString, label: String) {
+        if wanted, id == nil {
+            var created = IOPMAssertionID(0)
+            if IOPMAssertionCreateWithName(type as CFString, IOPMAssertionLevel(kIOPMAssertionLevelOn), name,
+                                           &created) == kIOReturnSuccess {
+                id = created
+                Log.info("\(label) prevented while the iPad is connected")
+            } else {
+                Log.warn("could not prevent \(label)")
+            }
+        } else if !wanted, let held = id {
+            IOPMAssertionRelease(held)
+            id = nil
+            Log.info("\(label) allowed again")
+        }
+    }
+
     // MARK: power, lock, sleep (docs/POWER_LOCK_WAKE.md)
 
     /// True from "will sleep" until "did wake": no session, no reconnects.
@@ -862,19 +914,13 @@ final class HostController: @unchecked Sendable {
         sessionIdentity.withLock { $0 = (name, identity.modelName) }
         Log.info("iPad identity: model \(identity.productType ?? "unknown") (\(identity.modelName ?? "-"))")
 
-        // Keep the Mac's displays awake while the iPad is connected; released
-        // when the session ends (user request, step 1).
-        var sleepAssertion = IOPMAssertionID(0)
-        let assertion = IOPMAssertionCreateWithName(kIOPMAssertionTypePreventUserIdleDisplaySleep as CFString,
-                                                    IOPMAssertionLevel(kIOPMAssertionLevelOn),
-                                                    "WiredDisplay session with \(hello.deviceName)" as CFString,
-                                                    &sleepAssertion)
-        if assertion == kIOReturnSuccess { Log.info("display sleep prevented for this session") }
+        // Stay awake while the iPad is connected, as the user chose (General
+        // tab): the displays, the Mac, or neither. Released when the session ends.
+        awake.withLock { $0.session = name }
+        updateAwakeAssertions()
         defer {
-            if assertion == kIOReturnSuccess {
-                IOPMAssertionRelease(sleepAssertion)
-                Log.info("display sleep assertion released")
-            }
+            awake.withLock { $0.session = nil }
+            updateAwakeAssertions()
         }
 
         try videoQueue.sync { try startVideo(hello: hello, socket: socket) }

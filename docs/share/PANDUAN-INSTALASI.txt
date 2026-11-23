@@ -1,9 +1,9 @@
-WiredDisplay 0.5.0 — Panduan Instalasi
+WiredDisplay 0.5.1 — Panduan Instalasi
 iPad jadi layar Mac lewat kabel USB-C (dengan suara dan input sentuh)
 
 Isi paket
-- WiredDisplay-0.5.0.dmg   → app untuk Mac (host)
-- WiredDisplay-0.5.0.ipa   → app untuk iPad (dipasang lewat AltStore)
+- WiredDisplay-0.5.1.dmg   → app untuk Mac (host)
+- WiredDisplay-0.5.1.ipa   → app untuk iPad (dipasang lewat AltStore)
 - PANDUAN-INSTALASI.txt    → file ini
 
 Yang dibutuhkan
@@ -33,7 +33,7 @@ BAGIAN A — Pasang app iPad lewat AltStore
 5. Nyalakan Developer Mode: Settings › Privacy & Security › Developer Mode → On.
    iPad akan restart; setelah menyala, konfirmasi "Turn On".
 
-6. Kirim file WiredDisplay-0.5.0.ipa ke iPad (AirDrop, atau simpan di app Files).
+6. Kirim file WiredDisplay-0.5.1.ipa ke iPad (AirDrop, atau simpan di app Files).
    Buka AltStore › My Apps › tombol + di kiri atas → pilih file .ipa itu.
    Tunggu sampai WiredDisplay muncul di layar utama.
 
@@ -51,7 +51,7 @@ Perpanjangan 7 hari (penting)
 
 BAGIAN B — Pasang app Mac (host)
 
-1. Buka WiredDisplay-0.5.0.dmg. Seret WiredDisplayHost ke folder Applications.
+1. Buka WiredDisplay-0.5.1.dmg. Seret WiredDisplayHost ke folder Applications.
 
 2. Buka WiredDisplayHost. Karena app ini tidak dinotarisasi Apple, macOS akan
    menolak saat pertama dibuka. Buka System Settings › Privacy & Security,
@@ -99,7 +99,10 @@ Panel di menu bar Mac (klik ikon WiredDisplay)
   too" kalau ingin suara saja di AirPods sementara mic tetap di iPad
   (kualitas suara AirPods tetap penuh).
 - Tab Security (kode koneksi, iPad yang di-pair beserta nama dan
-  modelnya), General (izin, Open at Login).
+  modelnya), General (izin, Open at Login, dan dua pilihan selama iPad
+  terhubung: "Keep the display on" — layar Mac tidak mati sendiri, dan
+  "Keep the Mac awake" — Mac tidak sleep sendiri, jadi layarnya selalu bisa
+  dibangunkan dari iPad).
 - Tombol kecerahan di keyboard Mac (🔅/🔆) mengatur kecerahan layar iPad
   yang asli. Kalau memakai BetterDisplay, matikan kontrol kecerahannya
   untuk layar WiredDisplay.
@@ -141,12 +144,13 @@ Mac tidur, terkunci, atau screensaver
 - Layar Mac tidur: sesi tetap jalan, iPad menjadi hitam, lalu gambar kembali
   sendiri begitu layar Mac menyala.
 - Mac terkunci atau screensaver aktif: iPad menampilkan layar kunci Mac.
-  Dari iPad hanya gerakan pointer yang diteruskan (untuk membangunkan layar
-  atau menutup screensaver); klik dan ketikan tidak diteruskan, jadi buka
+  Sentuhan, klik atau tombol di iPad membangunkan layar atau menutup
+  screensaver, tetapi tidak diteruskan sebagai klik atau ketikan; buka
   kunci Mac dengan keyboard Mac.
 - Mac tidur (sleep): sambungan ditutup rapi dan tersambung lagi otomatis
   setelah Mac bangun. iPad tidak bisa membangunkan Mac dari sleep; bangunkan
-  dengan keyboard atau mouse Mac.
+  dengan keyboard atau mouse Mac. Nyalakan "Keep the Mac awake" supaya Mac
+  tidak sleep sendiri selama iPad terhubung.
 
 Bila tidak tersambung
 - Layar iPad menunjukkan langkah yang sedang ditunggu.

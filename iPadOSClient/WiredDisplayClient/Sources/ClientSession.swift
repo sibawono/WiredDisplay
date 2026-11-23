@@ -561,6 +561,19 @@ final class ClientSession: @unchecked Sendable {
             renderer.flush(removingImage: false)
             if !unit.isKeyframe { format = nil }
         }
+        // The decoder fell behind and frames were dropped (issue #1): resume
+        // at a keyframe. If it keeps happening, this iPad cannot decode the
+        // format fast enough; ask the Mac for a lighter one (no 4:4:4, then
+        // 8-bit), as for a decode failure (D-031).
+        let backlog = renderer.takeBacklogEvents()
+        if backlog.keyframeWanted { requestKeyframe(on: current) }
+        if backlog.stalls > 0 {
+            ClientLog.write("decoder behind the stream (\(backlog.stalls) stall(s)); frames dropped until a keyframe")
+            for _ in 0..<backlog.stalls where decodeFailures.failed(at: ProcessInfo.processInfo.systemUptime) {
+                ClientLog.write("decoder keeps falling behind; asking the Mac for a lighter format")
+                send(stream: .control, payload: SessionCodec.encode(.decodeFailed), on: current)
+            }
+        }
         guard let format else {
             requestKeyframe(on: current)
             countFrame(shown: false)

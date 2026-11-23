@@ -97,4 +97,10 @@ final class HostFleet: @unchecked Sendable {
     func setRefreshFollowsIPad(_ follow: Bool) { controllers.forEach { $0.setRefreshFollowsIPad(follow) } }
     func setLocalCursor(_ enabled: Bool) { controllers.forEach { $0.setLocalCursor(enabled) } }
     func forgetDecodeLimits() { controllers.forEach { $0.forgetDecodeLimits() } }
+    /// "Keep the display on" / "Keep the Mac awake" (General tab).
+    func setKeepAwake(display: Bool? = nil, mac: Bool? = nil) {
+        if let display { UserDefaults.standard.set(display, forKey: HostController.keepDisplayAwakeKey) }
+        if let mac { UserDefaults.standard.set(mac, forKey: HostController.keepMacAwakeKey) }
+        controllers.forEach { $0.updateAwakeAssertions() }
+    }
 }

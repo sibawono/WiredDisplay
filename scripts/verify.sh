@@ -9,6 +9,13 @@ echo "== macOS: build (Swift 6, strict concurrency) and unit tests"
 swift build 2>&1 | tail -3
 swift test 2>&1 | grep -E "error|failed|Executed [1-9][0-9]* tests" | sort -u
 
+echo "== protocol vectors (Tests/Vectors) match their generator"
+if python3 -I -c "import cryptography" 2>/dev/null; then
+  python3 -I scripts/gen-protocol-vectors.py --check
+else
+  echo "skipped: python3 'cryptography' package not installed (pip3 install cryptography)"
+fi
+
 echo "== iOS device SDK: shared libraries"
 for scheme in WDProtocol WDUsbmux WDGeometry; do
   xcodebuild -scheme "$scheme" -destination 'generic/platform=iOS' -derivedDataPath "$DD-pkg" \

@@ -42,6 +42,8 @@ struct PanelSnapshot {
     var paired: [Paired] = []
     var connectionCode: String?
     var openAtLogin = false
+    var keepDisplayAwake = true
+    var keepMacAwake = false
     var loginNeedsApproval = false
     var version = "0.0"
 }
@@ -54,6 +56,8 @@ struct PanelActions {
     var setOpenAtLogin: (Bool) -> Void = { _ in }
     var setAutoSwitchAudio: (Bool) -> Void = { _ in }
     var setMatchRefresh: (Bool) -> Void = { _ in }
+    var setKeepDisplayAwake: (Bool) -> Void = { _ in }
+    var setKeepMacAwake: (Bool) -> Void = { _ in }
     var setLocalCursor: (Bool) -> Void = { _ in }
     var setAutoSwitchMicrophone: (Bool) -> Void = { _ in }
     var openDisplaySettings: () -> Void = {}
@@ -378,6 +382,19 @@ struct StatusPanelView: View {
                 CardDivider()
                 PermissionLine(name: "Accessibility", purpose: "Input from the iPad and the brightness keys",
                                granted: s.accessibility, action: model.actions.openAccessibility)
+            }
+            Card {
+                ToggleLine(title: "Keep the display on",
+                           detail: s.keepDisplayAwake ? "The Mac's displays stay on while the iPad is connected"
+                               : "The displays may sleep; a touch, click or key on the iPad or the Mac wakes them",
+                           isOn: Binding(get: { s.keepDisplayAwake },
+                                         set: { model.snapshot.keepDisplayAwake = $0; model.actions.setKeepDisplayAwake($0) }))
+                CardDivider()
+                ToggleLine(title: "Keep the Mac awake",
+                           detail: s.keepMacAwake ? "The Mac does not sleep on its own while the iPad is connected, so the iPad can always wake it. Sleep from the Apple menu still works."
+                               : "The Mac follows its own sleep setting. Once asleep, only its own keyboard or mouse wakes it.",
+                           isOn: Binding(get: { s.keepMacAwake },
+                                         set: { model.snapshot.keepMacAwake = $0; model.actions.setKeepMacAwake($0) }))
             }
             Card {
                 ToggleLine(title: "Open at Login",
