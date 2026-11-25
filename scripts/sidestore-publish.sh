@@ -1,8 +1,8 @@
 #!/bin/bash
 # Publishes a GitHub release's IPA to SideStore Connect (https://connect.sidestore.io).
 #
-# The IPA stays on GitHub: SideStore Connect gets the release asset's download
-# URL and size (externalDownloadUrl), not an upload. Called by
+# The release's IPA is downloaded from GitHub and uploaded to SideStore Connect,
+# which hosts the copy it serves. Called by
 # .github/workflows/sidestore.yml; can also run locally (see docs/SIDESTORE.md).
 #
 # usage: scripts/sidestore-publish.sh <tag>          e.g. v0.5.2
@@ -11,6 +11,7 @@
 #   GITHUB_REPOSITORY       owner/name of the public repo (default sibawono/WiredDisplay)
 #   SIDESTORE_BUNDLE_ID     app bundle ID on SideStore Connect (default dev.wireddisplay.client)
 #   SIDESTORE_LANG          language code for the version description (default en)
+#   SIDESTORE_CHANNEL       release channel: stable (default), beta or nightly
 #   SIDESTORE_PUBLISH       true: make the version live at once; anything else: leave it unpublished
 #   SIDESTORE_URL           instance (default https://connect.sidestore.io)
 #   DRY_RUN=1               print the request instead of sending it
@@ -20,6 +21,7 @@ TAG="${1:?usage: $0 <tag>, e.g. v0.5.2}"
 REPO="${GITHUB_REPOSITORY:-sibawono/WiredDisplay}"
 BUNDLE_ID="${SIDESTORE_BUNDLE_ID:-dev.wireddisplay.client}"
 LANG_CODE="${SIDESTORE_LANG:-en}"
+CHANNEL="${SIDESTORE_CHANNEL:-stable}"
 INSTANCE="${SIDESTORE_URL:-https://connect.sidestore.io}"
 PUBLISH=false
 [ "${SIDESTORE_PUBLISH:-}" = "true" ] && PUBLISH=true
@@ -27,6 +29,7 @@ PUBLISH=false
 # The tag and the bundle ID go into a URL path: accept only plain values.
 [[ "$TAG" =~ ^v?[0-9]+(\.[0-9]+){1,3}$ ]] || { echo "error: tag '$TAG' is not a version tag like v0.5.2" >&2; exit 1; }
 [[ "$BUNDLE_ID" =~ ^[A-Za-z0-9.-]+$ ]] || { echo "error: bad bundle ID '$BUNDLE_ID'" >&2; exit 1; }
+[[ "$CHANNEL" =~ ^(stable|beta|nightly)$ ]] || { echo "error: bad release channel '$CHANNEL'" >&2; exit 1; }
 [[ "$LANG_CODE" =~ ^[a-z]{2}(-[A-Za-z]+)?$ ]] || { echo "error: bad language code '$LANG_CODE'" >&2; exit 1; }
 VERSION="${TAG#v}"
 
@@ -56,56 +59,49 @@ NOTES="$(jq -r '.body // ""' <<<"$RELEASE" | tr -d '\r' \
   | awk '/^## /{skip = ($0 ~ /^## Downloads/)} !skip' | sed '/./,$!d')"
 [ -n "$NOTES" ] || NOTES="WiredDisplay $VERSION"
 
-BODY="$(jq -n --arg lang "$LANG_CODE" --arg notes "$NOTES" --arg url "$URL" \
-  --argjson size "$SIZE" --argjson publish "$PUBLISH" '{data: {
-    allowCreateNewVersion: true,
-    versionDescription: {($lang): $notes},
-    externalDownloadUrl: $url,
-    downloadFileSize: $size,
-    publish: $publish
-  }}')"
 ENDPOINT="$INSTANCE/api/webhook/apps/$BUNDLE_ID/version/$VERSION"
 
 if [ "${DRY_RUN:-}" = "1" ]; then
-  echo "POST $ENDPOINT"
-  jq '.data.versionDescription[] |= (.[0:200] + "…")' <<<"$BODY"
+  echo "POST $ENDPOINT (multipart: file=$NAME, releaseChannel=$CHANNEL, publish=$PUBLISH)"
+  echo "versionDescription.$LANG_CODE:"; printf '%s\n' "$NOTES" | head -c 300; echo "…"
   exit 0
 fi
 
 : "${SIDESTORE_ACCESS_TOKEN:?SIDESTORE_ACCESS_TOKEN is not set (see docs/SIDESTORE.md)}"
-OUT="$(mktemp)"; trap 'rm -f "$OUT"' EXIT
-AUTH="Authorization: Bearer $SIDESTORE_ACCESS_TOKEN"
-INNER="$(jq -c .data <<<"$BODY")"
-DESC="$(jq -c .versionDescription <<<"$INNER")"
+WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
+OUT="$WORK/answer"
+gh release download "$TAG" --repo "$REPO" --pattern "$NAME" --dir "$WORK"
+[ "$(wc -c <"$WORK/$NAME" | tr -d ' ')" = "$SIZE" ] || { echo "error: downloaded $NAME has the wrong size" >&2; exit 1; }
+DESC="$(jq -c --arg lang "$LANG_CODE" --arg notes "$NOTES" -n '{($lang): $notes}')"
 
-# The API page names the fields but not the encoding, and the server is not
-# open source. Try the encodings in turn; a 400 "No data provided" means the
-# server found no fields, so the next one is tried. Any other answer stops.
-send() {
-  case "$1" in
-    json-flat) curl -sS -o "$OUT" -w '%{http_code}' -X POST "$ENDPOINT" -H "$AUTH" \
-                 -H "Content-Type: application/json" --data-binary @- <<<"$INNER" ;;
-    json-data) curl -sS -o "$OUT" -w '%{http_code}' -X POST "$ENDPOINT" -H "$AUTH" \
-                 -H "Content-Type: application/json" --data-binary @- <<<"$BODY" ;;
-    form)      curl -sS -o "$OUT" -w '%{http_code}' -X POST "$ENDPOINT" -H "$AUTH" \
-                 --form-string "allowCreateNewVersion=true" \
-                 --form-string "externalDownloadUrl=$URL" \
-                 --form-string "downloadFileSize=$SIZE" \
-                 --form-string "publish=$PUBLISH" \
-                 --form-string "versionDescription=$DESC" ;;
-    form-data) curl -sS -o "$OUT" -w '%{http_code}' -X POST "$ENDPOINT" -H "$AUTH" \
-                 --form-string "data=$INNER" ;;
-  esac
+# What the server accepts (found by trying, 2026-11-25; the API page differs):
+# multipart/form-data with the IPA as "file" and "releaseChannel" required.
+# JSON bodies, with or without a "data" wrapper, get 400 "No data provided",
+# and externalDownloadUrl is not enough without "file". versionDescription must
+# be a mapping; it is sent as a JSON part, and dropped if the server refuses it
+# (the notes can then be pasted in the dashboard).
+upload() {
+  local desc=()
+  [ "$1" = with-notes ] && desc=(-F "versionDescription=$DESC;type=application/json")
+  curl -sS -o "$OUT" -w '%{http_code}' -X POST "$ENDPOINT" \
+    -H "Authorization: Bearer $SIDESTORE_ACCESS_TOKEN" \
+    -F "file=@$WORK/$NAME;type=application/octet-stream" \
+    --form-string "releaseChannel=$CHANNEL" \
+    --form-string "allowCreateNewVersion=true" \
+    --form-string "publish=$PUBLISH" \
+    "${desc[@]}"
 }
-for ENC in json-flat json-data form form-data; do
-  CODE="$(send "$ENC")"
-  echo "$ENC: HTTP $CODE $(head -c 300 "$OUT")"
-  if [[ "$CODE" == 400 ]] && grep -q "No data provided" "$OUT"; then continue; fi
-  break
-done
+MODE=with-notes
+CODE="$(upload "$MODE")"
+if [ "$CODE" = 400 ] && grep -q "versionDescription" "$OUT"; then
+  echo "note: the server refused the release notes ($(tr -d '\n' <"$OUT" | head -c 300)); sending without them"
+  MODE=without-notes
+  CODE="$(upload "$MODE")"
+fi
 if [[ "$CODE" != 2* ]]; then
   echo "error: SideStore Connect answered HTTP $CODE:" >&2
   head -c 2000 "$OUT" >&2; echo >&2
   exit 1
 fi
-echo "SideStore Connect: $BUNDLE_ID $VERSION -> $URL ($SIZE bytes), published=$PUBLISH (HTTP $CODE, $ENC)"
+head -c 1000 "$OUT"; echo
+echo "SideStore Connect: $BUNDLE_ID $VERSION ($CHANNEL), $NAME uploaded ($SIZE bytes), notes $MODE, published=$PUBLISH (HTTP $CODE)"
