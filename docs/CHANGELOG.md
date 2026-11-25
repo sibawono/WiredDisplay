@@ -1055,8 +1055,38 @@ During scrolling, sampled medians were 0.05 ms capture-delivery-to-conversion, 4
 
 **FIX:**
 - The test requires the hardware encoder, like the app does, and skips with a reason when there is none.
+- **Second run:** the VM's paravirtual encoder counts as hardware and still writes 8-bit. So the test now compares the parsed depth with the depth the encoder itself reports (\`BitsPerComponent\` in the format description). It stays strict everywhere instead of assuming 10-bit.
 - `actions/checkout` moves to v5, because v4 runs on the deprecated Node 20.
 
 **VERIFIED:**
 - Locally the test still runs and passes on the hardware encoder; `swift test` 184/184.
 - The CI result comes from the push.
+
+## CHANGE ID: P1-064 — Landing page: new menu bar panel screenshots, the issue #1 step-down (website only)
+
+**WHAT:**
+- The four panel screenshots on the site (Display, Input, Audio, General) are replaced with `docs/images/host-*.png`, which show the current panel: sentence-case tab titles, the new Ultra icon, and the Show Log and Quit footer. The highlight rings and callouts are moved to match (the new title row is 10 px taller; General also gains its footer).
+- "New in 0.5.1", issue #1 card (EN and ID): adds the step-down from P1-051. After 3 stalls in 10 s the Mac moves that iPad to a lighter format, first without 4:4:4 and then 8-bit, and remembers it.
+- The iPad waiting screen is unchanged: `docs/images/ipad-waiting.png` is the same picture the site already uses.
+- Not on the site: the unreleased items on main (the movable Controls button, the faster GPU 4:4:4 conversion, and More/Most Space as the only screen). Owner's rule: the site always matches the latest release build and its "New in x.y.z"; unreleased work waits for its release.
+- `build.py` gets `VERSION = "0.5.1"`: the download and release-notes links follow it, and `check_release()` stops the build if any other x.y.z is in `content.json` or `src/page.html`. The website README's "At each release" section now lists the steps (set `VERSION`, rewrite "New in" from that release's CHANGELOG entries).
+
+**VERIFIED:** the build passes (331 CMS fields per language), there are no em dashes, and D1 holds only the three emptied captions, so nothing overrides the new copy. The rings sit on the right rows in all four screenshots. There is no horizontal overflow at 1440 × 900 or at 375 × 812. Not deployed yet.
+
+## CHANGE ID: P1-065 — Release 0.5.2 (build 11)
+
+**CONTENTS:** P1-057 to P1-063.
+- More/Most Space when the iPad is the Mac's only screen.
+- iPad background audio lifecycle, an honest "not answering" status, and logs that keep their history.
+- CI, `publish-public.sh` and `next-change-id.sh`.
+- A Paused panel state, the app-switcher privacy cover, and `diskutil` in the DMG build.
+- GPU 4:4:4 conversion (Ultra: 8.0 → 3.6 ms per frame), a bounded display-layer renderer, and `WDHostCore`.
+- UI contrast fixes (antislop).
+- The movable Controls button that fades when idle, with a solid panel beside it.
+- CI fixed for virtual-machine encoders.
+
+**FILES CHANGED:**
+- `scripts/build-host-app.sh` and the iPad `project.pbxproj`: 0.5.2, build 11.
+- `docs/share/PANDUAN-INSTALASI.txt`: version, display size as the only screen, no em dashes.
+- `AGENTS.md`: state.
+- `docs/images/host-*.png`: rendered from the 0.5.2 build.

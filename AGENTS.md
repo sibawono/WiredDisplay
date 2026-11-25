@@ -56,8 +56,17 @@ git update-ref refs/heads/public $C && git push github public:main
 ```
 To release: bump `CFBundleShortVersionString`/`CFBundleVersion` in `scripts/build-host-app.sh` and `MARKETING_VERSION`/`CURRENT_PROJECT_VERSION` in the iPad `project.pbxproj`, update the guide, build the IPA and DMG, scan their contents, publish, then run `gh release create vX.Y.Z --latest dist/*.dmg dist/*.ipa docs/share/PANDUAN-INSTALASI.txt`.
 
+With every release, update the website to that release in the same step (owner: "selalu sesuaikan juga build releasenya dan what's new in [build version]"). The site's source is a separate project. Follow "At each release" in its `README.md`:
+1. Set `VERSION` in its `build.py`.
+2. Rewrite the `new.*` and `panel.hl.*` text in EN and ID from this release's CHANGELOG entries.
+3. Update the DMG and IPA sizes and `hero.badge`.
+4. Use screenshots taken from the released build.
+
+Unreleased work on `main` stays off the site. Deploy only on the owner's yes.
+
 ## State (2026-11-23, evening)
-- v0.5.1 (build 10) is released on GitHub. Local `main` and the published `public` tree match, except `docs/evidence`.
+- v0.5.2 (build 11) is released on GitHub. Local `main` and the published `public` tree match, except `docs/evidence`.
+- 0.5.2 adds (P1-057 to P1-063): More/Most Space when the iPad is the only screen (D-043); background audio lifecycle on the iPad; GPU 4:4:4 conversion; the `WDHostCore` module; CI; the publish scripts; UI contrast fixes; the movable, idle-fading Controls button with its own panel.
 - 0.5.1 adds: the fix for GitHub issue #1 (capture no longer waits for the encoder; bounded iPad decode queue), "Keep the display on" / "Keep the Mac awake", and golden protocol vectors for a second (Android) client (`Tests/Vectors`, `docs/ANDROID_COMPATIBILITY.md`).
 - New since 0.4.2:
   - the host panel redesign: a Liquid Glass panel and controls following the macOS 27 Figma kit (file `EH8VzuvPVZgEkKlgeBTvDs`);

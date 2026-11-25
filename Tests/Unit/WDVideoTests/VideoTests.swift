@@ -179,24 +179,26 @@ import CoreMedia
 import VideoToolbox
 
 final class HEVCSPSTests: XCTestCase {
-    /// Encodes one frame with the hardware HEVC encoder and returns its SPS.
-    private func sps(format: OSType, width: Int = 640, height: Int = 480) throws -> [UInt8] {
+    /// Encodes one frame with the hardware HEVC encoder; returns its SPS and the bit depth the encoder reports.
+    private func sps(format: OSType, width: Int = 640, height: Int = 480) throws -> (sps: [UInt8], reportedBits: Int?) {
         var session: VTCompressionSession?
         let status = VTCompressionSessionCreate(allocator: nil, width: Int32(width), height: Int32(height),
                                                 codecType: kCMVideoCodecType_HEVC,
                                                 encoderSpecification: [kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: true] as CFDictionary,
                                                 imageBufferAttributes: nil, compressedDataAllocator: nil, outputCallback: nil,
                                                 refcon: nil, compressionSessionOut: &session)
-        // CI virtual machines only have a software encoder, which writes 8-bit where the media engine writes 10-bit.
         guard status == noErr, let session else { throw XCTSkip("no hardware HEVC encoder here (\(status))") }
         defer { VTCompressionSessionInvalidate(session) }
         var buffer: CVPixelBuffer?
         CVPixelBufferCreate(nil, width, height, format, [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary, &buffer)
         var result: [UInt8]?
+        var reportedBits: Int?
         let done = DispatchSemaphore(value: 0)
         VTCompressionSessionEncodeFrame(session, imageBuffer: buffer!, presentationTimeStamp: .zero, duration: .invalid,
                                         frameProperties: nil, infoFlagsOut: nil) { _, _, sample in
             if let sample, let description = CMSampleBufferGetFormatDescription(sample) {
+                reportedBits = (CMFormatDescriptionGetExtension(description, extensionKey: kCMFormatDescriptionExtension_BitsPerComponent)
+                    as? NSNumber)?.intValue
                 var pointer: UnsafePointer<UInt8>?
                 var size = 0
                 if CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(description, parameterSetIndex: 1,
@@ -211,17 +213,21 @@ final class HEVCSPSTests: XCTestCase {
         VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
         _ = done.wait(timeout: .now() + 5)
         guard let result else { throw XCTSkip("encoder produced no SPS") }
-        return result
+        return (result, reportedBits)
     }
 
     func testReadsChromaAndDepthFromRealEncoderOutput() throws {
-        let main = try XCTUnwrap(HEVCSPSInfo(sps: try sps(format: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)))
-        XCTAssertEqual(main.chromaFormat, 1)
-        XCTAssertEqual(main.bitDepthLuma, 8)
-        XCTAssertEqual(main.width, 640)
-        let full = try XCTUnwrap(HEVCSPSInfo(sps: try sps(format: kCVPixelFormatType_444YpCbCr10BiPlanarVideoRange)))
-        XCTAssertEqual(full.chromaFormat, 3)
-        XCTAssertEqual(full.bitDepthLuma, 10)
+        let main = try sps(format: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)
+        let mainInfo = try XCTUnwrap(HEVCSPSInfo(sps: main.sps))
+        XCTAssertEqual(mainInfo.chromaFormat, 1)
+        XCTAssertEqual(mainInfo.bitDepthLuma, 8)
+        XCTAssertEqual(mainInfo.width, 640)
+        // Some encoders (a CI virtual machine's) write 4:4:4 at 8-bit when asked for 10:
+        // the parser must read what the encoder itself reports.
+        let full = try sps(format: kCVPixelFormatType_444YpCbCr10BiPlanarVideoRange)
+        let fullInfo = try XCTUnwrap(HEVCSPSInfo(sps: full.sps))
+        XCTAssertEqual(fullInfo.chromaFormat, 3)
+        XCTAssertEqual(fullInfo.bitDepthLuma, try XCTUnwrap(full.reportedBits))
     }
 
     func testRejectsNonSPSAndTruncatedData() {

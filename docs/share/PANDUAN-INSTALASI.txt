@@ -1,9 +1,9 @@
-WiredDisplay 0.5.1 — Panduan Instalasi
+WiredDisplay 0.5.2: Panduan Instalasi
 iPad jadi layar Mac lewat kabel USB-C (dengan suara dan input sentuh)
 
 Isi paket
-- WiredDisplay-0.5.1.dmg   → app untuk Mac (host)
-- WiredDisplay-0.5.1.ipa   → app untuk iPad (dipasang lewat AltStore)
+- WiredDisplay-0.5.2.dmg   → app untuk Mac (host)
+- WiredDisplay-0.5.2.ipa   → app untuk iPad (dipasang lewat AltStore)
 - PANDUAN-INSTALASI.txt    → file ini
 
 Yang dibutuhkan
@@ -14,7 +14,7 @@ Yang dibutuhkan
 - Apple ID gratis (milik kamu sendiri) untuk AltStore.
 
 
-BAGIAN A — Pasang app iPad lewat AltStore
+BAGIAN A: Pasang app iPad lewat AltStore
 
 1. Di Mac, unduh AltServer dari situs resminya: https://altstore.io
    Pasang dan jalankan. AltServer muncul sebagai ikon di menu bar.
@@ -33,7 +33,7 @@ BAGIAN A — Pasang app iPad lewat AltStore
 5. Nyalakan Developer Mode: Settings › Privacy & Security › Developer Mode → On.
    iPad akan restart; setelah menyala, konfirmasi "Turn On".
 
-6. Kirim file WiredDisplay-0.5.1.ipa ke iPad (AirDrop, atau simpan di app Files).
+6. Kirim file WiredDisplay-0.5.2.ipa ke iPad (AirDrop, atau simpan di app Files).
    Buka AltStore › My Apps › tombol + di kiri atas → pilih file .ipa itu.
    Tunggu sampai WiredDisplay muncul di layar utama.
 
@@ -49,9 +49,9 @@ Perpanjangan 7 hari (penting)
 - Batas Apple ID gratis: maksimal 3 app sideload aktif (AltStore memakai 1).
 
 
-BAGIAN B — Pasang app Mac (host)
+BAGIAN B: Pasang app Mac (host)
 
-1. Buka WiredDisplay-0.5.1.dmg. Seret WiredDisplayHost ke folder Applications.
+1. Buka WiredDisplay-0.5.2.dmg. Seret WiredDisplayHost ke folder Applications.
 
 2. Buka WiredDisplayHost. Karena app ini tidak dinotarisasi Apple, macOS akan
    menolak saat pertama dibuka. Buka System Settings › Privacy & Security,
@@ -61,10 +61,10 @@ BAGIAN B — Pasang app Mac (host)
    Ia otomatis terbuka setiap login (bisa dimatikan: menu › Open at Login).
 
 4. Beri izin yang diminta:
-   - Screen Recording (wajib) — untuk mengirim gambar layar ke iPad.
-   - Accessibility — hanya bila ingin mengendalikan Mac dari iPad
+   - Screen Recording (wajib): untuk mengirim gambar layar ke iPad.
+   - Accessibility: hanya bila ingin mengendalikan Mac dari iPad
      (sentuh, keyboard, trackpad). Lalu nyalakan menu "Allow Input from iPad".
-   - Microphone — hanya untuk mengirim suara Mac ke speaker iPad.
+   - Microphone: hanya untuk mengirim suara Mac ke speaker iPad.
    Setelah memberi izin Screen Recording, keluar lalu buka lagi app-nya bila
    diminta.
 
@@ -78,7 +78,7 @@ BAGIAN B — Pasang app Mac (host)
    Speakers: "iPad Speaker".
 
 
-BAGIAN C — Pemakaian pertama
+BAGIAN C: Pemakaian pertama
 
 1. Colokkan iPad ke Mac, buka app WiredDisplay di iPad.
 2. Pertama kali terhubung, muncul kode 6 digit di iPad dan di Mac.
@@ -90,18 +90,19 @@ BAGIAN C — Pemakaian pertama
 Panel di menu bar Mac (klik ikon WiredDisplay)
 - Tab Display: resolusi, ukuran tampilan (Default / More Space / Most Space),
   slider kecerahan iPad, pilihan Quality. Ukuran tampilan diingat per iPad,
-  juga setelah Mac tidur, iPad diputar atau kabel dicabut.
+  juga setelah Mac tidur, iPad diputar atau kabel dicabut, dan bisa diganti
+  juga saat iPad menjadi satu-satunya layar Mac.
 - Tab Input: "Allow Input from iPad" untuk sentuh, Magic Keyboard dan
   trackpad (default mati; setelah dinyalakan, pilihan ini diingat).
-- Tab Audio: "Switch to headphones automatically" (default menyala) —
+- Tab Audio: "Switch to headphones automatically" (default menyala):
   AirPods/earphone USB-C yang tersambung otomatis jadi speaker dan mic,
   dan saat dilepas suara kembali ke iPad. Matikan "Use their microphone
   too" kalau ingin suara saja di AirPods sementara mic tetap di iPad
   (kualitas suara AirPods tetap penuh).
 - Tab Security (kode koneksi, iPad yang di-pair beserta nama dan
   modelnya), General (izin, Open at Login, dan dua pilihan selama iPad
-  terhubung: "Keep the display on" — layar Mac tidak mati sendiri, dan
-  "Keep the Mac awake" — Mac tidak sleep sendiri, jadi layarnya selalu bisa
+  terhubung: "Keep the display on": layar Mac tidak mati sendiri, dan
+  "Keep the Mac awake": Mac tidak sleep sendiri, jadi layarnya selalu bisa
   dibangunkan dari iPad).
 - Tombol kecerahan di keyboard Mac (🔅/🔆) mengatur kecerahan layar iPad
   yang asli. Kalau memakai BetterDisplay, matikan kontrol kecerahannya

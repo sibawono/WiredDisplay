@@ -13,6 +13,7 @@ RX="$(grep -A1 'Identifier scan list' "$HANDOVER" | sed -n 's/.*`\(.*\)`.*/\1/p'
 # Words that contain an identifier without being one: the public noreply handle, Indonesian "memanggil".
 ALLOWED='sibawono|memanggil'
 
+MAIN_AT_START="$(git rev-parse main)" PUBLIC_AT_START="$(git rev-parse public)"
 INDEX="$(mktemp -d)/index"
 GIT_INDEX_FILE="$INDEX" git read-tree main
 GIT_INDEX_FILE="$INDEX" git rm -r -q --cached docs/evidence
@@ -34,10 +35,17 @@ if [ "$(git rev-parse 'public^{tree}')" = "$TREE" ]; then
   exit 0
 fi
 echo "Public tree $TREE, scan clean. Changes since the last publish:"
-git diff --stat public "$TREE"
+git --no-pager diff --stat public "$TREE"
 if [ "$CONFIRM" != "--yes" ]; then
   read -r -p "Push this to github main? [y/N] " answer
   [ "$answer" = "y" ] || { echo "Not published."; exit 1; }
+fi
+
+# main or the public ref may have moved while the prompt waited (another publish): start again then.
+MAIN_NOW="$(git rev-parse main)" PUBLIC_NOW="$(git rev-parse public)"
+if [ "$MAIN_NOW" != "$MAIN_AT_START" ] || [ "$PUBLIC_NOW" != "$PUBLIC_AT_START" ]; then
+  echo "main or public changed while waiting; nothing was published. Run the script again." >&2
+  exit 1
 fi
 
 export GIT_AUTHOR_NAME=sibawono GIT_AUTHOR_EMAIL=341369459+sibawono@users.noreply.github.com
