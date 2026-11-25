@@ -56,19 +56,22 @@ NOTES="$(jq -r '.body // ""' <<<"$RELEASE" | tr -d '\r' \
   | awk '/^## /{skip = ($0 ~ /^## Downloads/)} !skip' | sed '/./,$!d')"
 [ -n "$NOTES" ] || NOTES="WiredDisplay $VERSION"
 
+# The fields go inside a top-level "data" object: with the fields at the top
+# level the API answers HTTP 400 "No data provided" (first run, 2026-11-25).
+# The API page lists only the fields, not this wrapper.
 BODY="$(jq -n --arg lang "$LANG_CODE" --arg notes "$NOTES" --arg url "$URL" \
-  --argjson size "$SIZE" --argjson publish "$PUBLISH" '{
+  --argjson size "$SIZE" --argjson publish "$PUBLISH" '{data: {
     allowCreateNewVersion: true,
     versionDescription: {($lang): $notes},
     externalDownloadUrl: $url,
     downloadFileSize: $size,
     publish: $publish
-  }')"
+  }}')"
 ENDPOINT="$INSTANCE/api/webhook/apps/$BUNDLE_ID/version/$VERSION"
 
 if [ "${DRY_RUN:-}" = "1" ]; then
   echo "POST $ENDPOINT"
-  jq '.versionDescription[] |= (.[0:200] + "…")' <<<"$BODY"
+  jq '.data.versionDescription[] |= (.[0:200] + "…")' <<<"$BODY"
   exit 0
 fi
 
@@ -83,4 +86,5 @@ if [[ "$CODE" != 2* ]]; then
   head -c 2000 "$OUT" >&2; echo >&2
   exit 1
 fi
+head -c 1000 "$OUT"; echo
 echo "SideStore Connect: $BUNDLE_ID $VERSION -> $URL ($SIZE bytes), published=$PUBLISH (HTTP $CODE)"
