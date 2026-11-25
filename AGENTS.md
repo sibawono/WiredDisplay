@@ -54,7 +54,7 @@ C=$(GIT_AUTHOR_NAME=sibawono GIT_AUTHOR_EMAIL=341369459+sibawono@users.noreply.g
     git commit-tree $T -p public -m "WiredDisplay x.y.z: …")
 git update-ref refs/heads/public $C && git push github public:main
 ```
-To release: bump `CFBundleShortVersionString`/`CFBundleVersion` in `scripts/build-host-app.sh` and `MARKETING_VERSION`/`CURRENT_PROJECT_VERSION` in the iPad `project.pbxproj`, update the guide, build the IPA and DMG, scan their contents, publish, then run `gh release create vX.Y.Z --latest dist/*.dmg dist/*.ipa docs/share/PANDUAN-INSTALASI.txt`.
+To release: bump `CFBundleShortVersionString`/`CFBundleVersion` in `scripts/build-host-app.sh` and `MARKETING_VERSION`/`CURRENT_PROJECT_VERSION` in the iPad `project.pbxproj`, update the guide, build the IPA and DMG, scan their contents, publish, then run `gh release create vX.Y.Z --latest dist/*.dmg dist/*.ipa docs/share/PANDUAN-INSTALASI.txt`. Publishing the release also sends its IPA to SideStore Connect through `.github/workflows/sidestore.yml` (see `docs/SIDESTORE.md`). The IPA asset must be named `WiredDisplay-<version>.ipa`.
 
 With every release, update the website to that release in the same step (owner: "selalu sesuaikan juga build releasenya dan what's new in [build version]"). The site's source is a separate project. Follow "At each release" in its `README.md`:
 1. Set `VERSION` in its `build.py`.

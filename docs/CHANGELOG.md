@@ -1090,3 +1090,46 @@ During scrolling, sampled medians were 0.05 ms capture-delivery-to-conversion, 4
 - `docs/share/PANDUAN-INSTALASI.txt`: version, display size as the only screen, no em dashes.
 - `AGENTS.md`: state.
 - `docs/images/host-*.png`: rendered from the 0.5.2 build.
+
+## CHANGE ID: P1-066 — Landing page updated to 0.5.2 (website only)
+
+**WHAT:**
+- The page now describes release 0.5.2 (https://github.com/sibawono/WiredDisplay/releases/tag/v0.5.2). `build.py` sets `VERSION = "0.5.2"` and `RELEASED = "2026-11-25"`. The footer and JSON-LD take both from the build. The badge reads "Version 0.5.2, released 25 November 2026". The downloads are WiredDisplay-0.5.2.dmg (1.1 MB) and WiredDisplay-0.5.2.ipa (601 KB).
+- "New in 0.5.2", written in EN and ID from P1-057, P1-060 and P1-062:
+  - 4:4:4 on the GPU, with a meter showing 8.0 ms → 3.6 ms per frame;
+  - the movable Controls button that fades;
+  - More/Most Space when the iPad is the Mac's only screen.
+  - Each card has its own short demo, which ends on the new state: the button rests at the left edge, faded, and the selection rests on Most Space.
+  - The 0.5.1 card demos and their CSS are removed.
+- The menu bar panel screenshots come from the 0.5.2 build; General shows "WiredDisplay 0.5.2". The General highlight now reads "Choose what may sleep".
+- The iPad Controls section is text only for now:
+  - The old capture is removed from the page and the repository. It showed the 0.5.1 glass popover. A 0.5.2 capture waits for the owner's decision, because a real capture shows the Mac's name and the owner's desktop.
+  - The lead says the button can be dragged and fades.
+
+**VERIFIED:**
+- The build passes, with no em dashes. The identifier scan of `dist` found only the site's own domain.
+- There is no horizontal overflow at 1440 × 900 or 375 × 812, and the card demos play once and rest on their final frame.
+- Deployed on the owner's "deploy" (Cloudflare Pages 8c012949):
+  - `/` and `/id/` return 200, and `/en/` returns 301.
+  - The live CSS `site.css?v=3fff39383eaf` matches the build, and the live panel images are byte-identical to the build.
+  - Both download links and the release page return 200.
+
+**NOT DONE:** a 0.5.2 capture of the iPad Controls panel.
+
+## CHANGE ID: P1-067 — SideStore Connect integration
+
+**WHAT:**
+- `.github/workflows/sidestore.yml`: on each published GitHub release that is not a pre-release, or by hand with a tag, it sends the release to SideStore Connect.
+- `scripts/sidestore-publish.sh <tag>` calls `POST /api/webhook/apps/<bundle ID>/version/<version>`. It sends the asset's GitHub download URL and size, the release notes without the Downloads table, and `publish` from the variable `SIDESTORE_PUBLISH`, which defaults to unpublished.
+  - It refuses drafts, non-version tags, and a missing or misnamed IPA. It also refuses when the public download's size differs from the release's.
+  - `DRY_RUN=1` prints the request.
+- Store listing: `docs/share/SIDESTORE-LISTING.txt` (English text) and `docs/share/sidestore/` (the 1024 icon, and two 2360 × 1640 iPad screenshots cut from the 0.5.2 captures at 2732 × 2048).
+- `docs/SIDESTORE.md` describes the owner's one-time setup: the app `dev.wireddisplay.client`, the token, and the secret `SIDESTORE_ACCESS_TOKEN`. D-044 explains why the official action is not used.
+
+**VERIFIED:**
+- A dry run for v0.5.2 printed the expected URL, size (601,107 bytes) and notes.
+- A bad tag is refused. Without a token the script stops.
+- A malformed token gets HTTP 422 from the live endpoint, so the route exists.
+- The workflow YAML parses.
+
+**NOT VERIFIED:** a real upload; it needs the owner's account and token.

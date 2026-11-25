@@ -1,0 +1,40 @@
+WiredDisplay: SideStore Connect listing (English, the app's primary language)
+
+APP NAME
+WiredDisplay
+
+SUBTITLE (short)
+Your iPad as a wired display for your Mac
+
+DESCRIPTION
+Turn your iPad into a second display for your Mac over the USB-C cable, with sound, touch, keyboard and trackpad.
+
+WiredDisplay works like Sidecar, but only over the cable. The Mac creates a real virtual display at your iPad's native resolution and streams it to the iPad with low latency. It can even be the only screen of a headless Mac mini.
+
+This app is the iPad side. You also need the free WiredDisplayHost app on the Mac (macOS 14 or later), from github.com/sibawono/WiredDisplay/releases.
+
+Features
+- Wired only: video, audio and input travel over the USB-C cable. No Wi-Fi, and the Mac opens no network port.
+- Sharp picture: HEVC at 60 Hz (up to 120 Hz on iPad Pro), with Balanced, Pro (10-bit), Ultra (4:4:4, 10-bit) and High Color presets.
+- More space: Default, More Space and Most Space sizes, remembered for each iPad.
+- Touch like Sidecar: tap to click, drag to scroll, pinch to zoom, two-finger tap to right-click, three-finger copy, paste, undo and redo.
+- Magic Keyboard and trackpad: full keyboard, smooth scrolling, real pinch and rotate gestures, and Mac shortcuts such as Control-Tab for Command-Tab.
+- Sound both ways: Mac audio on the iPad speakers, and the iPad microphone on the Mac.
+- Follows the Mac: display sleep, system sleep and the lock screen are handled safely. The iPad never shows the desktop while the Mac is locked.
+- A Controls button you can drag to the left or right edge, at any height. It fades while you work.
+
+Requirements
+- iPad with iPadOS 17 or later
+- Mac with macOS 14 or later (Apple Silicon recommended)
+- A USB-C data cable
+- Input from the iPad is off until you turn it on in the Mac's menu bar panel.
+
+Open source: github.com/sibawono/WiredDisplay
+
+SCREENSHOTS (iPad, 2360 x 1640, landscape), in docs/share/sidestore/
+- ipad-1-waiting.png: waiting for the Mac
+- ipad-2-controls.png: streaming, with the Controls panel open
+Cut from 2732 x 2048 captures of the 0.5.2 build: a strip off the bottom (waiting) or the top, with the Mac menu bar (controls), then scaled down.
+
+ICON (1024 x 1024, no transparency)
+- docs/share/sidestore/icon-1024.png
