@@ -748,3 +748,301 @@ During scrolling, sampled medians were 0.05 ms capture-delivery-to-conversion, 4
 - Corrected entries: the diagram now ends in the Metal renderer, not AVSampleBufferDisplayLayer; the panel is the Liquid Glass panel; a step-down also happens when an iPad decodes too slowly.
 - New limitation: the iPad cannot wake a Mac from system sleep.
 - Screenshots: the Mac menu bar panel (Display, Input, Audio and General tabs, rendered with sample data) and the iPad app's waiting screen (`docs/images/`). The Security tab is left out because its sample data carries real key prefixes.
+
+## CHANGE ID: P1-054 — Landing page rebuilt as a scroll-told product page (website only)
+
+**FILES CHANGED:** the separate website directory of the Mac host & iPad workspace (`build.py`, `cms_build.py`, `content.json`, `src/page.html`, `assets/`, `cms/content.js`, `cms/editor.js`, `cms/editor.css`), `docs/CHANGELOG.md`. The previous site is kept beside it as `website-backup-2026-11-23-v0.4.2`.
+
+**SUMMARY:**
+- Rebuilt from scratch for 0.5.1 in the style the owner chose from apple.com product pages: black stage, `#161617` tiles, Inter only (self-hosted variable subset, weights 300–800, OFL), weight that animates on headings.
+- Opening scene pinned to scroll: a line drawing of an iPad, a USB‑C cable and a Mac mini. Scrolling seats the plug, lights the screen with the app's real waiting-screen text, shows the pairing code on both sides, then traces a desktop while video, audio and input flow along the cable.
+- Chapters: by the numbers, new in 0.5.1, how it works (three lanes), display and the four quality presets (an interactive chroma/bit-depth illustration computed in BT.709), audio, input (gestures, shortcuts), the real menu bar panel captures, sleep/lock, security, an honest compatibility list (untested: other iPads, 120 Hz, two iPads, Sidecar/DisplayLink), install, FAQ.
+- The Mac in the opening scene is a front render of the Mac mini supplied by the owner (transparent PNG, cropped to the body). It appears to be Apple's own product image; the owner chose to use it after being told it is not licensed for third-party sites.
+- Mood photos supplied by the owner (Unsplash licence, credited in the footer). One photo carries the app's real waiting screen mapped onto the iPad with a 4-point perspective transform, labelled as inserted.
+- All facts checked against `README.md`, the install guide, the v0.5.1 release notes and the preset text in `HostController.swift`. Downloads point to the latest GitHub release.
+- CMS: keys are now explicit (`hero.title`, …) instead of positional, so moving sections never reassigns saved text; the build fails on a missing, unused or mismatched key between Indonesian and English. Sanitizer allows the `thin` class. Both production language revisions were still 0 (empty), so no saved content is affected.
+
+**VERIFIED:** Pass A: build, `node --test cms/worker.test.mjs`, JavaScript syntax, every glyph on both pages present in the font subset, all external links return 200, personal-identifier scan (only the owner's own domain and public GitHub handle match). Pass B (local server, browser): ID and EN at 1440, 1024, 768, 390 and 320 px with no horizontal overflow, scroll scene states, tabs with keyboard, mobile menu with Escape, static layout used for reduced motion. The browser pane was hidden for part of the run, so some frames were checked through the DOM rather than screenshots. 
+
+**DELIVERY:** Deployed on the owner's yes to Cloudflare Pages project `wireddisplay` (production branch `main`): https://bf007ef2.wireddisplay.pages.dev/, live at the custom domain and /en/. Checked after deploy: both pages, `/api/content` (id/en, revision 0, empty), `/api/session`, `/admin/`, images, font, `robots.txt`, `sitemap.xml` and the security headers all return 200; in the browser the CMS loaded, the scroll scene was active, Inter loaded and there was no horizontal overflow. NOT RUN: a real iPhone/iPad and Safari pass. No app binaries, commits, pushes or GitHub releases.
+
+## CHANGE ID: P1-055 — Landing page: hero headline fix (website only)
+
+**SUMMARY:**
+- Bug: the hero headline broke into scattered words on the live site. The word-by-word animation marked the heading with the class `split`, which is also the two-column grid layout of the Audio and Security sections, so the heading became a grid. Renamed the class to `words-ready`. `build.py` now fails when a class that `site.js` adds is also a standalone rule in `site.css`.
+- The headline is now two lines with one clear hierarchy, bold then light grey: "iPad‑mu jadi layar Mac. / Cukup satu kabel." and "Your iPad, as a Mac display. / Just one cable."
+- Removed the "scroll to plug in" hint, which sat inside the drawn iPad screen.
+- Menu bar panel section is now a gallery in the pattern of apple.com's MacBook Pro "Get the highlights": wide cards (87.5% of the viewport, at most 1260 × 612 px, measured on apple.com), headline top-left (tab name bold, description grey), the real panel capture on the right. When a card becomes active its capture rises in, then a pulsing ring outlines the key control and a callout names it (Display: sizes remembered per iPad; Input: off until allowed; Audio: headphone switching; General: new in 0.5.1). Ring positions come from pixel measurements of each capture.
+- Gallery controls: timed dots in a pill (the active dot fills over 6 s, then the next card), round play/pause, swipe and trackpad, tab-pattern keyboard on the dots (arrows, Home, End). Autoplay pauses on hover, keyboard focus, when the gallery is off screen or the tab is hidden, and never runs with reduced motion.
+- Icons: one line-icon set (same stroke, 44 px) on every point — new in 0.5.1, display, audio, input — and on the three lanes of "How it works", tinted with each lane's data colour.
+- Gallery cards now show the panel in context: the right 62% of each card is a slice of desktop (a blurred wallpaper made from the monitor area of the owner's desk photo) with a generic menu bar strip, and the panel hangs right under the highlighted WiredDisplay icon. No fake menus or Apple marks.
+- Bug fixed: the highlight ring could extend past the panel (reported on the General and Audio cards). The capture's wrapper sized itself to the image's natural width while the image was drawn smaller. The wrapper's width now follows each capture's aspect ratio; measured on all four cards: wrapper = image, ring inside the image, panel centred under its icon (0 px).
+- Sleep, lock, screensaver is now one stage: three selectable states on the left (timed progress, auto-advance every 6 s, keyboard tab pattern) and a large line-drawn iPad that acts each one out — display sleep goes dark and returns; locked or screensaver shows a tap waking the lock screen, never the desktop; Mac sleep shows the app's waiting screen, then reconnects. Hover or focus only holds the auto-advance; the state animation keeps playing. Without JavaScript or with reduced motion every description is shown.
+- Security: the code card now matches the height of the copy column, label above code, with a "match" check between the Mac and iPad codes.
+- Phones at 320 px: a 6 px overflow from the keyboard-shortcut table is fixed (grid children may shrink; key combinations may wrap).
+- Audio is now a bento: heading and lead across the page, then one grid with the waveform tile (2/3 wide, two rows tall) beside the two point tiles. Measured at 1440 px: tops and bottoms align (0 px); at 820 px the waveform spans the row and the two tiles share one height; at 390 px everything stacks at one width.
+- Touch gestures are now guides in the manner of the macOS Trackpad previews, each showing the finger motion and its result: tap = press with water ripples; drag = finger trail while a striped page scrolls and keeps gliding after release (momentum); hold then drag = a ring locks on, then a blue selection grows; two-finger tap = two ripples and a context menu; pinch = an object grows and shrinks; two-finger rotate = the object turns; three fingers = pinch shows ⌘C, spread ⌘V, swipe left ⌘Z (as in the install guide). Checked frame by frame at 0.9 s and 2.15 s; every element stays inside its pad at 1440 and 390 px.
+- Opening scene rebuilt in one material language instead of a line-drawn iPad beside a photographic Mac: an HTML/CSS iPad at iPad Air 13-inch proportions (aluminium bezel, glass, glare, floor reflection) and the Mac mini render on the same lit floor. A scroll-driven 3D camera swings from a low three-quarter view to the front; the plug slides in with a glow at the port; the screen lights the floor; the pairing code appears as one quiet readout whose digits arrive with the scroll; the screen then shows the owner's real capture of the Mac desktop on the iPad while the cable carries glowing data pulses; finally the camera moves into the screen until it covers the window (scale computed from the glass and window size; verified to cover at 1440 × 900 and 390 × 844).
+- The "Mac on iPad" screen is the owner's iPad capture (2732 × 2048). Other apps' menu bar icons are blurred; the WiredDisplay icon, the macOS screen-capture indicator, the clock and the recording dot are kept. The caption says so. Captures that show the owner's Mac name and pairing ID were not used. `build.py` warns if the screen is still a placeholder.
+- Share images per language (`og-id.jpg`, `og-en.jpg`, 1200 × 630, made by `scripts/make-og.py` from the real capture with Inter; the script checks the text keeps 32 px clear of the iPad).
+- Downloads are specific: "Download for Mac" (WiredDisplay-0.5.1.dmg, 1.1 MB) and "Download the iPad app" (WiredDisplay-0.5.1.ipa, 581 KB) in the hero and as two cards in Install; sizes from `gh release view v0.5.1`; both links return 200. The header and closing buttons still open the latest release page.
+- Language suggestion: when the browser's first language is the other one, a small pill offers the other page (written in that language, with its `lang`); never a redirect; dismissal is remembered.
+- "And on the iPad": the owner's real capture of the iPad Controls panel (the one without the Mac's name or pairing ID) in the same iPad material, with the live stream details, the renderer choice and This iPad. Checked that these UI strings were in the code before the v0.5.1 release (added 17 November).
+- Unused assets (old desk photos, old share image) moved out of the deploy to `references/unused-assets/`.
+- Point icons are larger (60 px, from 44 px) with a thinner line (stroke 0.9 in a 24-unit box, from 1.7), the same set everywhere.
+- New "Comparison" section before Install: WiredDisplay, OpenDisplay, Luna Display and Sidecar in one real table (10 rows: price, extra hardware, connection, which screens, requirements, Mac with no monitor, sound on the iPad, control from the iPad, encryption, install). Only facts from each product's own pages, as of 24 November 2026: the OpenDisplay README, issues #5 and #182, its privacy page and release 1.30.3; astropad.com/product/lunadisplay and the Astropad Help Center system-requirements article; Apple Support 102597. Where a source says nothing, the cell says "Not stated". WiredDisplay's own limits are in the table (iPad only, cable only, sideloaded, Mac app not notarized, tested on one iPad). On phones (≤ 700 px) each row becomes a stacked list; between 701 and 900 px the table scrolls sideways inside its card with a sticky first column.
+- The keyboard-shortcut table now stacks by the width of its own card (container query), which fixes a 41 px page overflow at 768 px.
+- iPad proportions (after deploy b686c259, reported by the owner: the iPad looked too square and the captures were cut off at the edges, e.g. "inder" instead of "Finder" and a cut-off clock). The capture files were complete; the CSS was at fault: the glass took its height from the body's `aspect-ratio` through `height:100%`, so it could end up squarer than the 2732 × 2048 capture and `object-fit:cover` cropped the sides. Now the glass itself has `aspect-ratio:2732/2048` and the body gets its size from the glass plus a bezel from the real iPad Air 13-inch (280.6 × 215.5 mm: about 8.2 mm at the sides, 8.7 mm top and bottom), so the body is 1.302:1. Measured in the browser: glass and image both 1.335:1 in the opening scene and 1.332:1 in "And on the iPad", so nothing is cropped. Corner radii follow the device (body 4.7 % / 6.1 %, screen 1.4 % / 1.85 %). The final zoom margin went from 1.04 to 1.08; the glass still covers the window at 1440 × 900, 1200 × 1270 and 390 × 844. Deployed with the owner's yes (Cloudflare Pages deployment b88c286f); the live page measures the same ratios.
+- English is now the default language: English at `/`, Indonesian at `/id/` (owner's request). The Pages Worker answers `/en` and `/en/…` with a 301 to `/…`, so old links keep working (new Worker test). hreflang, sitemap, CMS admin links and the CMS editor's language switch follow the new paths. Not yet live.
+- The ID/EN switch left the toolbar. Language now sits in the footer (globe icon, "English · Bahasa Indonesia", native names) and at the foot of the phone menu. The one-time language suggestion stays.
+- Design audit (1440, 768 and 375 px, both languages), first fixes:
+  - section padding 170 → 140 px at most (black gaps of about 300 px after footnotes);
+  - chapters numbered 01–10 throughout (some had "—");
+  - in the opening scene the waiting screen is gone before the desktop is a fifth of the way in, and the desktop wakes from dim and settles from 1.035× (no more double exposure of "WiredDisplay" over the wallpaper);
+  - 0.5.1 cards 2 and 3 act out their change at the foot of the card (the app's two "Keep … " switches turn on in turn; a lock screen wakes on a tap with a ripple), so the three cards now end on one line;
+  - the pairing code arrives digit by digit, Mac first, then the line, then the iPad's digits, then the check;
+  - the numbers rise in turn per column;
+  - the desk photo's iPad now shows the real desktop capture (caption updated in both languages);
+  - bug: the desk-photo insert could be placed while still hidden (size 0, so the 3D matrix was NaN and the insert showed flat and full size); it now uses the image's declared size.
+- Improvement plan for design, motion and animation written to the website folder (`IMPROVEMENT-PLAN.md`).
+- Deployed with the owner's yes (deployments a96beb9c and 9be54d11). The first one served the English page at `/en/` with status 200: `_routes.json` only sent `/api/*` and `/admin*` to the Worker, so Pages' fallback answered `/en/`. `/en` and `/en/*` are now in `_routes.json`. Checked live: `/en`, `/en/`, `/en/?edit` and `/en/faq` return 301 to the same path under `/`, keeping the query string.
+- Round A of the plan (local, not yet deployed):
+  - hero: one meta line ("Free and open source · macOS 14+ · iPadOS 17+ · USB‑C data cable"); file sizes stay on the download cards in Install;
+  - the opening scene now ends on a line over the full screen ("This is your Mac. On your iPad." / "Ini Mac‑mu. Di iPad‑mu.", CMS key `story.outro`), which rises out of a blur, under a soft vignette. The scene then dims to black and meets band 1 with no seam (a 1 px line at the sticky edge is gone because the scene itself fades out);
+  - FAQ: the answer's height animates open and closed (`::details-content` with `interpolate-size`; measured 74 → 148 px over about 0.4 s and back). Browsers without support show the answer at once, with the previous fade.
+  - Checked: 1440 × 900 and 390 × 844, EN and ID, no horizontal overflow; Worker tests pass; every character is in the font subset.
+- Rounds B and C of the plan (local, not yet deployed):
+  - one colour per lane, carried through the page: video blue `#2997ff`, audio purple `#bf5af2`, input green `#30d158` (cable pulses and chips in the opening scene, lane icons and packets, the Display, Audio and Input chapter numbers and icons, the audio waveform). Before, audio was white in one place and blue in another, and input was grey in the lanes but green in the opening scene;
+  - packets on the lanes leave a short light trail;
+  - Install is a timeline: three numbered nodes on a track above the cards, each over its card's text, with a line that fills blue as you scroll and nodes that light in turn. A first version drew the line through the cards and across the gaps; the owner found it broke out of the boxes, so it was moved to its own track. On screens up to 900 px the track is hidden and the cards keep their numbers;
+  - tiles (cards, lanes, gestures, audio, pairing) get a soft light that follows a precise pointer and lift 2 px; reveal timing is kept;
+  - Display: new "Coloured text, up close" slider comparing 4:2:0 and 4:4:4 on red text over blue. The 4:2:0 side is a real luminance/chroma split: the colour is drawn blurred and the sharp image is laid on top with `mix-blend-mode: luminosity`. The divider sweeps once on first view, the slider is a native range input with a label, and the illustration caption is shown;
+  - "By the numbers": digits run through values and settle left to right;
+  - menu-bar gallery rings draw themselves from left to right;
+  - a 3.5 % film grain over the page (against banding in the large glows) and a small dot under the active section in the navigation;
+  - Sleep, lock, screensaver (owner's request): the line drawing is replaced by the same iPad as the opening scene, with the real desktop capture (display sleep dims it to black and back), a lock screen on the blurred wallpaper with a tap ripple (locked or screensaver), and the app's real waiting screen (Mac sleep). The Mac mini stands beside it and dims while the Mac sleeps. A status pill copies the selected state's name (amber for sleep or lock, grey for Mac sleep).
+  - Checked: no horizontal overflow at 320, 390, 768, 1024 and 1440 px in EN and ID; Worker tests pass. Not checked: `prefers-reduced-motion` in a real browser setting (the static rules are in place but were not switched on in the test browser).
+- Rounds A, B and C deployed with the owner's yes (Cloudflare Pages deployment 6499dd41). Live: `/`, `/id/`, `/admin/` and the new insert image return 200; `/en/` returns 301 to `/`; the new sections are in the page; the Sleep stage shows its status; the desk-photo insert is placed; no horizontal overflow. The only console errors are the Cloudflare Web Analytics beacon blocked by a content blocker in the test browser.
+- Quality pass and polish (owner's "group 1, then 2"; local, not yet deployed):
+  - the website folder is now a local git repository (`main`, first commit 6bcbe06 = deployment 6499dd41; never pushed). `dist/`, `.wrangler/` and `references/captures/` (unredacted screenshots) are ignored;
+  - `prefers-reduced-motion` checked for real on a test copy with the media queries switched on: the opening scene becomes the static stack, every reveal is visible, the state descriptions are all open, and after scrolling the whole page no animation is running;
+  - performance at 1440 × 900 on the test Mac (144 Hz): LCP 84 ms (the headline), CLS 0.002, 607 KB transferred. The opening scene had dropped to 106 fps with 36 frames over 20 ms; the cause was `filter: brightness()` on the 2732 px desktop capture and a blur on the closing line, both re-rasterised every frame. They are now an opacity-only dim layer and a scale; the scene measures 143 fps (one frame over 20 ms) and the rest of the page 144 fps. A run in which the browser pane was not visible (1 fps, rAF every 2 s, no long tasks) was discarded;
+  - the iPad under the hero is no longer black: the app's waiting screen shows dimmed (42 %) before the cable goes in and brightens when the Mac answers;
+  - the closing section is a bookend: the photo is replaced by the same iPad showing the Mac, tilted as it enters and upright as it rises, under a blue glow (Samuel Angor's photo is no longer used; footer credit and README updated; files moved to `references/unused-assets/`);
+  - Input: fingertips in the gesture guides carry the input lane's green;
+  - comparison on phones: a "Compare with" switch (All, OpenDisplay, Luna, Sidecar) shows WiredDisplay next to one product at a time;
+  - SoftwareApplication JSON-LD per language (version, date, OS, free, licence, download, repository); checked that it parses;
+  - share images regenerated with the corrected iPad (2732:2048 glass, real bezel); the old rotated shading left two dark wedges in the bezel, replaced by a diagonal ramp.
+  - Checked: no horizontal overflow at 320, 390, 768 and 1440 px in EN and ID; Worker tests pass.
+  - Committed to the local website repository (45d4c44) and deployed with the owner's yes (Cloudflare Pages deployment 9b2824d5). Live: `/`, `/id/`, `/admin/` and both share images return 200 (the live `og-en.jpg` matches the new build byte for byte); `/en/` returns 301; JSON-LD, the closing iPad and the compare switch are in the page; the hero iPad starts at 42 % waiting screen; the footer credits Amanz and Mahmudul Hasan.
+- "Push to the limit" pass (local, not yet deployed):
+  - WebKit: no iPad simulator could run (every simulator is "unavailable": the iOS 27 runtime is not installed; installing it is about 8 GB and left to the owner), and Safari on the Mac can only be viewed, not navigated, by Claude. Instead every CSS feature in use was checked against current WebKit. All are supported except `interpolate-size`, which is behind `@supports`, so Safari shows FAQ answers at once. Every `backdrop-filter` has its `-webkit-` twin and every mask has `-webkit-mask`. Not verified on a real iPad or in Safari by eye;
+  - navigation: "Compare" / "Perbandingan" added (fits at 920 px in Indonesian, the longest labels);
+  - footer on phones: brand, then the links in one left-aligned flow, then the notes (before, the links were pushed right beside the brand);
+  - language suggestion on phones: one compact bar with only the switch link and close, and it hides itself (without being dismissed for good) after one and a half screens of scrolling;
+  - "Coloured text, up close." no longer breaks after "Coloured".
+  - Checked: no horizontal overflow at 320 and 1440 px; Worker tests pass.
+  - Committed to the local website repository (58ddaa2) and deployed with the owner's yes (Cloudflare Pages deployment 5c8ce9b4). Live: `/`, `/id/` and `/admin/` return 200, `/en/` returns 301, and the navigation shows "Compare" / "Perbandingan".
+- Real screen recording (owner's iPad recording, 12.4 s, 2732 × 2048, ReplayKit; local, not yet deployed):
+  - reviewed frame by frame first. It contains the iPad home screen with personal apps and notification badges (0–3 s), the Mac's name in "Connecting to …'s Mac mini…" (8.7–9.3 s), and other apps' menu-bar icons on the desktop (from 9.6 s);
+  - only 7.8–10.2 s is used: "Waiting for your Mac" → "Connecting…" → the desktop. Made with AVFoundation (`scripts/make-ipad-clip.swift`; ffmpeg is not installed). The name is blurred with a feathered mask from 8.66 s (no hard box) and the menu-bar icons from 9.45 s, the same areas as the still capture. Audio and metadata are dropped. Every exported frame at 0.04 s steps was checked in both files; the name is unreadable in all of them;
+  - HEVC 408 KB and H.264 535 KB, 1600 × 1200; the page offers HEVC first (`codecs="hvc1"`) and H.264 as fallback (this test Chromium picked H.264);
+  - opening scene: when pairing ends (65 % of the scene) the clip plays once over the iPad's glass, then fades to the sharp 2732 px still for the zoom. Scrolling back before 60 % rewinds it. It loads only from 40 % of the scene (`preload` none until then). If the browser refuses to play it (for example Low Power Mode), the scroll crossfade from before takes over;
+  - closing iPad: the same clip plays once when the iPad is upright, then fades to the still; it rewinds after scrolling well away;
+  - reduced motion: the clips are hidden and never downloaded (checked on the test copy: zero video requests, no running animations);
+  - performance with the clip: opening scene 142–143 fps at 1440 × 900 (one frame over 20 ms);
+  - the caption now says the iPad screen is a real recording and captures, and that the Mac's name is blurred too (EN and ID).
+  - Checked: desktop 1440 × 900 and phone 390 × 844 (plays, no horizontal overflow); Worker tests pass. Not checked: playback in Safari or on an iPad.
+  - Committed to the local website repository (2606765) and deployed with the owner's yes (Cloudflare Pages deployment 1dc71d9d). Live: both clips return 200 with `video/mp4` and answer range requests with 206; the opening clip plays and hands over to the still.
+  - Found while checking: the live CMS holds saved values `"<br>"` (saved 24 November, 10.19 WIB, revision 1, both languages) for `story.note`, `ui.photoNote` and `ui.photoNoteInsert`, so those three captions are empty on the live site and the new `story.note` text does not show there. Left as it is; asked the owner whether it was deliberate.
+- Motion polish (owner's "oke kerjakan"; local, not yet deployed):
+  - the screen's light takes the colour of what is on the glass: app blue while waiting, the wallpaper's sky (rgb 140 200 225) once the Mac is up, on the glass glow and the floor (`color-mix`); the closing iPad and other desktop screens use the sky colour;
+  - while the recording plays, a burst of light runs along the cable (2.2 s, once);
+  - before the camera moves, the iPad and Mac mini lean up to 2.5° toward a precise pointer, eased, fading out as the camera turns to the front;
+  - switching language cross-fades the pages (`@view-transition`, same-origin; switched off for reduced motion);
+  - buttons scale to 0.97 when pressed; large buttons lean up to 6 px toward a precise pointer;
+  - chapter numbers rise into place as their heading scrolls in (`animation-timeline: view()`, behind `@supports`).
+  - Performance re-measured: opening scene 140 fps and the rest 141 fps at 1440 × 900; with the colour mixing removed 141/142 fps, so the difference is within noise. One run at 19 fps was the browser pane throttling and was discarded. No horizontal overflow at 375 and 1440 px; Worker tests pass.
+  - Committed to the local website repository (a64a204) and deployed with the owner's yes (Cloudflare Pages deployment 203c6a55). Live: pages and the clip return 200, `/en/` returns 301, the served CSS carries the new rules, and the pointer tilt responds; the only console errors are the analytics beacon blocked in the test browser.
+- Sleep stage, "Locked or screensaver" (owner's real Mac lock screen, 2000 × 1125; local, not yet deployed): the CSS-built lock screen (blurred wallpaper, "9:41", drawn padlock) is replaced by the owner's capture, cropped to the iPad's 4:3 at the centre (1500 × 1125). The account photo and the account name are blurred out (strong blur, soft edge, stopping just above the password field); the date, the time, "Enter Password" and the wallpaper are kept. Checked at 3× that neither face nor name can be read. Saved as `assets/img/ipad-lockscreen.webp` (124 KB, no metadata); the redacted PNG is in `references/captures/` (git-ignored). Checked in the browser at 1440 × 900; Worker tests pass. Committed to the local website repository (1b4dace) and deployed with the owner's yes (Cloudflare Pages deployment 6fe0c384); the live image is byte-identical to the local file and the page references it.
+- Phone hero (owner's screenshot from a real iPhone in Safari, the first real WebKit check): the iPad's top edge rose into the last hero line ("macOS 14+ · iPadOS 17+ · USB‑C data cable"). The scene's starting offset (`--drop`) was a fixed share of the screen height (50–58 svh), too little where the hero text wraps into many lines. `fitDrop()` now measures the hero text's bottom and the iPad's position (layout sizes, not transforms) and, only when the share is too small, pushes the scene down so the iPad starts 32 px below the text (plus 18 px for the tilt); it reruns on resize and when the font has loaded. Measured: iPad top 65–67 px below the text at 440 × 800, 390 × 844 and 375 × 667; at 1440 × 900 nothing changes (no override). While scrolling on a phone the hero text has faded out (opacity 0 at 8 % of the scene) before the iPad passes through its area. Worker tests pass. Deployed with the owner's yes (Cloudflare Pages deployment d29b17df; committed afterwards to the local website repository as 3392338). Live at 390 × 844: hero text ends at 635 px, iPad starts at 716 px, no horizontal overflow.
+- Rotate icon redrawn (owner: the details were off): a portrait iPad with a curved arrow and a real arrowhead, in the same 0.9 line as the other icons; the old one was two loose arcs beside a rectangle and did not read as "rotate". Compared three drafts at 120, 60 and 30 px; the one with a dashed landscape ghost was too busy small. The iPad download card had borrowed the rotate icon and now has its own landscape iPad icon (with a camera dot), matching the Mac card's monitor. Committed (eeb7f66) and deployed with the owner's yes (Cloudflare Pages deployment 5a854826); the live page and CSS carry both icons.
+- Rotate icon, second pass (owner: the arrow must stay outside the iPad, not touching it): the arc's start ran close above the iPad's top-right corner. The iPad is now 8 × 11 (was 10 × 13) and the arc wider (radius 12), so a clear gap shows on every side down to 30 px; compared two drafts at 160, 60 and 30 px. Committed (160d50a) and deployed (Cloudflare Pages deployment c1c23470); the live CSS (`site.css?v=c11204144142`) carries the new path.
+- Rotate icon, third pass (owner sent a stock "rotate tablet" icon as a reference; it carries a watermark, so it was not copied, only its idea): a portrait iPad behind a landscape iPad, each with a camera dot, and a two-way curved arrow in the free top-right corner, touching neither. The back iPad's outline breaks where the front one covers it (an SVG mask inside the icon), so the two read as layered in a line icon. Compared with the plain version at 160, 60 and 30 px; checked on the page at 1440 × 900. Then the arrow's proportions (owner: fix them): the arc was short (radius 5) and the heads heavy (about 26 % of the arc). The arc is now longer (radius 5.8, a quarter circle) and the heads smaller and symmetric (about 18 %, arms 1.15 × 0.95), still 1.5 units clear of both iPads; compared two drafts at 200, 60 and 30 px. Committed to the local website repository (a9d6371) with the owner's yes, then deployed on the owner's "Publish" (Cloudflare Pages deployment 36d19992); the live CSS (`site.css?v=4ff65b50bf1a`, same as the build) carries the new icon.
+- Audio panel (owner: add speaker and mic icons, and make the motion match): each wave now has a head row with an icon chip in the audio lane's purple, a speaker for "Mac → iPad speakers" and a microphone for "iPad microphone → Mac". The icons move on the waves' own beat: the speaker's three arcs ripple outward (1.7 s, staggered 0.14 s), the microphone's level rises inside the capsule (2 s), and a ring pulses out of each chip. Both waves now travel left to right, source to destination, as their labels read (the speaker wave used to travel right to left; measured: its peak moves from bar 18 to bar 22 in 150 ms). Each bar has its own peak (`--a`, a fixed speech-like envelope set by `build.py`, so builds stay identical) instead of one uniform lens shape. Reduced motion: no running animations (checked on the test copy), arcs shown at 0.9 and the level at 60 %. 144 fps through the section at 1440 × 900; no horizontal overflow at 390 px; Worker tests pass. Local, not yet deployed.
+  - Then (owner: put the icon in the middle of the animation so it reads clearly): the chip moved from beside the label into the middle of its wave, 56 px (44 px on phones), with 14 bars on each side; the labels sit centred above. Bars are tallest beside the icon and fall away outward. The motion now says what each device does: the speaker's wave radiates outward from the icon (measured peak distance 7 → 8 → 9 → 11 → 12 → 13 over 0.5 s) and the microphone's wave flows inward into it (9 → 8 → 6 → 5), and the microphone's ring contracts instead of expanding. `build.py` builds the two halves (`waveL`, `waveR`) with each bar's distance from the icon (`--d`). No horizontal overflow at 375 and 1440 px; Worker tests pass.
+  - Then (owner: the icons are too small, and speaker and mic need to be separated): chips grow to 88 px on desktop (72 px at the smallest desktop width, 60 px on phones) with the icon at 56 % of the chip (49 px), a soft radial fill and a faint glow in each lane colour; the two parts are split by a hairline divider that fades at both ends, with even space above and below it; labels are a step larger and lighter. Checked at 1440 × 900 and 375 × 812 (no horizontal overflow). Deployed on the owner's "Deploy" (Cloudflare Pages deployment 8f188e9d; the live CSS `site.css?v=21254b80fafe` matches the build and the page carries the centred-icon waves). Committed afterwards to the local website repository (6cfb279).
+- Measured: page assets 1.38 MB before this change; text contrast at least 4.65:1 everywhere; scroll at 134 fps in the 3D scene and 143 fps elsewhere on the test Mac (144 Hz).
+
+**VERIFIED:** build and CMS Worker test pass; gallery in a visible browser at 1440 px: card 1260 × 612 px aligned to the edge, autoplay advanced every 6 s and wrapped from the last card to the first, dots, play/pause and arrow keys worked, rings landed on the intended controls; at 390 px the card, callout and capture fit with no overflow. Hero: local browser at 1440 px (EN) and 390 px (ID): the heading is a block with the expected lines, the drawing starts below the hero text, no horizontal overflow. Comparison and icons: no horizontal overflow at 320, 414, 768, 834, 1024 and 1440 px (ID and EN); every character on the page is in the font subset; identifier scan of `dist/` matches only the site's domain. Deployed with the owner's yes on 24 November 2026 (Cloudflare Pages deployment b686c259): `/`, `/en/`, `/admin/` and the assets return 200; live hero heading is a block, the comparison table shows 10 rows, both download links return 200.
+
+## CHANGE ID: P1-056 — Landing page: antislop audit and fixes (website only)
+
+**FILES CHANGED:** the separate website directory (`content.json`, `src/page.html`, `assets/site.css`, `assets/site.js`, `IMPROVEMENT-PLAN.md` section 5), `docs/CHANGELOG.md`.
+
+**SUMMARY:**
+- Audit with the antislop skills (core, UI, copywriting, human/accessibility, mobile layout); findings A1–A8, B1–B7 and C1–C6 are in `IMPROVEMENT-PLAN.md` section 5. All were fixed on the owner's "kerjakan semuanya".
+- Copy: no em dash left in either language (13 keys). The opening-scene alt text now describes the 3D scene, not a line drawing. The FAQ on Sidecar states only WiredDisplay's own facts, and the Input headline no longer compares to Sidecar. The "~1 ms" figure is now described as the pointer position crossing the cable, measured on the test setup (DECISIONS: Mac→iPad transfer ~1 ms). Formula headlines were rewritten. Indonesian strings that were left in English were translated. The panel lead now uses the app's own "Connection code" label.
+- Layout: "New in 0.5.1" moved after Install (the hero version line links to it). "By the numbers" went from six facts, four of them repeated elsewhere, to three: ~1 ms, 4:4:4 10-bit, and 60 Hz tested. Display's four equal cards became one list of three; "can be the main display" is already told by the Mac mini band. On phones, the gestures are one swipeable row and the comparison opens on WiredDisplay vs Sidecar. Page height at 375 px went from 31,586 to 28,719 px.
+- Accessibility:
+  - The gallery callout is on #0071e3 (4.70:1, was 3.02:1).
+  - All controls have 44 px targets: header Download, quality tabs, comparison picker, gallery dots, language-hint close, and sources as a list.
+  - Text is at least 12 px.
+  - The shortcut arrows use the muted grey (4.99:1).
+  - The phone menu fills the screen.
+  - Spec labels are no longer upper case, so "MAC/IPAD" no longer appears.
+- Motion:
+  - Every infinite CSS animation now plays about 5 s (whole cycles), then rests. Scrolling back, hover or tap replays it (WCAG 2.2.2).
+  - Sleep/lock auto-advance runs one round, then stops.
+  - font-weight is no longer animated outside the hero headline, so text no longer re-wraps.
+  - The opening-scene caption and pairing readout no longer overlap on phones: they now appear one after the other, and the caption has side margins.
+- Identity: three hairlines in the lane colours open every chapter label (one cable, three lanes). The apple.com tokens and the blue button stay (owner's choice).
+
+**VERIFIED:**
+- `python3 build.py`: 0 em dashes in `dist/` (EN and ID).
+- `node --test cms/worker.test.mjs`: 2/2 pass.
+- `node --check assets/site.js`.
+- In the browser:
+  - No horizontal overflow at 320, 375, 768 and 1280 px.
+  - No text below WCAG AA (automatic scan).
+  - No infinite animation left after load and after the gallery activates.
+  - Hover replay works.
+  - Caption and pairing readout opacities never overlap during the scroll.
+  - Console: only the expected local 404 for `/api/content`.
+- NOT RUN: Safari or a real iPhone/iPad; reduced-motion re-check after these edits.
+
+**DELIVERY:** Website commit `0dabd0e` (local repo, never pushed). Deployed on the owner's "deploy" to Cloudflare Pages `wireddisplay` (branch `main`): https://d2f8b706.wireddisplay.pages.dev, live at the custom domain and /id/. Before deploying: D1 holds only the three `"<br>"` captions per language (revision 1), so no saved key overrode the changed copy and D1 was not written. The identifier scan of `dist/` matched only the site's own domain and public GitHub handle. After deploying: /, /id/ and /api/content return 200 and /en/ returns 301. Both pages contain the new markup and no em dash. At 375 px the ID page shows no horizontal overflow, the callout is on #0071e3, and the CMS overlay loaded.
+
+## CHANGE ID: P1-057 — Display size can be changed when the iPad is the Mac's only screen; comment cleanup
+
+**FILES CHANGED:** `macOSHost/Host/VirtualDisplayController.swift`, `docs/DECISIONS.md` (D-043), and comments only in `DecodeBacklog`, `VideoEncoder`, `HostController`, `InputInjector`, `ClientSession`, `MetalVideoRenderer`.
+
+**BUG:** with the Mi Monitor disconnected, macOS made the WiredDisplay virtual display the main display (`bounds (0, 0, …)` in the log). `canChangeSpace` refused any main display (D-015), so the panel's Default / More / Most Space control was disabled.
+
+**FIX:** the guard now refuses only a mirrored display. It is only ever called with WiredDisplay's own display, so another display or the arrangement is never touched (D-043).
+
+**COMMENTS:** over-long comments from P1-045 to P1-051 were cut to one or two lines, dropping issue history and reasoning chains. No code changed with them.
+
+**VERIFIED:**
+- `swift test` 174/174.
+- Host reinstalled. With WiredDisplay as the only and main display, the same CoreGraphics calls as the panel switched it to More Space and back: the host followed each change, captured at 3072×2304 with its own downscale, and remembered the choice.
+- Left at Default afterwards.
+
+**NOT RUN:** clicking the panel control itself (the user tries it).
+
+## CHANGE ID: P1-058 — IMP-01–03: no silent listener in the background, an honest status, logs that keep their history
+
+**FILES CHANGED:** `iPadOSClient/WiredDisplayClient/Sources/{ClientApp,ClientLog,ClientSession}.swift` (ClientApp: background lifecycle and audio retry), `macOSHost/Host/{HostController,VideoEncoder}.swift`, `docs/IMPROVEMENTS.md` (new), `docs/CHANGELOG.md`.
+
+**SUMMARY:**
+- **IMP-01.** In the background the iPad session now lives only as long as audio does. When audio stops or is interrupted there, the session and listener close. When the interruption ends, the listener reopens in audio-only mode. Before, a suspended app kept its port open: the Mac's connection was accepted but never answered (24 Nov: four timeouts in 35 s).
+- **Audio after returning.** If the audio could not restart in the background (iPadOS refuses while another app holds the audio session, "Session activation failed"), the app retries the user's audio choice when it comes back to the front. Before, a failed start also switched the speaker off for good.
+- **IMP-02.** The host reports that case as "iPad app not answering (in the background?)" instead of "old app version?".
+- **IMP-03.**
+  - The per-frame latency lines ("frame host", "frame glass") are sampled about every 5 s instead of every 0.5 s. They had made up 56–61 % of each log.
+  - Past 2 MB, the iPad log moves to `client.old.log` instead of being deleted.
+
+**VERIFIED:**
+- `swift test` 174/174.
+- Host and iPad Release builds succeeded; both were installed, and the session streams.
+
+**VERIFIED ON HARDWARE (two runs with the user):**
+- App in the background with the speaker on, then music started in another app: the iPad closed the session cleanly ("client said bye: audio interrupted in the background").
+- The host made no connection attempts during the 74 s in the background, and no "not answering".
+- Back in the app: audio restarted after the failed background attempt, and the speaker bridge ran 600 IO cycles with 0 overflows in 3 s.
+
+## CHANGE ID: P1-059 — IMP-06, 07, 10, 12, 13: CI, a publish script, a Paused status, the switcher snapshot, diskutil
+
+**FILES CHANGED:** `.github/workflows/tests.yml` (new), `scripts/publish-public.sh` (new), `scripts/next-change-id.sh` (new), `scripts/build-dmg.sh`, `macOSHost/Host/{HostController,main}.swift`, `iPadOSClient/WiredDisplayClient/Sources/ClientApp.swift`, `AGENTS.md`, `docs/IMPROVEMENTS.md`, `docs/CHANGELOG.md`.
+
+**SUMMARY:**
+- **IMP-06, CI.** On every push to the public repo, GitHub's `macos-26` runner (Xcode 26.6) runs `swift build`, `swift test` and the protocol-vector check. The host only uses macOS 26 APIs behind `#available`.
+- **IMP-07, scripts.**
+  - `publish-public.sh` builds the scrubbed tree, scans it with the list from `LOCAL-HANDOVER.md`, shows the diff and pushes after a confirmation. Text files are checked after removing only the allowed words (`sibawono`, `memanggil`), and images byte for byte.
+  - `next-change-id.sh` prints the next free CHANGELOG ID.
+- **IMP-10, Paused status.** While the capture waits for the Mac's displays to wake, the panel says "Paused: Mac displays asleep", and "Streaming" comes back once it recovers. It is rarely seen, since the panel is on a sleeping display then, but the state is now honest.
+- **IMP-12, switcher snapshot.** When the app enters the background, the video view is hidden before iPadOS takes the app-switcher snapshot, and shown again on return.
+- **IMP-13, diskutil.** `build-dmg.sh` uses `diskutil image attach` and `diskutil eject` instead of the deprecated `hdiutil attach` and `hdiutil detach`.
+
+**VERIFIED:**
+- `swift test` 174/174. Host and iPad apps installed and streaming.
+- `publish-public.sh` dry run: "GitHub already has this tree". The scan filter flags a real name and an e-mail on lines that also hold allowed words.
+- The DMG built without deprecation warnings, with its full contents and the custom volume icon flag. The 0.5.1 release files in `dist/` were restored afterwards.
+
+**NOT RUN:**
+- The CI workflow itself: it runs on the next push to GitHub.
+- The switcher snapshot on the iPad (open the app switcher after leaving the app).
+- The Paused text in the panel: the panel sits on a sleeping display at that moment. The code path is the one that logs "capture recovery waits for the displays to wake".
+
+## CHANGE ID: P1-060 — GPU 4:4:4 conversion, a bounded display-layer renderer, host decisions in a tested module
+
+**FILES CHANGED:** `macOSHost/Host/{ChromaConverter,VideoEncoder,HostController,InputInjector,PowerMonitor,VirtualDisplayController,StatusPanel,main}.swift`, `iPadOSClient/WiredDisplayClient/Sources/MetalVideoRenderer.swift`, `Shared/HostCore/` (new module `WDHostCore`), `Tests/Unit/WDHostCoreTests/` (new), `Package.swift`, `AGENTS.md`, `docs/IMPROVEMENTS.md`, `docs/CHANGELOG.md`.
+
+**SUMMARY:**
+- **4:4:4 conversion on the GPU** (Ultra, High Color, and Balanced's still lane). It uses a `convert444` kernel in `ChromaConverter` with the same BT.709 maths and the same area-filter downscale as the 4:2:0 lanes, so both Balanced lanes now share one downscale filter. `--chroma-filter off` still selects VideoToolbox.
+- The encoder log now names the real rate control: standard for 4:4:4, where it used to say "low-latency".
+- **IMP-09.** The system display-layer renderer skips to the next keyframe when its queue is full, and flushes stale frames when that keyframe arrives. It requests a keyframe but does not count toward the format step-down.
+- **IMP-08.** The new `WDHostCore` module holds `PowerState`, `InputGate` (what iPad input does while locked, asleep or in another session), `DisplaySpace` and `CaptureSizing`, with 10 unit tests. The host uses them; its behaviour is unchanged.
+
+**VERIFIED:**
+- `swift test` 184/184 (10 new). Host build with no new warnings; the iPad Release build succeeded.
+- GPU against VideoToolbox, 4:4:4 at 2732×2048: 10-bit Y and CbCr within 1 code, 1.21 ms vs 2.39 ms; 8-bit within 1 code. Downscaled from 3072×2304: 2.63 ms vs 4.64 ms, with values that differ on purpose because the filter is the area filter.
+- On the stream (Ultra, More Space, 60 Hz animation): conversion p50 8.0 ms before and 3.6 ms after; capture at 59.8 fps with 0 gaps.
+- Display-layer renderer on the iPad (one launch with `-metalRenderer <false/>`) under a 60 Hz animation: 59.8 fps and no false skips. The setting was put back to Metal afterwards.
+- Host reinstalled: the remembered More Space is applied, the capture is 3072×2304 through `CaptureSizing`, and it streams.
+
+**NOT RUN:** a visual check of Ultra on the iPad by the user (the codes are verified; the eye test is not).
+
+## CHANGE ID: P1-061 — UI audit (antislop, during): readable captions, no em dashes, no decorative motion
+
+**FILES CHANGED:** `macOSHost/Host/{StatusPanel,HostController}.swift`, `iPadOSClient/WiredDisplayClient/Sources/ClientUI.swift`, `docs/images/host-*.png`, `docs/CHANGELOG.md`.
+
+**Mac menu bar panel:**
+- **Contrast (R-25).** Captions used the system tertiary and secondary styles, which on the glass panel measured 1.6–2.1:1 (tertiary) and 3.1–4.0:1 (secondary). They now use one caption colour (`Color.caption`, primary at 82 %) that measures 5.1–6.0:1 on the section cards in light and dark.
+- The version label sat straight on the glass at 1.6:1. It moved into the last card.
+- **Tab title (R-06).** The uppercase, letter-spaced "DISPLAY" became a sentence-case bold 15 pt title. On the glass it measures 3.7:1, which passes as large text.
+- **Copy (R-02).** The preset titles lost their em dashes ("Ultra — 4:4:4 10-bit" is now "Ultra"); the format line already carries the details.
+- **Icon (R-04).** Ultra's sparkles became a 3×3 grid, for "every pixel keeps its colour". Pro keeps the bolt, for lowest latency.
+
+**iPad app:**
+- **Copy (R-02).** Em dashes removed from "Wired only. Wi‑Fi is never used." and "Live: choose “iPad Microphone” on the Mac".
+- **Backdrop (R-01, R-13).** The blue radial glow behind the waiting screen is gone. The app icon's shadow is the one accent.
+- **Motion (R-19, R-39).** The waiting dot marks a real state, but it pulsed forever. It is now static.
+- **Controls panel (R-06, R-25, R-29).**
+  - Section headers are in sentence case.
+  - Gesture and shortcut actions use the primary text colour instead of the blue accent, which measured 4.3:1 as small text. The accent stays on the switches and the Reconnect button.
+
+**VERIFIED:**
+- Host and iPad Release builds succeeded; both apps installed and streaming.
+- Panel renders measured in light and dark: every caption 5.1–6.0:1, the tab title 3.7:1 (large text).
+- iPad waiting screen captured from the device: step details 8.0–8.3:1, status 17:1.
+- No em dash left in UI strings of either app. README screenshots replaced with the new renders (sample data, scanned clean).
+
+**NOT RUN:**
+- A click-through of the panel controls: only text styles changed, no behaviour.
+- The iPad Controls and pairing screens seen on the device: the Controls panel needs a tap on the iPad; the pairing screen needs an unknown Mac.
+
+## CHANGE ID: P1-062 — iPad Controls panel readable on any desktop; a movable controls button that fades when idle
+
+**FILES CHANGED:** `iPadOSClient/WiredDisplayClient/Sources/{ClientApp,ClientUI}.swift`, `docs/share/PANDUAN-INSTALASI.txt`, `docs/CHANGELOG.md`.
+
+**SUMMARY:**
+- **Controls panel contrast (R-25).** Measured on the device over a bright Mac desktop, the iPadOS 27 glass popover left every line at 1.9–2.2:1.
+  - The panel now has a solid dark background (`presentationBackground`).
+  - Secondary text uses white at 70 %, since the system secondary style measured 3.6:1 there.
+  - Measured after the change: primary text 14.8:1, secondary text and headers 8.5–11.8:1, the red "Forget Paired Macs…" 5.9:1.
+- **Filled buttons.** Reconnect and Pair had white text on Brand.blue at 3.2:1. They now use `Brand.action`, a darker blue: about 6.7:1 by sRGB calculation (not measured on the device).
+- **Controls panel replaces the system popover.** At every button position, the popover's glass arrow stayed grey against the solid panel and its edge clipped at the screen border. The panel is now its own view:
+  - It opens beside the button, on the button's side, and always fits on screen with a 16 pt margin.
+  - It has rounded corners, one solid colour, a hairline border and no arrow.
+  - It closes on a tap outside (the dimmed area, which never passes touches to the Mac), a second tap on the button, Escape on a keyboard, or the VoiceOver escape gesture.
+- **Controls button (user request: it should not distract).**
+  - It can be dragged anywhere and settles on the nearer side edge at the height where it is dropped. The position is remembered.
+  - While streaming it fades to 12 % opacity 4 s after the last touch, and it stays tappable in place.
+  - Dragging is never sent to the Mac.
+  - Accessibility: there is a VoiceOver action "Move to the other side". It does not fade while VoiceOver runs, and there is no animation under Reduce Motion.
+
+**VERIFIED:**
+- iPad Release build succeeded and was installed.
+- Contrast measured from device screenshots before and after.
+- Tested by the user on the iPad: dragging, snapping to an edge, fading after 4 s, tapping the faded button to open the panel, and the position kept after relaunching the app.

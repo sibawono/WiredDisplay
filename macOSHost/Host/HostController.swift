@@ -3,6 +3,7 @@ import CoreMedia
 import Foundation
 import IOKit.pwr_mgt
 import os
+import WDHostCore
 import WDProtocol
 import WDSession
 import WDTransport
@@ -37,10 +38,10 @@ enum QualityPreset: String, CaseIterable, Sendable {
 
     var title: String {
         switch self {
-        case .balanced: return "Balanced — Hybrid"
-        case .pro: return "Pro — 4:2:0 10-bit"
-        case .ultra: return "Ultra — 4:4:4 10-bit"
-        case .highColor: return "High Color — 4:4:4 8-bit"
+        case .balanced: return "Balanced"
+        case .pro: return "Pro"
+        case .ultra: return "Ultra"
+        case .highColor: return "High Color"
         }
     }
 
@@ -101,6 +102,8 @@ final class HostController: @unchecked Sendable {
         case waitingForDevice
         case connecting
         case streaming(String)
+        /// Streaming, but the capture waits (the Mac's displays are asleep).
+        case paused(String)
         case audioOnly(String)
         case backingOff(String)
         /// An unknown iPad wants to pair; the code is shown on both screens.
@@ -468,13 +471,10 @@ final class HostController: @unchecked Sendable {
 
     // MARK: staying awake while connected
 
-    /// On (default, the behaviour since step 1): the Mac's displays do not
-    /// sleep on their own while an iPad is connected.
+    /// Default on: the Mac's displays do not sleep on their own while an iPad is connected.
     static let keepDisplayAwakeKey = "keepDisplayAwake"
-    /// On: the Mac itself does not sleep on its own while an iPad is
-    /// connected, so the iPad can always wake the displays (it cannot wake a
-    /// sleeping Mac: the host and USB are frozen then). A sleep the user asks
-    /// for (Apple menu, closing the lid) still happens.
+    /// On: no idle system sleep while an iPad is connected, since the iPad cannot wake a sleeping Mac.
+    /// A sleep the user asks for still happens.
     static let keepMacAwakeKey = "keepMacAwake"
     static var keepDisplayAwake: Bool { UserDefaults.standard.object(forKey: keepDisplayAwakeKey) as? Bool ?? true }
     static var keepMacAwake: Bool { UserDefaults.standard.object(forKey: keepMacAwakeKey) as? Bool ?? false }
@@ -592,6 +592,9 @@ final class HostController: @unchecked Sendable {
         }
     }
 
+    /// The panel state to return to after a pause (videoQueue).
+    private var streamingState: State?
+
     /// Counts captures that stop again soon after a recovery (videoQueue).
     private var captureFailures = QuickFailureCounter(window: 2)
 
@@ -603,12 +606,14 @@ final class HostController: @unchecked Sendable {
         if state.displaysAsleep || state.systemAsleep {
             captureRestartPending = true
             Log.info("capture recovery waits for the displays to wake")
+            onState(.paused("Mac displays asleep"))
             return
         }
         do {
             try restartEncoding()
             captureFailures.recovered(at: ProcessInfo.processInfo.systemUptime)
             Log.info("capture recovered (attempt \(attempt + 1))")
+            if let streamingState { onState(streamingState) }
         } catch {
             guard attempt < 4 else {
                 Log.warn("capture could not be recovered: \(error)")
@@ -692,7 +697,7 @@ final class HostController: @unchecked Sendable {
         case pairingRejected
         var description: String {
             switch self {
-            case .notAuthenticated: return "client did not authenticate within 5 s (old app version?)"
+            case .notAuthenticated: return "iPad app not answering (in the background?)"
             case .pairingRejected: return "pairing with this iPad was not confirmed"
             case .notListening: return "client not listening"
             case .noHello: return "client did not send hello (pairing not confirmed on the iPad?)"
@@ -914,8 +919,7 @@ final class HostController: @unchecked Sendable {
         sessionIdentity.withLock { $0 = (name, identity.modelName) }
         Log.info("iPad identity: model \(identity.productType ?? "unknown") (\(identity.modelName ?? "-"))")
 
-        // Stay awake while the iPad is connected, as the user chose (General
-        // tab): the displays, the Mac, or neither. Released when the session ends.
+        // Idle-sleep assertions as chosen in the General tab, released when the session ends.
         awake.withLock { $0.session = name }
         updateAwakeAssertions()
         defer {
@@ -999,7 +1003,9 @@ final class HostController: @unchecked Sendable {
             throw error
         }
         let codec = pipeline.config.codec
-        onState(.streaming("\(hello.deviceName) · \(config.pixelWidth)×\(config.pixelHeight) \(codec)"))
+        let streaming = State.streaming("\(hello.deviceName) · \(config.pixelWidth)×\(config.pixelHeight) \(codec)")
+        streamingState = streaming
+        onState(streaming)
         let streamed = pipeline.config
         sessionStatus.withLock {
             $0.iPadName = sessionIdentity.withLock { $0?.name } ?? hello.deviceName
@@ -1128,11 +1134,8 @@ final class HostController: @unchecked Sendable {
     /// (mirroring another display), or `--own-downscale off`, the panel size.
     private static func captureSize(for pipeline: VideoPipeline, wantsBGRA: Bool) -> CGSize {
         let panel = CGSize(width: Int(pipeline.config.pixelWidth), height: Int(pipeline.config.pixelHeight))
-        guard VideoEncoder.ownDownscale, wantsBGRA, let mode = CGDisplayCopyDisplayMode(pipeline.captureID) else { return panel }
-        let source = CGSize(width: mode.pixelWidth, height: mode.pixelHeight)
-        guard source.width > panel.width, source.height > panel.height, source.width <= 8192, source.height <= 8192,
-              abs(source.width / source.height - panel.width / panel.height) < 0.005 else { return panel }
-        return source
+        let framebuffer = CGDisplayCopyDisplayMode(pipeline.captureID).map { CGSize(width: $0.pixelWidth, height: $0.pixelHeight) }
+        return CaptureSizing.size(panel: panel, framebuffer: framebuffer, ownDownscale: VideoEncoder.ownDownscale, wantsBGRA: wantsBGRA)
     }
 
     /// The "looks like" space the user last chose for each iPad (System
@@ -1158,10 +1161,8 @@ final class HostController: @unchecked Sendable {
     }
 
     private static func displaySpace(for config: StreamConfig, hiDPI: Bool) -> VirtualDisplayController.Space? {
-        let sizes = VirtualDisplayController.modeSizes(panelWidth: config.pixelWidth, panelHeight: config.pixelHeight,
-                                                       hiDPI: hiDPI)
-        let points = CGSize(width: Int(config.pointWidth), height: Int(config.pointHeight))
-        return VirtualDisplayController.Space.allCases.first { sizes[$0] == points }
+        DisplaySpace.matching(points: CGSize(width: Int(config.pointWidth), height: Int(config.pointHeight)),
+                              panelWidth: config.pixelWidth, panelHeight: config.pixelHeight, hiDPI: hiDPI)
     }
 
     /// Quality switch: new encoder and capture on the same display. The iPad
@@ -1183,6 +1184,7 @@ final class HostController: @unchecked Sendable {
         // Recovery state belongs to this session only.
         captureRestartPending = false
         captureFailures.reset()
+        streamingState = nil
         queue.sync {
             injector?.releaseAll()
             injector = nil

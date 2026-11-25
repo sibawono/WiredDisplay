@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import WDHostCore
 
 // The menu bar panel (popover): an icon tab bar over cards, in the style of
 // modern menu bar utilities. Pure views over a snapshot, so it can be
@@ -113,10 +114,8 @@ struct StatusPanelView: View {
             header
             tabBar
             VStack(alignment: .leading, spacing: 6) {
-                Text(model.tab.title.uppercased())
-                    .font(.system(size: 11, weight: .semibold))
-                    .tracking(0.6)
-                    .foregroundStyle(.secondary)
+                Text(model.tab.title) // bold 15 pt counts as large text (3:1) on the glass
+                    .font(.system(size: 15, weight: .bold))
                     .padding(.leading, 4)
                 content
             }
@@ -138,15 +137,15 @@ struct StatusPanelView: View {
                 Text("WiredDisplay").font(.system(size: 13, weight: .semibold))
                 HStack(spacing: 6) {
                     Circle().fill(s.stateColor).frame(width: 7, height: 7)
-                    Text(s.stateText).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+                    Text(s.stateText).font(.system(size: 12)).foregroundStyle(Color.caption).lineLimit(1)
                 }
                 if let connectedFor = s.connectedFor {
-                    Text(connectedFor).font(.system(size: 11)).foregroundStyle(.tertiary)
+                    Text(connectedFor).font(.system(size: 11)).foregroundStyle(Color.caption)
                     .fixedSize(horizontal: false, vertical: true)
                 }
                 if !s.otherIPads.isEmpty {
                     Text("Also: " + s.otherIPads.joined(separator: ", ") + " · settings apply to all")
-                        .font(.system(size: 11)).foregroundStyle(.tertiary)
+                        .font(.system(size: 11)).foregroundStyle(Color.caption)
                     .fixedSize(horizontal: false, vertical: true).lineLimit(1)
                 }
             }
@@ -222,7 +221,7 @@ struct StatusPanelView: View {
                     .frame(maxWidth: .infinity)
                     .accessibilityLabel("Display space")
                     if s.displaySpaceError {
-                        Text("Couldn’t change display space.").font(.system(size: 11)).foregroundStyle(.secondary)
+                        Text("Couldn’t change display space.").font(.system(size: 11)).foregroundStyle(Color.caption)
                     }
                     if let encoding = s.encoding {
                         CardDivider()
@@ -247,7 +246,7 @@ struct StatusPanelView: View {
                     }
                     Text(s.brightness == nil ? "Available while an iPad is connected"
                          : "Real iPad backlight · the brightness keys work too")
-                        .font(.system(size: 11)).foregroundStyle(.tertiary)
+                        .font(.system(size: 11)).foregroundStyle(Color.caption)
                     .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -263,7 +262,7 @@ struct StatusPanelView: View {
                                 controlSize: .regular, fontSize: 11)
                     .frame(maxWidth: .infinity)
                 if let quality = s.quality {
-                    Text("\(quality.formatTitle) · \(quality.detail)").font(.system(size: 10.5)).foregroundStyle(.secondary)
+                    Text("\(quality.formatTitle) · \(quality.detail)").font(.system(size: 10.5)).foregroundStyle(Color.caption)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -303,7 +302,7 @@ struct StatusPanelView: View {
                 ShortcutLine(keys: "⌃ ⇧ 3 / 4 / 5", mac: "⌘ ⇧ 3 / 4 / 5", what: "Screenshot")
                 ShortcutLine(keys: "⌃ ↑  ⌃ ← →", mac: nil, what: "Mission Control · Spaces")
                 Text("Pinch and rotate work on the touch screen and the trackpad.")
-                    .font(.system(size: 11)).foregroundStyle(.tertiary)
+                    .font(.system(size: 11)).foregroundStyle(Color.caption)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -318,7 +317,7 @@ struct StatusPanelView: View {
                 StatusLine(symbol: s.microphone ? "mic.fill" : "mic.slash", title: "iPad microphone",
                            detail: "Input device “iPad Microphone”", on: s.microphone)
                 Text("Turn these on or off in the WiredDisplay app on the iPad.")
-                    .font(.system(size: 11)).foregroundStyle(.tertiary)
+                    .font(.system(size: 11)).foregroundStyle(Color.caption)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Card {
@@ -347,7 +346,7 @@ struct StatusPanelView: View {
                     Text("Connection code").font(.system(size: 11, weight: .semibold))
                     Text(code).font(.system(size: 22, weight: .semibold, design: .rounded)).monospacedDigit()
                     Text("Matches the code on the iPad: this session is encrypted end to end.")
-                        .font(.system(size: 11)).foregroundStyle(.tertiary)
+                        .font(.system(size: 11)).foregroundStyle(Color.caption)
                     .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -355,7 +354,7 @@ struct StatusPanelView: View {
                 Text("Paired iPads").font(.system(size: 11, weight: .semibold))
                 if s.paired.isEmpty {
                     Text("None yet. The next iPad that connects pairs automatically.")
-                        .font(.system(size: 12)).foregroundStyle(.secondary)
+                        .font(.system(size: 12)).foregroundStyle(Color.caption)
                 } else {
                     ForEach(s.paired) { peer in
                         InfoLine(symbol: "ipad.landscape", title: peer.name, detail: peer.detail)
@@ -401,16 +400,19 @@ struct StatusPanelView: View {
                            detail: s.loginNeedsApproval ? "Approve WiredDisplay in Login Items" : "The iPad shows the Mac right after a restart",
                            isOn: Binding(get: { s.openAtLogin },
                                          set: { model.snapshot.openAtLogin = $0; model.actions.setOpenAtLogin($0) }))
+                CardDivider()
+                Text("WiredDisplay \(s.version)").font(.system(size: 11)).foregroundStyle(Color.caption)
             }
-            Text("WiredDisplay \(s.version)")
-                .font(.system(size: 11)).foregroundStyle(.tertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity)
         }
     }
 }
 
 // MARK: building blocks
+
+extension Color {
+    /// Secondary text on the section cards: measured at least 4.5:1 in light and dark.
+    static let caption = Color.primary.opacity(0.82)
+}
 
 private struct Card<Content: View>: View {
     @ViewBuilder var content: Content
@@ -437,7 +439,7 @@ private struct InfoLine: View {
             Image(systemName: symbol).foregroundStyle(.secondary).frame(width: 18)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).font(.system(size: 12))
-                if let detail { Text(detail).font(.system(size: 10.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
+                if let detail { Text(detail).font(.system(size: 10.5)).foregroundStyle(Color.caption).fixedSize(horizontal: false, vertical: true) }
             }
             Spacer(minLength: 0)
         }
@@ -455,7 +457,7 @@ private struct StatusLine: View {
             Image(systemName: symbol).foregroundStyle(on ? Color.accentColor : .secondary).frame(width: 18)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).font(.system(size: 12))
-                Text(detail).font(.system(size: 10.5)).foregroundStyle(.secondary)
+                Text(detail).font(.system(size: 10.5)).foregroundStyle(Color.caption)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 8)
@@ -477,7 +479,7 @@ private struct ToggleLine: View {
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).font(.system(size: 12))
-                Text(detail).font(.system(size: 10.5)).foregroundStyle(.secondary)
+                Text(detail).font(.system(size: 10.5)).foregroundStyle(Color.caption)
                     .fixedSize(horizontal: false, vertical: true) // always wraps, never truncates
             }
             Spacer(minLength: 8)
@@ -504,7 +506,7 @@ private struct PermissionLine: View {
                 .foregroundStyle(granted ? Color.green : .orange).frame(width: 18)
             VStack(alignment: .leading, spacing: 2) {
                 Text(name).font(.system(size: 12))
-                Text(purpose).font(.system(size: 10.5)).foregroundStyle(.secondary)
+                Text(purpose).font(.system(size: 10.5)).foregroundStyle(Color.caption)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 8)
@@ -523,7 +525,7 @@ private struct WarningLine: View {
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange).frame(width: 18)
-            Text(text).font(.system(size: 12)).foregroundStyle(.secondary)
+            Text(text).font(.system(size: 12)).foregroundStyle(Color.caption)
             Spacer(minLength: 8)
             Button(button, action: action).controlSize(.small).buttonStyle(.bordered)
         }
@@ -542,11 +544,11 @@ private struct ShortcutLine: View {
                 .padding(.horizontal, 8).padding(.vertical, 3)
                 .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Color(nsColor: .tertiarySystemFill)))
             if let mac {
-                Image(systemName: "arrow.right").font(.system(size: 9)).foregroundStyle(.tertiary)
-                Text(mac).font(.system(size: 11, design: .rounded)).foregroundStyle(.secondary)
+                Image(systemName: "arrow.right").font(.system(size: 9)).foregroundStyle(Color.caption)
+                Text(mac).font(.system(size: 11, design: .rounded)).foregroundStyle(Color.caption)
             }
             Spacer(minLength: 8)
-            Text(what).font(.system(size: 12)).foregroundStyle(.secondary)
+            Text(what).font(.system(size: 12)).foregroundStyle(Color.caption)
         }
     }
 }
@@ -590,12 +592,12 @@ extension QualityPreset {
     var symbol: String {
         switch self {
         case .balanced: return "circle.lefthalf.filled"
-        case .pro: return "bolt.fill"
-        case .ultra: return "sparkles"
+        case .pro: return "bolt.fill" // lowest latency
+        case .ultra: return "square.grid.3x3.fill" // every pixel keeps its own colour sample
         case .highColor: return "paintpalette.fill"
         }
     }
-    var shortTitle: String { title.components(separatedBy: " — ").first ?? title }
+    var shortTitle: String { title }
     var formatTitle: String {
         switch self {
         case .balanced: return "Hybrid · 10-bit"

@@ -561,10 +561,8 @@ final class ClientSession: @unchecked Sendable {
             renderer.flush(removingImage: false)
             if !unit.isKeyframe { format = nil }
         }
-        // The decoder fell behind and frames were dropped (issue #1): resume
-        // at a keyframe. If it keeps happening, this iPad cannot decode the
-        // format fast enough; ask the Mac for a lighter one (no 4:4:4, then
-        // 8-bit), as for a decode failure (D-031).
+        // Frames were dropped because the decoder fell behind: resume at a keyframe.
+        // Repeated stalls count as decode failures, so the Mac steps down (D-031).
         let backlog = renderer.takeBacklogEvents()
         if backlog.keyframeWanted { requestKeyframe(on: current) }
         if backlog.stalls > 0 {
@@ -582,7 +580,7 @@ final class ClientSession: @unchecked Sendable {
         do {
             let time = CMTime(value: CMTimeValue(timestamp), timescale: 1_000_000_000)
             let sample = try SampleBuffers.sampleBuffer(for: unit, format: format, presentationTime: time)
-            if timestamp % 30 == 0, let offset = clockOffset {
+            if timestamp % 300 == 0, let offset = clockOffset { // about one sample every 5 s at 60 Hz
                 let hostNow = Int64(bitPattern: clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) &+ offset
                 let transit = Double(hostNow &- Int64(bitPattern: timestamp)) / 1e6
                 CMSetAttachment(sample, key: "WiredDisplayTransitMS" as CFString,

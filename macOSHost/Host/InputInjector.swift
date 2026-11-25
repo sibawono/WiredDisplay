@@ -3,6 +3,7 @@ import ApplicationServices
 import CoreGraphics
 import Foundation
 import IOKit.pwr_mgt
+import WDHostCore
 import WDSession
 
 /// Turns validated client input into CGEvents on one display (R-INP-01).
@@ -107,19 +108,15 @@ final class InputInjector {
                 Log.info("INPUT limited: Mac \(state); only pointer moves pass until it is unlocked and awake")
             }
             releaseAll()
-            guard !state.systemAsleep, state.sessionActive else { return }
-            switch event {
-            case .pointer(.move, _, let x, let y):
-                guard withinRateLimit(), let bounds = liveBounds() else { return }
+            switch InputGate.decision(for: event, state: state) {
+            case .moveOnly:
+                guard case .pointer(_, _, let x, let y) = event, withinRateLimit(), let bounds = liveBounds() else { return }
                 lastPoint = clamp(CGPoint(x: bounds.minX + CGFloat(x) * bounds.width,
                                           y: bounds.minY + CGFloat(y) * bounds.height), to: bounds)
                 post(.mouseMoved, at: lastPoint!, button: .none, clickState: 0)
-            case .pointer(.down, _, _, _), .key(_, true), .scroll, .gestureScroll(_, _, .began, _):
-                // A tap, a click or a key on the iPad wakes the displays or
-                // ends the screensaver, like the Mac's own keyboard and mouse,
-                // but is itself dropped: nothing is clicked or typed.
+            case .wakeAndDrop:
                 wakeDisplays()
-            default:
+            case .drop, .inject:
                 break
             }
             return
@@ -176,9 +173,8 @@ final class InputInjector {
     private var userActivity = IOPMAssertionID(0)
     private var lastWake = 0.0
 
-    /// Tells macOS there is user activity (displays wake, the idle timer
-    /// restarts), then nudges the pointer by one point and back so a running
-    /// screensaver ends too. At most twice a second.
+    /// Declared user activity wakes the displays; the one-point pointer nudge also ends a
+    /// screensaver. At most twice a second.
     private func wakeDisplays() {
         let now = ProcessInfo.processInfo.systemUptime
         guard now - lastWake >= 0.5 else { return }

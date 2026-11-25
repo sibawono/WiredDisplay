@@ -1,6 +1,7 @@
 import CVirtualDisplay
 import CoreGraphics
 import Foundation
+import WDHostCore
 import WDSession
 
 /// Owns the virtual display for one session. It never changes the main display
@@ -25,39 +26,10 @@ final class VirtualDisplayController {
 
     var displayID: CGDirectDisplayID? { handle.map(\.displayID) }
 
-    /// "Looks like" sizes offered in System Settings › Displays. `native` is
-    /// the panel at @2x; `more` and `most` give more space (UI scaled down on
-    /// the iPad, like "More Space" on a Mac laptop). The panel is still
-    /// streamed at its native pixels, so text stays as sharp as the scale allows.
-    enum Space: String, CaseIterable, Sendable {
-        case native, more, most
-        var title: String {
-            switch self {
-            case .native: return "Default"
-            case .more: return "More Space"
-            case .most: return "Most Space"
-            }
-        }
+    typealias Space = DisplaySpace
 
-        var factor: Double {
-            switch self {
-            case .native: return 1
-            case .more: return 1.125
-            case .most: return 1.25
-            }
-        }
-    }
-
-    /// Point sizes for every `Space`, even sides, same aspect as the panel.
     static func modeSizes(panelWidth: UInt32, panelHeight: UInt32, hiDPI: Bool) -> [Space: CGSize] {
-        let divisor = hiDPI ? 2.0 : 1.0
-        var sizes: [Space: CGSize] = [:]
-        for space in Space.allCases {
-            let width = (Double(panelWidth) / divisor * space.factor / 2).rounded() * 2
-            let height = (width * Double(panelHeight) / Double(panelWidth) / 2).rounded() * 2
-            sizes[space] = CGSize(width: width, height: height)
-        }
-        return sizes
+        DisplaySpace.modeSizes(panelWidth: panelWidth, panelHeight: panelHeight, hiDPI: hiDPI)
     }
 
     /// Creates a display matching the client's panel. Pixel dimensions are
@@ -112,9 +84,10 @@ final class VirtualDisplayController {
                             pointHeight: UInt32(points.height), refreshHz: UInt16(refreshHz), codec: .h264)
     }
 
+    /// Only ever called with WiredDisplay's own virtual display. It may be the
+    /// main display when it is the Mac's only screen (D-043); a mirrored one is not changed.
     static func canChangeSpace(on displayID: CGDirectDisplayID) -> Bool {
-        CGDisplayIsOnline(displayID) != 0 && displayID != CGMainDisplayID() &&
-            CGDisplayIsInMirrorSet(displayID) == 0
+        CGDisplayIsOnline(displayID) != 0 && CGDisplayIsInMirrorSet(displayID) == 0
     }
 
     func setSpace(_ space: Space, config: StreamConfig, hiDPI: Bool) -> Bool {

@@ -6,6 +6,10 @@ import SwiftUI
 enum Brand {
     static let blue = Color(red: 0.12, green: 0.48, blue: 1.0)
     static let deep = Color(red: 0.04, green: 0.13, blue: 0.40)
+    /// Secondary text on the app's dark surfaces; the system style measured 3.6:1 there.
+    static let secondaryText = Color.white.opacity(0.7)
+    /// Filled buttons with white text: Brand.blue gave 3.2:1 under white text.
+    static let action = Color(red: 0.04, green: 0.33, blue: 0.80)
     static let tile = LinearGradient(colors: [Color(red: 0.35, green: 0.72, blue: 1.0), blue, Color(red: 0.04, green: 0.32, blue: 0.88)],
                                      startPoint: .top, endPoint: .bottom)
 }
@@ -13,12 +17,8 @@ enum Brand {
 /// Dark backdrop behind every non-streaming screen.
 struct Backdrop: View {
     var body: some View {
-        ZStack {
-            LinearGradient(colors: [Color(red: 0.03, green: 0.05, blue: 0.12), .black], startPoint: .top, endPoint: .bottom)
-            RadialGradient(colors: [Brand.blue.opacity(0.28), .clear], center: .init(x: 0.5, y: 0.3),
-                           startRadius: 0, endRadius: 520)
-        }
-        .ignoresSafeArea()
+        LinearGradient(colors: [Color(red: 0.03, green: 0.05, blue: 0.12), .black], startPoint: .top, endPoint: .bottom)
+            .ignoresSafeArea()
     }
 }
 
@@ -108,7 +108,7 @@ struct StatusScreen: View {
             case .connecting, .starting:
                 ProgressView().controlSize(.small).tint(.white)
             case .waitingForMac:
-                PulsingDot()
+                WaitingDot()
             }
             Text(headline)
                 .font(.title3.weight(.medium))
@@ -136,7 +136,7 @@ struct StatusScreen: View {
         let connecting = info.stage == .connecting
         return VStack(alignment: .leading, spacing: 0) {
             StepRow(number: 1, symbol: "cable.connector", title: "Connect the USB‑C cable",
-                    detail: "Wired only — Wi‑Fi is never used.", done: connecting)
+                    detail: "Wired only. Wi‑Fi is never used.", done: connecting)
             Divider().overlay(.white.opacity(0.08)).padding(.leading, 64)
             StepRow(number: 2, symbol: "menubar.rectangle", title: "Start WiredDisplay on the Mac",
                     detail: "It lives in the menu bar and opens at login.", done: connecting)
@@ -205,13 +205,10 @@ private struct StepRow: View {
     }
 }
 
-private struct PulsingDot: View {
-    @State private var on = false
+private struct WaitingDot: View {
     var body: some View {
         Circle().fill(Brand.blue)
             .frame(width: 10, height: 10)
-            .overlay(Circle().stroke(Brand.blue.opacity(0.5), lineWidth: 2).scaleEffect(on ? 2.2 : 1).opacity(on ? 0 : 1))
-            .onAppear { withAnimation(.easeOut(duration: 1.4).repeatForever(autoreverses: false)) { on = true } }
             .accessibilityHidden(true)
     }
 }
@@ -251,7 +248,7 @@ struct PairingScreen: View {
                 Button { answer(true) } label: {
                     Text("Pair").fontWeight(.semibold).frame(maxWidth: .infinity)
                 }
-                .buttonStyle(FilledButtonStyle(fill: Brand.blue))
+                .buttonStyle(FilledButtonStyle(fill: Brand.action))
                 .keyboardShortcut(.defaultAction)
             }
             .frame(maxWidth: 440)
@@ -357,7 +354,7 @@ struct ControlsContent: View {
                     ToggleRow(symbol: "speaker.wave.2.fill", title: "Mac audio on this iPad", detail: nil, isOn: $speaker)
                     ToggleRow(symbol: "mic.fill", title: "iPad microphone to Mac", detail: nil, isOn: $microphone)
                     if microphone {
-                        Label("Live — choose “iPad Microphone” on the Mac", systemImage: "waveform")
+                        Label("Live: choose “iPad Microphone” on the Mac", systemImage: "waveform")
                             .font(.footnote.weight(.medium))
                             .foregroundStyle(.orange)
                             .padding(.leading, 38)
@@ -382,27 +379,27 @@ struct ControlsContent: View {
                     }
                     .tint(.primary)
                     Text("Touch, keyboard and trackpad need “Allow input” in the Mac’s WiredDisplay menu.")
-                        .font(.footnote).foregroundStyle(.secondary)
+                        .font(.footnote).foregroundStyle(Brand.secondaryText)
                 }
                 section("Keyboard & trackpad") {
                     DisclosureGroup(isExpanded: $showShortcuts) {
                         VStack(alignment: .leading, spacing: 10) {
                             Text("iPadOS keeps these for itself, so use Control instead of Command:")
-                                .font(.footnote).foregroundStyle(.secondary)
+                                .font(.footnote).foregroundStyle(Brand.secondaryText)
                             ShortcutRow(keys: "⌃ Tab", mac: "⌘ Tab", action: "Switch apps")
                             ShortcutRow(keys: "⌃ ⇧ Tab", mac: "⌘ ⇧ Tab", action: "Switch back")
                             ShortcutRow(keys: "⌃ `", mac: "⌘ `", action: "App windows")
                             ShortcutRow(keys: "⌃ Space", mac: "⌘ Space", action: "Spotlight")
                             ShortcutRow(keys: "⌃ ⇧ 3 · 4 · 5", mac: "⌘ ⇧ 3 · 4 · 5", action: "Screenshot")
                             Text("Hold ⌃ and press Tab again to move through apps, like ⌘ Tab on a Mac. All other shortcuts (⌘ C, ⌘ V, ⌘ W …) go to the Mac as they are.")
-                                .font(.footnote).foregroundStyle(.secondary)
+                                .font(.footnote).foregroundStyle(Brand.secondaryText)
                             Divider().padding(.vertical, 2)
                             GestureRow(symbol: "rectangle.and.hand.point.up.left", gesture: "Two-finger scroll", action: "Scroll")
                             GestureRow(symbol: "cursorarrow.click.2", gesture: "Two-finger click", action: "Right click")
                             GestureRow(symbol: "arrow.up.left.and.arrow.down.right", gesture: "Pinch", action: "Zoom")
                             GestureRow(symbol: "arrow.clockwise", gesture: "Rotate", action: "Rotate")
                             Text("Three- and four-finger swipes stay with iPadOS. Use ⌃ ↑ for Mission Control and ⌃ ← / → for Spaces.")
-                                .font(.footnote).foregroundStyle(.secondary)
+                                .font(.footnote).foregroundStyle(Brand.secondaryText)
                         }
                         .padding(.top, 10)
                     } label: {
@@ -441,7 +438,7 @@ struct ControlsContent: View {
                         .fontWeight(.semibold)
                         .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(FilledButtonStyle(fill: Brand.blue))
+                .buttonStyle(FilledButtonStyle(fill: Brand.action))
             }
             .padding(20)
         }
@@ -464,9 +461,9 @@ struct ControlsContent: View {
 
     private func section<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(title.uppercased())
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
+            Text(title)
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(Brand.secondaryText)
                 .padding(.leading, 4)
             VStack(alignment: .leading, spacing: 12) { content() }
                 .padding(14)
@@ -503,10 +500,10 @@ private struct InfoRow: View {
                 .frame(width: 26)
             Text(title)
                 .font(secondary ? .subheadline : .body)
-                .foregroundStyle(secondary ? .secondary : .primary)
+                .foregroundStyle(secondary ? Brand.secondaryText : Color.primary)
             Spacer(minLength: 8)
             if let value {
-                Text(value).font(.subheadline.monospacedDigit()).foregroundStyle(.secondary)
+                Text(value).font(.subheadline.monospacedDigit()).foregroundStyle(Brand.secondaryText)
             }
         }
     }
@@ -526,7 +523,7 @@ private struct ToggleRow: View {
                     .frame(width: 26)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title)
-                    if let detail { Text(detail).font(.footnote).foregroundStyle(.secondary) }
+                    if let detail { Text(detail).font(.footnote).foregroundStyle(Brand.secondaryText) }
                 }
             }
         }
@@ -547,7 +544,7 @@ private struct GestureRow: View {
                 .frame(width: 26)
             Text(gesture).font(.subheadline)
             Spacer(minLength: 8)
-            Text(action).font(.subheadline.weight(.medium)).foregroundStyle(Brand.blue)
+            Text(action).font(.subheadline.weight(.medium))
         }
     }
 }
@@ -562,10 +559,10 @@ private struct ShortcutRow: View {
             Text(keys).font(.subheadline.monospaced().weight(.semibold))
                 .padding(.horizontal, 8).padding(.vertical, 3)
                 .background(.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
-            Image(systemName: "arrow.right").font(.caption).foregroundStyle(.secondary)
-            Text(mac).font(.subheadline.monospaced()).foregroundStyle(.secondary)
+            Image(systemName: "arrow.right").font(.caption).foregroundStyle(Brand.secondaryText)
+            Text(mac).font(.subheadline.monospaced()).foregroundStyle(Brand.secondaryText)
             Spacer(minLength: 8)
-            Text(action).font(.subheadline.weight(.medium)).foregroundStyle(Brand.blue)
+            Text(action).font(.subheadline.weight(.medium))
         }
     }
 }
@@ -594,7 +591,11 @@ struct BrightnessHUD: View {
 
 /// The small round button that opens the controls; faint while streaming.
 struct ControlsButton: View {
+    /// The button with its padding, for placing it.
+    static let footprint: CGFloat = 76
     let streaming: Bool
+    /// Untouched for a while during streaming: nearly invisible, still tappable in place.
+    var resting = false
     let action: () -> Void
 
     var body: some View {
@@ -605,7 +606,7 @@ struct ControlsButton: View {
                 .frame(width: 44, height: 44)
                 .background(.black.opacity(streaming ? 0.25 : 0.45), in: Circle())
                 .overlay(Circle().strokeBorder(.white.opacity(0.15)))
-                .opacity(streaming ? 0.45 : 1)
+                .opacity(!streaming ? 1 : resting ? 0.12 : 0.45)
         }
         .buttonStyle(.plain)
         .padding(16)

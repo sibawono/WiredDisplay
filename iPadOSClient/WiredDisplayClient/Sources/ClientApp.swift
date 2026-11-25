@@ -31,8 +31,24 @@ final class AppModel {
     /// (e.g. `xcrun devicectl device process launch … -- -diagnosticEcho YES`).
     private var echoEnabled: Bool { UserDefaults.standard.bool(forKey: "diagnosticEcho") }
 
+    private var inBackground = false
+    /// What the user turned on; a failed start clears `audio`'s state but not this.
+    private var wantedAudio = (speaker: false, microphone: false)
+
+    /// In the background the session lives only as long as audio does.
+    private func audioInterrupted(began: Bool) {
+        guard inBackground, audio.isActive else { return }
+        if began {
+            session?.stop(reason: "audio interrupted in the background")
+        } else {
+            session?.start()
+        }
+    }
+
     func activate() {
         ClientLog.write("app active")
+        inBackground = false
+        videoView.isHidden = false
         if session == nil {
             let sink = SwitchableSink(standard: DisplayLayerSink(videoView.displayLayer.sampleBufferRenderer),
                                       metal: videoView.metalRenderer)
@@ -49,6 +65,19 @@ final class AppModel {
                 connection.speakerOn = speaker
                 connection.microphoneOn = microphone
                 session?.setAudioRoute(speaker: speaker, microphone: microphone)
+                // Without audio iPadOS suspends the app; an open listener would then accept and never answer.
+                if inBackground, !speaker, !microphone { session?.stop(reason: "audio stopped in the background") }
+            }
+            // iPadOS snapshots the app for the switcher right after this; hide the Mac desktop first.
+            NotificationCenter.default.addObserver(forName: UIScene.didEnterBackgroundNotification, object: nil,
+                                                   queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.videoView.isHidden = true }
+            }
+            NotificationCenter.default.addObserver(forName: AVAudioSession.interruptionNotification, object: nil,
+                                                   queue: .main) { [weak self] note in
+                let began = (note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt)
+                    == AVAudioSession.InterruptionType.began.rawValue
+                MainActor.assumeIsolated { self?.audioInterrupted(began: began) }
             }
             session.onBrightness = { [weak self] value in self?.applyBrightness(value) }
             videoView.onShapeChange = { [weak self] portrait in self?.viewShapeChanged(portrait: portrait) }
@@ -64,6 +93,9 @@ final class AppModel {
             self.session = session
             // Mac audio on the iPad speaker is on by default; the microphone is not.
             setAudio(speaker: true, microphone: false)
+        } else if !audio.isActive, wantedAudio.speaker || wantedAudio.microphone {
+            // Audio that failed while away (another app held the audio session) comes back with the app.
+            setAudio(speaker: wantedAudio.speaker, microphone: wantedAudio.microphone)
         }
         session?.setVideoActive(true)
         reportBrightness()
@@ -78,6 +110,7 @@ final class AppModel {
         ClientLog.write("app leaving foreground: \(reason) (audio active \(audio.isActive))")
         if echoEnabled { echo.stop(reason: "app not active") }
         session?.send(.releaseAll)
+        inBackground = true
         if audio.isActive {
             session?.setVideoActive(false)
         } else {
@@ -118,6 +151,7 @@ final class AppModel {
     }
 
     func setAudio(speaker: Bool, microphone: Bool) {
+        wantedAudio = (speaker, microphone)
         connection.speakerOn = speaker
         connection.microphoneOn = microphone
         // The route is sent from onStateChange once audio really runs (or fails).
@@ -261,16 +295,102 @@ struct RootView: View {
                     .allowsHitTesting(false)
             }
 
-            ControlsButton(streaming: connection.phase == .streaming) { showControls.toggle() }
-                .popover(isPresented: $showControls) {
-                    ControlsPanel(app: app, connection: connection)
-                }
+            GeometryReader { space in
+                movableControls(in: space.size)
+            }
         }
         .background(.black)
         .statusBarHidden(true)
         .persistentSystemOverlays(.hidden)
         .defersSystemGestures(on: .all)
         .preferredColorScheme(.dark)
+    }
+
+    /// Where the controls button sits: left or right edge (0 or 1) and height (0...1), remembered.
+    @AppStorage("controlsEdgeX") private var controlsX = 1.0
+    @AppStorage("controlsEdgeY") private var controlsY = 0.0
+    @State private var controlsDrag = CGSize.zero
+    @State private var controlsResting = false
+    @State private var controlsTouched = 0
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// The button can be dragged anywhere and settles on the nearer side edge, so it can
+    /// sit where it covers nothing the user is working on. A tap still opens the panel.
+    private func movableControls(in space: CGSize) -> some View {
+        let button = ControlsButton.footprint
+        let range = CGSize(width: max(space.width - button, 0), height: max(space.height - button, 0))
+        let origin = CGPoint(x: controlsX * range.width + controlsDrag.width, y: controlsY * range.height + controlsDrag.height)
+        return ZStack(alignment: .topLeading) {
+            if showControls {
+                Color.black.opacity(0.25)
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture { showControls = false }
+                    .accessibilityHidden(true)
+                    .transition(.opacity)
+                controlsPanel(in: space, buttonY: origin.y)
+            }
+            ControlsButton(streaming: connection.phase == .streaming, resting: controlsResting) {
+                controlsTouched += 1
+                showControls.toggle()
+            }
+            .offset(x: origin.x, y: origin.y)
+            .highPriorityGesture(
+                DragGesture(minimumDistance: 8)
+                    .onChanged {
+                        controlsDrag = $0.translation
+                        controlsResting = false
+                    }
+                    .onEnded { drag in
+                        let x = controlsX * range.width + drag.translation.width
+                        let y = controlsY * range.height + drag.translation.height
+                        withAnimation(reduceMotion ? nil : .snappy(duration: 0.25)) {
+                            controlsX = x + button / 2 < space.width / 2 ? 0 : 1
+                            controlsY = range.height > 0 ? min(max(y / range.height, 0), 1) : 0
+                            controlsDrag = .zero
+                        }
+                        controlsTouched += 1
+                    })
+            // Fades out 4 s after the last touch while streaming and the panel is closed.
+            .task(id: "\(controlsTouched) \(showControls) \(connection.phase == .streaming)") {
+                controlsResting = false
+                guard connection.phase == .streaming, !showControls, !voiceOver else { return }
+                try? await Task.sleep(for: .seconds(4))
+                guard !Task.isCancelled else { return }
+                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.6)) { controlsResting = true }
+            }
+            .accessibilityAction(named: "Move to the other side") { controlsX = controlsX < 0.5 ? 1 : 0 }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .animation(reduceMotion ? nil : .snappy(duration: 0.22), value: showControls)
+    }
+
+    /// The panel opens beside the button, on its side, and always fits on screen with a margin.
+    /// It replaces the system popover, whose glass arrow and bottom edge clipped at the screen edge.
+    private func controlsPanel(in space: CGSize, buttonY: CGFloat) -> some View {
+        let width: CGFloat = 400, margin: CGFloat = 16, button = ControlsButton.footprint
+        let height = max(min(700, space.height - 2 * margin), 0)
+        let onRight = controlsX >= 0.5
+        let x = min(max(onRight ? space.width - button - width : button, margin), max(space.width - width - margin, margin))
+        let y = min(max(buttonY + button / 2 - height / 2, margin), max(space.height - height - margin, margin))
+        let shape = RoundedRectangle(cornerRadius: 24, style: .continuous)
+        return ControlsPanel(app: app, connection: connection)
+            .frame(width: width, height: height)
+            .background(Color(red: 0.05, green: 0.07, blue: 0.12), in: shape)
+            .clipShape(shape)
+            .overlay(shape.strokeBorder(.white.opacity(0.08)))
+            .shadow(color: .black.opacity(0.4), radius: 24, y: 8)
+            .background {
+                // Escape on a hardware keyboard closes the panel.
+                Button("Close") { showControls = false }
+                    .keyboardShortcut(.cancelAction)
+                    .hidden()
+            }
+            .accessibilityAddTraits(.isModal)
+            .accessibilityAction(.escape) { showControls = false }
+            .offset(x: x, y: y)
+            .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: onRight ? .trailing : .leading)))
     }
 
     private var statusInfo: StatusInfo {

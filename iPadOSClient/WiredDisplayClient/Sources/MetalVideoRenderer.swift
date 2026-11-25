@@ -14,9 +14,7 @@ protocol VideoSink: AnyObject, Sendable {
     var failureDescription: String? { get }
     func enqueue(_ sample: CMSampleBuffer)
     func flush(removingImage: Bool)
-    /// Since the last call: whether frames were dropped because the decoder
-    /// fell behind (the session asks the Mac for a keyframe), and how many
-    /// separate stalls that was (issue #1).
+    /// Since the last call: whether the decoder fell behind and dropped frames, and how many stalls.
     func takeBacklogEvents() -> (keyframeWanted: Bool, stalls: Int)
 }
 
@@ -28,12 +26,47 @@ extension VideoSink {
 /// AVSampleBufferDisplayLayer's renderer, as before.
 final class DisplayLayerSink: VideoSink, @unchecked Sendable {
     let renderer: AVSampleBufferVideoRenderer
+    private let lock = NSLock()
+    private var waitingForKeyframe = false
+    private var keyframeWanted = false
     init(_ renderer: AVSampleBufferVideoRenderer) { self.renderer = renderer }
     var isFailed: Bool { renderer.status == .failed }
     var needsFlush: Bool { renderer.status == .failed || renderer.requiresFlushToResumeDecoding }
     var failureDescription: String? { renderer.error.map { "\($0)" } }
-    func enqueue(_ sample: CMSampleBuffer) { renderer.enqueue(sample) }
-    func flush(removingImage: Bool) { renderer.flush(removingDisplayedImage: removingImage, completionHandler: nil) }
+
+    func enqueue(_ sample: CMSampleBuffer) {
+        let isKeyframe = !MetalVideoRenderer.isNotSync(sample)
+        // A full layer queue means its decoder is behind: skip to the next keyframe instead of lagging.
+        let (send, flushFirst) = lock.withLock { () -> (Bool, Bool) in
+            if isKeyframe {
+                defer { waitingForKeyframe = false }
+                return (true, waitingForKeyframe)
+            }
+            if waitingForKeyframe || !renderer.isReadyForMoreMediaData {
+                if !waitingForKeyframe { ClientLog.write("display layer behind; skipping to the next keyframe") }
+                waitingForKeyframe = true
+                keyframeWanted = true
+                return (false, false)
+            }
+            return (true, false)
+        }
+        guard send else { return }
+        if flushFirst { renderer.flush(removingDisplayedImage: false, completionHandler: nil) }
+        renderer.enqueue(sample)
+    }
+
+    func flush(removingImage: Bool) {
+        lock.withLock { waitingForKeyframe = false; keyframeWanted = false }
+        renderer.flush(removingDisplayedImage: removingImage, completionHandler: nil)
+    }
+
+    /// No stall count: the layer's readiness flag is not proven as a step-down signal.
+    func takeBacklogEvents() -> (keyframeWanted: Bool, stalls: Int) {
+        lock.withLock {
+            defer { keyframeWanted = false }
+            return (keyframeWanted, 0)
+        }
+    }
 }
 
 /// Picks one of two sinks; switching asks the session for a keyframe so the
@@ -111,8 +144,7 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
     private var spare: [(format: CMFormatDescription, session: VTDecompressionSession)] = []
     private var failed: String?
     /// Frames waiting for the decoder, bounded (issue #1); under `lock`.
-    /// 6 frames = 100 ms at 60 Hz: one large 4:4:4 keyframe that decodes
-    /// slowly passes; only a decoder that stays behind trips it.
+    /// 6 frames = 100 ms at 60 Hz: one slow 4:4:4 keyframe passes, a decoder that stays behind does not.
     private var backlog = DecodeBacklog(limit: 6)
     /// Admission order; frames below `skipBelow` were overtaken by a keyframe
     /// while the decoder was behind and are skipped. Under `lock`.
@@ -239,8 +271,6 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
     func enqueue(_ sample: CMSampleBuffer) {
         let enqueued = CACurrentMediaTime()
         let isKeyframe = !Self.isNotSync(sample)
-        // At most a few frames wait for the decoder (issue #1): a decoder
-        // slower than the stream otherwise built a queue of seconds.
         let admitted: (generation: Int, token: Int)? = lock.withLock {
             let decision = backlog.admit(isKeyframe: isKeyframe)
             if case .drop(let overflow) = decision {
@@ -267,7 +297,7 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
         }
     }
 
-    private static func isNotSync(_ sample: CMSampleBuffer) -> Bool {
+    static func isNotSync(_ sample: CMSampleBuffer) -> Bool {
         guard let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: false)
                 as? [[CFString: Any]], let first = attachments.first else { return false }
         return (first[kCMSampleAttachmentKey_NotSync] as? Bool) ?? false

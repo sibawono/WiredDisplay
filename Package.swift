@@ -24,6 +24,8 @@ let package = Package(
         .target(name: "WDTransport", dependencies: ["WDProtocol", "WDSession"], path: "Shared/Transport"),
         // macOS CoreAudio helpers for the host and the audio probe.
         .target(name: "WDMacAudio", dependencies: ["WDSession"], path: "Shared/MacAudio"),
+        // The host's pure decisions (power gating, display sizes, capture size), unit-tested.
+        .target(name: "WDHostCore", dependencies: ["WDSession"], path: "Shared/HostCore"),
 
         // Private CGVirtualDisplay access, isolated in one Objective-C shim that
         // resolves every class and selector at runtime and fails closed.
@@ -33,7 +35,8 @@ let package = Package(
         // iPad input -> CGEvent. Packaged as an app by scripts/build-host-app.sh.
         .executableTarget(
             name: "WiredDisplayHost",
-            dependencies: ["WDProtocol", "WDSession", "WDVideo", "WDUsbmux", "WDGeometry", "WDTransport", "WDMacAudio", "CVirtualDisplay"],
+            dependencies: ["WDProtocol", "WDSession", "WDVideo", "WDUsbmux", "WDGeometry", "WDTransport", "WDMacAudio", "WDHostCore",
+                           "CVirtualDisplay"],
             path: "macOSHost/Host"
         ),
 
@@ -60,6 +63,7 @@ let package = Package(
         .testTarget(name: "CVirtualDisplayTests", dependencies: ["CVirtualDisplay"], path: "Tests/Unit/CVirtualDisplayTests"),
         .testTarget(name: "WDTransportTests", dependencies: ["WDTransport", "WDProtocol", "WDSession"], path: "Tests/Unit/WDTransportTests"),
         .testTarget(name: "WDGeometryTests", dependencies: ["WDGeometry"], path: "Tests/Unit/WDGeometryTests"),
+        .testTarget(name: "WDHostCoreTests", dependencies: ["WDHostCore", "WDSession"], path: "Tests/Unit/WDHostCoreTests"),
     ],
     swiftLanguageModes: [.v6]
 )

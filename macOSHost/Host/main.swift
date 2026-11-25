@@ -5,6 +5,7 @@ import CoreGraphics
 import ScreenCaptureKit
 import ServiceManagement
 import SwiftUI
+import WDHostCore
 import WDSession
 
 // WiredDisplay host: a menu-bar app (no Dock icon). Run it as an app bundle
@@ -206,6 +207,7 @@ final class StatusMenu: NSObject {
         var s = PanelSnapshot()
         switch state {
         case .streaming: (s.stateText, s.stateColor) = ("Streaming to \(status.iPadName ?? "iPad")", .green)
+        case .paused(let why): (s.stateText, s.stateColor) = ("Paused: \(why)", .orange)
         case .waitingForDevice: (s.stateText, s.stateColor) = ("Waiting for the iPad on USB", .orange)
         case .connecting: (s.stateText, s.stateColor) = ("Connecting…", .orange)
         case .pairing(let code): (s.stateText, s.stateColor) = ("Pairing: confirm code \(code)", .blue)

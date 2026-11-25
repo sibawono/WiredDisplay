@@ -124,6 +124,9 @@ Magic Keyboard & trackpad di iPad
   Ctrl+Shift+Tab, Ctrl+` , Ctrl+Space = Spotlight, Ctrl+Shift+3/4/5 = screenshot
 - Ctrl+↑ = Mission Control, Ctrl+←/→ = pindah Space.
 - Daftar lengkap ada di app iPad: tombol Controls › Keyboard & trackpad.
+- Tombol Controls (ikon slider) bisa digeser ke tepi kiri atau kanan, di ketinggian
+  mana saja, dan posisinya diingat. Saat streaming tombol meredup sendiri setelah
+  4 detik, tapi tetap bisa diketuk di tempatnya.
 
 Fitur lain
 - Putar iPad ke portrait: layar Mac ikut menjadi vertikal (layar hilang

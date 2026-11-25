@@ -12,9 +12,10 @@ WiredDisplay turns an iPad into a wired USB‑C display for a Mac (often a headl
 - `iPadOSClient/WiredDisplayClient/`: the iPad app.
   - `ClientSession`, `MetalVideoRenderer` (default renderer), `VideoView` (touch, keyboard, local cursor), `ClientAudio`.
 - `Shared/`: protocol (framing, `SecureChannel` with Ed25519/X25519 and AES‑GCM), usbmux, video, `AudioJitterBuffer` (with drift correction).
+- `Shared/HostCore/` (`WDHostCore`): the host's pure decisions, unit-tested: `PowerState` and `InputGate` (what iPad input does while locked or asleep), `DisplaySpace` (Default/More/Most sizes) and `CaptureSizing`.
 - `MacVirtualDevices/AudioDriver/`: the HAL audio driver.
 - `docs/`:
-  - `CHANGELOG.md`: P1-0xx entries. Add one for every change.
+  - `CHANGELOG.md`: P1-0xx entries. Add one for every change; take the ID from `scripts/next-change-id.sh` (parallel sessions collided before).
   - `DECISIONS.md`: D-0xx entries.
   - `BUG_LOG.md`.
   - `share/PANDUAN-INSTALASI.txt`: the user guide.
@@ -28,6 +29,7 @@ pkill -x WiredDisplayHost; open ~/Applications/WiredDisplayHost.app   # restart 
 scripts/install-ipad-app.sh                    # iPad app (Release by default; CONFIG=Debug to override)
 scripts/build-ipa.sh; SIGN_IDENTITY=- scripts/build-dmg.sh   # release artifacts in dist/
 ```
+- CI: `.github/workflows/tests.yml` runs `swift build`, `swift test` and the protocol-vector check on GitHub's `macos-26` runner for every push to the public repo.
 - The host log is `~/Library/Logs/WiredDisplayHost.log` (it rotates at 5 MB). The iPad log is `Documents/client.log` in the app container. Pull it with `xcrun devicectl device copy from --domain-type appDataContainer …`.
 - Look at the panel with `open -n ~/Applications/WiredDisplayHost.app --args --render-panel-live <dir>`. This renders every tab live, because Liquid Glass does not render offscreen.
 - Check the real panel with `--self-check-panel <dir>`: it opens the panel, captures each tab, and presses the slider. It moves the user's mouse for about 10 s, so warn the user first.
@@ -42,6 +44,7 @@ scripts/build-ipa.sh; SIGN_IDENTITY=- scripts/build-dmg.sh   # release artifacts
 - Do not touch other projects.
 
 ### Publishing procedure
+Run `scripts/publish-public.sh "WiredDisplay x.y.z: …"`: it builds the tree, scans it (the list comes from `LOCAL-HANDOVER.md`), shows the diff, and pushes after a confirmation. Agents may be blocked from pushing; then the user runs it. The steps it performs:
 ```bash
 export GIT_INDEX_FILE=$(mktemp -d)/index
 git read-tree main && git rm -r -q --cached docs/evidence && T=$(git write-tree); unset GIT_INDEX_FILE

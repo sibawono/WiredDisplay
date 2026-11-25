@@ -65,7 +65,7 @@ final class VideoEncoder: @unchecked Sendable {
     /// Encoder tuning (D-037); command-line switches for A/B tests.
     nonisolated(unsafe) static var powerEfficient = false
     nonisolated(unsafe) static var periodicKeyframes = false
-    /// Filtered 4:2:0 chroma on the GPU (sharper coloured edges); `--chroma-filter off`.
+    /// GPU conversion for every BGRA lane (filtered 4:2:0 chroma; faster 4:4:4); `--chroma-filter off` = VideoToolbox.
     nonisolated(unsafe) static var filteredChroma = true
     /// "More/most space": capture the full HiDPI framebuffer and downscale it
     /// to the panel here (area filter) instead of in ScreenCaptureKit;
@@ -119,12 +119,8 @@ final class VideoEncoder: @unchecked Sendable {
 
     private let repeatQueue = DispatchQueue(label: "wireddisplay.host.encoder.repeat")
 
-    /// Conversion and encode submission run here, one frame at a time, never
-    /// on ScreenCaptureKit's callback (GitHub issue #1: on a Mac mini M1 a
-    /// slow 4:4:4 submission held the capture callback, so capture fell to
-    /// 15 fps with gaps of seconds). While one frame is being submitted, only
-    /// the newest waiting frame is kept: the iPad never gets a backlog of old
-    /// frames. Guarded by `stateLock`.
+    /// Conversion and submission run here, never on ScreenCaptureKit's callback, which a slow
+    /// submission would stall. Only the newest waiting frame is kept. Guarded by `stateLock`.
     private let submitQueue = DispatchQueue(label: "wireddisplay.host.encoder.submit", qos: .userInteractive)
     private var submitting = false
     private var waitingSubmit: (job: Job, time: CMTime)?
@@ -154,7 +150,7 @@ final class VideoEncoder: @unchecked Sendable {
         }
         Log.info("encoder ready: \(codec) \(width)x\(height) \(fps) fps \(bitrateMbps) Mbit/s, " +
                  "\(displayP3 ? "P3" : "sRGB") tags, chroma \(chroma.rawValue), \(tenBit ? 10 : 8)-bit, " +
-                 "rate control \(fps > 60 ? "standard (high refresh)" : "low-latency"), " +
+                 "rate control \(chroma == .c444 ? "standard (4:4:4)" : fps > 60 ? "standard (high refresh)" : chroma == .hybrid ? "low-latency, standard on the 4:4:4 lane" : "low-latency"), " +
                  "periodic keyframes \(Self.periodicKeyframes)")
     }
 
@@ -246,9 +242,10 @@ final class VideoEncoder: @unchecked Sendable {
         guard let pool else { throw Error.create(-2) }
         var lane = Lane(session: session, transfer: transferSession, pool: pool,
                         label: (full444 ? "4:4:4" : "4:2:0") + (c.tenBit ? "/10" : ""))
-        if !full444, VideoEncoder.filteredChroma {
-            lane.gpu = ChromaConverter(tenBit: c.tenBit)
-            Log.info("encoder: 4:2:0 conversion \(lane.gpu != nil ? "on the GPU with filtered chroma" : "by VideoToolbox (GPU converter unavailable)")")
+        if VideoEncoder.filteredChroma {
+            lane.gpu = ChromaConverter(tenBit: c.tenBit, full444: full444)
+            let format = full444 ? "4:4:4" : "4:2:0"
+            Log.info("encoder: \(format) conversion \(lane.gpu != nil ? "on the GPU" : "by VideoToolbox (GPU converter unavailable)")")
         }
         return lane
     }
@@ -426,8 +423,7 @@ final class VideoEncoder: @unchecked Sendable {
         if motionFrame { scheduleRefinement(step: 0) }
     }
 
-    /// Held for a whole submission and while the sessions are invalidated, so
-    /// `invalidate` never tears a session down under a running encode call.
+    /// Keeps `invalidate` from tearing a session down under a running submission.
     private let submitLock = NSLock()
 
     private func submit(_ job: Job, presentationTime: CMTime) {
@@ -469,7 +465,7 @@ final class VideoEncoder: @unchecked Sendable {
                     defer { outputLock.unlock() }
                     guard self?.epoch == frameEpoch else { return } // superseded lane
                     let sent = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-                    if sent % 30 == 0, sourceAgeAtSubmit.isFinite {
+                    if sent % 300 == 0, sourceAgeAtSubmit.isFinite { // about one sample every 5 s at 60 Hz
                         let beforeWire = Double(sent &- convertStart) / 1e6
                         Log.info(String(format: "frame host %llu: capture->wire %.3f ms; capture->convert %.3f; convert %.3f; encode+pack %.3f",
                                         sent, sourceAgeAtSubmit * 1000 + beforeWire, sourceAgeAtSubmit * 1000,

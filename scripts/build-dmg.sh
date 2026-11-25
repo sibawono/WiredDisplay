@@ -76,9 +76,10 @@ xattr -cr "$ROOT"
 RW="$STAGE/rw.dmg"
 hdiutil create -quiet -volname "WiredDisplay $VERSION" -srcfolder "$ROOT" -fs HFS+ -format UDRW -ov "$RW"
 # Mark the volume as having a custom icon.
-MOUNT="$(hdiutil attach -nobrowse -noverify -noautoopen "$RW" | awk -F'\t' '/\/Volumes\// {print $NF}')"
+MOUNT="$STAGE/mnt"
+diskutil image attach --nobrowse --mountPoint "$MOUNT" "$RW" >/dev/null
 SetFile -a C "$MOUNT" 2>/dev/null || true
-hdiutil detach -quiet "$MOUNT"
+diskutil eject "$MOUNT" >/dev/null
 hdiutil convert -quiet "$RW" -format UDZO -imagekey zlib-level=9 -o "$DMG"
 
 IDENTITY="${SIGN_IDENTITY:-$(security find-identity -v -p codesigning | awk '/Apple Development/ {print $2; exit}')}"

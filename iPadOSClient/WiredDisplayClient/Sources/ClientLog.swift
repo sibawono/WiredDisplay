@@ -9,9 +9,11 @@ enum ClientLog {
     nonisolated(unsafe) private static var handle: FileHandle? = {
         guard let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?
             .appendingPathComponent("client.log") else { return nil }
-        // Keep it bounded: start fresh when it passes 2 MB.
+        // Past 2 MB the log moves to client.old.log, so the previous run stays readable.
         if let size = try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int, size > 2_000_000 {
-            try? FileManager.default.removeItem(at: url)
+            let old = url.deletingLastPathComponent().appendingPathComponent("client.old.log")
+            try? FileManager.default.removeItem(at: old)
+            try? FileManager.default.moveItem(at: url, to: old)
         }
         if !FileManager.default.fileExists(atPath: url.path) { FileManager.default.createFile(atPath: url.path, contents: nil) }
         let handle = try? FileHandle(forWritingTo: url)

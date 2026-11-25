@@ -2,8 +2,8 @@ import CoreVideo
 import Foundation
 import Metal
 
-/// BGRA -> 4:2:0 (8- or 10-bit, BT.709 video range) on the GPU, with a
-/// filtered chroma downsample.
+/// BGRA -> 4:2:0 or 4:4:4 (8- or 10-bit, BT.709 video range) on the GPU; 4:2:0 gets a
+/// filtered chroma downsample. 4:4:4 here takes ~2 ms where VTPixelTransfer took ~8 ms.
 ///
 /// VTPixelTransferSession point-samples chroma (measured: a 1-pixel red line
 /// on an odd column lost its colour completely, on an even column it kept all
@@ -17,13 +17,14 @@ import Metal
 /// coefficients, video range.
 final class ChromaConverter: @unchecked Sendable {
     let tenBit: Bool
+    let full444: Bool
     private let device: MTLDevice
     private let queue: MTLCommandQueue
     private let pipeline: MTLComputePipelineState
     private var cache: CVMetalTextureCache?
     private var conversions = 0
 
-    init?(tenBit: Bool) {
+    init?(tenBit: Bool, full444: Bool = false) {
         guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue() else { return nil }
         let source = """
         #include <metal_stdlib>
@@ -90,11 +91,30 @@ final class ChromaConverter: @unchecked Sendable {
             float2 code = tenBit != 0 ? round(c8 * 4.0) * 64.0 / 65535.0 : round(c8) / 255.0;
             chroma.write(float4(code, 0, 0), gid);
         }
+
+        // 4:4:4: one chroma sample per pixel, no filtering.
+        kernel void convert444(texture2d<float, access::read> src [[texture(0)]],
+                               texture2d<float, access::write> luma [[texture(1)]],
+                               texture2d<float, access::write> chroma [[texture(2)]],
+                               constant uint &tenBit [[buffer(0)]],
+                               constant float2 &scale [[buffer(1)]],
+                               uint2 gid [[thread_position_in_grid]]) {
+            if (gid.x >= luma.get_width() || gid.y >= luma.get_height()) return;
+            float3 rgb = area(src, scale, int(gid.x), int(gid.y));
+            float yl = lumaOf(rgb);
+            float y8 = 16.0 + 219.0 * yl;
+            float2 c8 = float2(128.0) + 224.0 * float2((rgb.b - yl) / 1.8556, (rgb.r - yl) / 1.5748);
+            float yCode = tenBit != 0 ? round(y8 * 4.0) * 64.0 / 65535.0 : round(y8) / 255.0;
+            float2 cCode = tenBit != 0 ? round(c8 * 4.0) * 64.0 / 65535.0 : round(c8) / 255.0;
+            luma.write(float4(yCode), gid);
+            chroma.write(float4(cCode, 0, 0), gid);
+        }
         """
         guard let library = try? device.makeLibrary(source: source, options: nil),
-              let function = library.makeFunction(name: "convert"),
+              let function = library.makeFunction(name: full444 ? "convert444" : "convert"),
               let pipeline = try? device.makeComputePipelineState(function: function) else { return nil }
         self.tenBit = tenBit
+        self.full444 = full444
         self.device = device
         self.queue = queue
         self.pipeline = pipeline
@@ -102,9 +122,8 @@ final class ChromaConverter: @unchecked Sendable {
         guard cache != nil else { return nil }
     }
 
-    /// Converts `source` (32BGRA) into `destination` (a 4:2:0 bi-planar video
-    /// range buffer of the same size, Metal compatible). Synchronous, like the
-    /// VideoToolbox transfer it replaces (~0.3 ms for 2732x2048 on M2).
+    /// Converts `source` (32BGRA, panel size or larger) into `destination`, a Metal-compatible
+    /// bi-planar video-range buffer in this converter's chroma format. Synchronous.
     func convert(_ source: CVPixelBuffer, into destination: CVPixelBuffer) -> Bool {
         guard let cache,
               CVPixelBufferGetPixelFormatType(source) == kCVPixelFormatType_32BGRA,
@@ -124,20 +143,21 @@ final class ChromaConverter: @unchecked Sendable {
         var scale = SIMD2<Float>(Float(inputTex.width) / Float(lumaTex.width), Float(inputTex.height) / Float(lumaTex.height))
         encoder.setBytes(&scale, length: MemoryLayout<SIMD2<Float>>.size, index: 1)
         let group = MTLSize(width: 16, height: 16, depth: 1)
-        let grid = MTLSize(width: chromaTex.width, height: chromaTex.height, depth: 1)
+        let grid = MTLSize(width: chromaTex.width, height: chromaTex.height, depth: 1) // 4:4:4: the full size
         encoder.dispatchThreads(grid, threadsPerThreadgroup: group)
         encoder.endEncoding()
         commands.commit()
         commands.waitUntilCompleted()
         _ = (input, lumaTexture, chromaTexture) // alive until the GPU is done
         guard commands.status == .completed else { return false }
-        for (key, value) in [(kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_709_2),
-                             (kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_709_2),
-                             (kCVImageBufferTransferFunctionKey, kCVImageBufferTransferFunction_ITU_R_709_2),
-                             (kCVImageBufferChromaLocationTopFieldKey, kCVImageBufferChromaLocation_Left),
-                             (kCVImageBufferChromaLocationBottomFieldKey, kCVImageBufferChromaLocation_Left)] {
-            CVBufferSetAttachment(destination, key, value, .shouldPropagate)
+        var attachments = [(kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_709_2),
+                           (kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_709_2),
+                           (kCVImageBufferTransferFunctionKey, kCVImageBufferTransferFunction_ITU_R_709_2)]
+        if !full444 {
+            attachments += [(kCVImageBufferChromaLocationTopFieldKey, kCVImageBufferChromaLocation_Left),
+                            (kCVImageBufferChromaLocationBottomFieldKey, kCVImageBufferChromaLocation_Left)]
         }
+        for (key, value) in attachments { CVBufferSetAttachment(destination, key, value, .shouldPropagate) }
         conversions += 1
         if conversions % 600 == 0 { CVMetalTextureCacheFlush(cache, 0) }
         return true

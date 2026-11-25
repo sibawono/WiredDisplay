@@ -1,33 +1,7 @@
 import AppKit
 import CoreGraphics
 import os
-
-/// What the Mac is doing, as independent dimensions (they combine: a
-/// screensaver can run on a locked session; a display can sleep while
-/// locked; a wake event does not mean unlocked). WiredDisplay reacts to
-/// transitions (docs/POWER_LOCK_WAKE.md):
-/// - input from the iPad is injected only while the session is active,
-///   unlocked and awake (never typed into the lock screen, never replayed);
-/// - before system sleep the session is closed cleanly and no reconnect is
-///   attempted until the Mac has woken;
-/// - after wake, unlock, screensaver end or display wake the stream is
-///   reconciled (display mode, fresh keyframe) instead of assumed ready.
-struct PowerState: Equatable, Sendable, CustomStringConvertible {
-    var systemAsleep = false
-    var displaysAsleep = false
-    var locked = false
-    var screensaver = false
-    /// False while another user's session is in front (fast user switching).
-    var sessionActive = true
-
-    /// iPad input may reach the Mac only in an awake, unlocked, active session.
-    var allowsInput: Bool { !systemAsleep && !locked && sessionActive }
-
-    var description: String {
-        "sleep \(systemAsleep ? "Y" : "n") displays-asleep \(displaysAsleep ? "Y" : "n") locked \(locked ? "Y" : "n") " +
-            "screensaver \(screensaver ? "Y" : "n") session-active \(sessionActive ? "Y" : "n")"
-    }
-}
+import WDHostCore
 
 /// The Mac's power/lock state, readable from any thread (input gating).
 let currentPowerState = OSAllocatedUnfairLock(initialState: PowerState())
