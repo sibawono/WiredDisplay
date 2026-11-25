@@ -1046,3 +1046,17 @@ During scrolling, sampled medians were 0.05 ms capture-delivery-to-conversion, 4
 - iPad Release build succeeded and was installed.
 - Contrast measured from device screenshots before and after.
 - Tested by the user on the iPad: dragging, snapping to an edge, fading after 4 s, tapping the faded button to open the panel, and the position kept after relaunching the app.
+
+## CHANGE ID: P1-063 — CI green: the real-encoder test requires the hardware encoder
+
+**FILES CHANGED:** `Tests/Unit/WDVideoTests/VideoTests.swift`, `.github/workflows/tests.yml`, `docs/CHANGELOG.md`.
+
+**CAUSE:** the first CI run (GitHub `macos-26`, a virtual machine) built everything and passed every test but one. `HEVCSPSTests.testReadsChromaAndDepthFromRealEncoderOutput` asked VideoToolbox for any HEVC encoder. The VM has only a software encoder, which wrote 8-bit 4:4:4 where the media engine writes 10-bit, so the test expected 10 and read 8.
+
+**FIX:**
+- The test requires the hardware encoder, like the app does, and skips with a reason when there is none.
+- `actions/checkout` moves to v5, because v4 runs on the deprecated Node 20.
+
+**VERIFIED:**
+- Locally the test still runs and passes on the hardware encoder; `swift test` 184/184.
+- The CI result comes from the push.

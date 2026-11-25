@@ -183,10 +183,12 @@ final class HEVCSPSTests: XCTestCase {
     private func sps(format: OSType, width: Int = 640, height: Int = 480) throws -> [UInt8] {
         var session: VTCompressionSession?
         let status = VTCompressionSessionCreate(allocator: nil, width: Int32(width), height: Int32(height),
-                                                codecType: kCMVideoCodecType_HEVC, encoderSpecification: nil,
+                                                codecType: kCMVideoCodecType_HEVC,
+                                                encoderSpecification: [kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: true] as CFDictionary,
                                                 imageBufferAttributes: nil, compressedDataAllocator: nil, outputCallback: nil,
                                                 refcon: nil, compressionSessionOut: &session)
-        guard status == noErr, let session else { throw XCTSkip("no HEVC encoder here (\(status))") }
+        // CI virtual machines only have a software encoder, which writes 8-bit where the media engine writes 10-bit.
+        guard status == noErr, let session else { throw XCTSkip("no hardware HEVC encoder here (\(status))") }
         defer { VTCompressionSessionInvalidate(session) }
         var buffer: CVPixelBuffer?
         CVPixelBufferCreate(nil, width, height, format, [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary, &buffer)
