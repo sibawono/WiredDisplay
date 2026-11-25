@@ -91,17 +91,24 @@ upload() {
     --form-string "publish=$PUBLISH" \
     "${desc[@]}"
 }
-MODE=with-notes
-CODE="$(upload "$MODE")"
-if [ "$CODE" = 400 ] && grep -q "versionDescription" "$OUT"; then
-  echo "note: the server refused the release notes ($(tr -d '\n' <"$OUT" | head -c 300)); sending without them"
-  MODE=without-notes
-  CODE="$(upload "$MODE")"
-fi
+# Try in turn until one is accepted; each answer is logged.
+try() {  # name, then curl arguments
+  local name="$1"; shift
+  CODE="$(curl -sS -o "$OUT" -w '%{http_code}' -X POST -H "Authorization: Bearer $SIDESTORE_ACCESS_TOKEN" "$@")"
+  echo "$name: HTTP $CODE $(tr -d '\n' <"$OUT" | head -c 300)"
+  ENC="$name"
+  [[ "$CODE" == 2* ]]
+}
+IPA="$WORK/$NAME"
+try upload_build "$ENDPOINT/upload_build" -F "files.build=@$IPA" \
+|| try upload_build-file "$ENDPOINT/upload_build" -F "file=@$IPA" \
+|| try version-file-url "$ENDPOINT" --form-string "file=$URL" --form-string "releaseChannel=$CHANNEL" \
+     --form-string "allowCreateNewVersion=true" --form-string "publish=$PUBLISH" \
+|| try version-file-nomime "$ENDPOINT" -F "file=@$IPA" --form-string "releaseChannel=$CHANNEL" \
+     --form-string "allowCreateNewVersion=true" --form-string "publish=$PUBLISH" \
+|| true
 if [[ "$CODE" != 2* ]]; then
-  echo "error: SideStore Connect answered HTTP $CODE:" >&2
-  head -c 2000 "$OUT" >&2; echo >&2
+  echo "error: no request form was accepted (last: HTTP $CODE)" >&2
   exit 1
 fi
-head -c 1000 "$OUT"; echo
-echo "SideStore Connect: $BUNDLE_ID $VERSION ($CHANNEL), $NAME uploaded ($SIZE bytes), notes $MODE, published=$PUBLISH (HTTP $CODE)"
+echo "SideStore Connect: $BUNDLE_ID $VERSION accepted via $ENC (HTTP $CODE)"
