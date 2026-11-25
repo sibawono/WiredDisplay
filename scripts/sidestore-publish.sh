@@ -56,9 +56,6 @@ NOTES="$(jq -r '.body // ""' <<<"$RELEASE" | tr -d '\r' \
   | awk '/^## /{skip = ($0 ~ /^## Downloads/)} !skip' | sed '/./,$!d')"
 [ -n "$NOTES" ] || NOTES="WiredDisplay $VERSION"
 
-# The fields go inside a top-level "data" object: with the fields at the top
-# level the API answers HTTP 400 "No data provided" (first run, 2026-11-25).
-# The API page lists only the fields, not this wrapper.
 BODY="$(jq -n --arg lang "$LANG_CODE" --arg notes "$NOTES" --arg url "$URL" \
   --argjson size "$SIZE" --argjson publish "$PUBLISH" '{data: {
     allowCreateNewVersion: true,
@@ -77,14 +74,38 @@ fi
 
 : "${SIDESTORE_ACCESS_TOKEN:?SIDESTORE_ACCESS_TOKEN is not set (see docs/SIDESTORE.md)}"
 OUT="$(mktemp)"; trap 'rm -f "$OUT"' EXIT
-CODE="$(curl -sS -o "$OUT" -w '%{http_code}' -X POST "$ENDPOINT" \
-  -H "Authorization: Bearer $SIDESTORE_ACCESS_TOKEN" \
-  -H "Content-Type: application/json" \
-  --data-binary @- <<<"$BODY")"
+AUTH="Authorization: Bearer $SIDESTORE_ACCESS_TOKEN"
+INNER="$(jq -c .data <<<"$BODY")"
+DESC="$(jq -c .versionDescription <<<"$INNER")"
+
+# The API page names the fields but not the encoding, and the server is not
+# open source. Try the encodings in turn; a 400 "No data provided" means the
+# server found no fields, so the next one is tried. Any other answer stops.
+send() {
+  case "$1" in
+    json-flat) curl -sS -o "$OUT" -w '%{http_code}' -X POST "$ENDPOINT" -H "$AUTH" \
+                 -H "Content-Type: application/json" --data-binary @- <<<"$INNER" ;;
+    json-data) curl -sS -o "$OUT" -w '%{http_code}' -X POST "$ENDPOINT" -H "$AUTH" \
+                 -H "Content-Type: application/json" --data-binary @- <<<"$BODY" ;;
+    form)      curl -sS -o "$OUT" -w '%{http_code}' -X POST "$ENDPOINT" -H "$AUTH" \
+                 --form-string "allowCreateNewVersion=true" \
+                 --form-string "externalDownloadUrl=$URL" \
+                 --form-string "downloadFileSize=$SIZE" \
+                 --form-string "publish=$PUBLISH" \
+                 --form-string "versionDescription=$DESC" ;;
+    form-data) curl -sS -o "$OUT" -w '%{http_code}' -X POST "$ENDPOINT" -H "$AUTH" \
+                 --form-string "data=$INNER" ;;
+  esac
+}
+for ENC in json-flat json-data form form-data; do
+  CODE="$(send "$ENC")"
+  echo "$ENC: HTTP $CODE $(head -c 300 "$OUT")"
+  if [[ "$CODE" == 400 ]] && grep -q "No data provided" "$OUT"; then continue; fi
+  break
+done
 if [[ "$CODE" != 2* ]]; then
   echo "error: SideStore Connect answered HTTP $CODE:" >&2
   head -c 2000 "$OUT" >&2; echo >&2
   exit 1
 fi
-head -c 1000 "$OUT"; echo
-echo "SideStore Connect: $BUNDLE_ID $VERSION -> $URL ($SIZE bytes), published=$PUBLISH (HTTP $CODE)"
+echo "SideStore Connect: $BUNDLE_ID $VERSION -> $URL ($SIZE bytes), published=$PUBLISH (HTTP $CODE, $ENC)"
