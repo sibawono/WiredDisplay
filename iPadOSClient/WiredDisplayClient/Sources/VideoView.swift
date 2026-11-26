@@ -238,8 +238,10 @@ final class VideoView: UIView, UIPointerInteractionDelegate, UIGestureRecognizer
 
     @available(iOS 17.5, *)
     nonisolated func pencilInteraction(_ interaction: UIPencilInteraction, didReceiveSqueeze squeeze: UIPencilInteraction.Squeeze) {
-        guard squeeze.phase == .ended else { return }
-        MainActor.assumeIsolated { performPencilAction() }
+        MainActor.assumeIsolated {
+            guard squeeze.phase == .ended else { return }
+            performPencilAction()
+        }
     }
 
     private func performPencilAction() {
