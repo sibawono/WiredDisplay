@@ -560,6 +560,9 @@ final class HostController: @unchecked Sendable {
     private let systemAsleep = OSAllocatedUnfairLock(initialState: false)
     private let wakeSignal = DispatchSemaphore(value: 0)
     private let resetBackoff = OSAllocatedUnfairLock(initialState: false)
+    /// Accessed on `audioQueue`: speaker tap paused during display sleep so
+    /// coreaudiod releases its idle-sleep assertion (PLW-06).
+    private var speakerPausedForDisplaySleep = false
 
     /// Main queue, from PowerMonitor (every controller of the fleet).
     func powerChanged(from old: PowerState, to new: PowerState) {
@@ -576,6 +579,34 @@ final class HostController: @unchecked Sendable {
             systemAsleep.withLock { $0 = false }
             resetBackoff.withLock { $0 = true }
             wakeSignal.signal()
+        }
+        // PLW-06: pause the speaker IOProc while displays sleep so coreaudiod
+        // does not block Mac idle sleep; resume seamlessly when displays wake.
+        if new.displaysAsleep && !old.displaysAsleep {
+            queue.async { [self] in
+                guard let audio, let socket, !socket.isClosed, sessionStatus.withLock({ $0.speaker }) else { return }
+                audioQueue.async {
+                    guard audio.isSpeakerRunning else { return }
+                    audio.stopSpeaker()
+                    self.speakerPausedForDisplaySleep = true
+                    Log.info("audio: paused speaker tap while displays sleep (PLW-06)")
+                }
+            }
+        }
+        if old.displaysAsleep && !new.displaysAsleep {
+            queue.async { [self] in
+                guard let audio, let socket, !socket.isClosed, sessionStatus.withLock({ $0.speaker }) else { return }
+                audioQueue.async {
+                    guard self.speakerPausedForDisplaySleep, !socket.isClosed else { return }
+                    self.speakerPausedForDisplaySleep = false
+                    do {
+                        try audio.startSpeaker()
+                        Log.info("audio: resumed speaker tap after display wake")
+                    } catch {
+                        Log.warn("audio: could not resume speaker tap after wake: \(error)")
+                    }
+                }
+            }
         }
         if (old.displaysAsleep && !new.displaysAsleep) || (old.systemAsleep && !new.systemAsleep) {
             videoQueue.async { [self] in
@@ -1367,6 +1398,7 @@ final class HostController: @unchecked Sendable {
             audioQueue.async {
                 // The session may have ended since: never start audio for it.
                 guard !socket.isClosed else { return }
+                self.speakerPausedForDisplaySleep = false
                 // Each direction independently: one failing must not block the
                 // other, and audio failing never takes the display down (spec §7).
                 do {

@@ -146,6 +146,7 @@ final class AppModel {
         guard let screen else { return }
         appliedBrightness = value
         screen.brightness = CGFloat(value)
+        connection.screenBrightness = value
         hudToken += 1
         let token = hudToken
         connection.brightnessHUD = (value, token)
@@ -155,12 +156,29 @@ final class AppModel {
         }
     }
 
+    /// Sets iPad brightness directly from the Controls panel slider and syncs it to the Mac.
+    func setScreenBrightness(_ value: Float) {
+        let clamped = min(max(value, 0), 1)
+        appliedBrightness = clamped
+        screen?.brightness = CGFloat(clamped)
+        connection.screenBrightness = clamped
+        session?.sendBrightness(clamped)
+    }
+
     private func reportBrightness() {
         guard let screen else { return }
-        let value = Float(screen.brightness)
+        let value = min(max(Float(screen.brightness), 0), 1)
+        connection.screenBrightness = value
         if let applied = appliedBrightness, abs(applied - value) < 0.01 { return }
         appliedBrightness = nil
-        session?.sendBrightness(min(max(value, 0), 1))
+        session?.sendBrightness(value)
+    }
+
+    /// Sends a one-tap macOS shortcut from the iPad Input tab (works without a hardware keyboard).
+    func sendQuickAction(_ action: QuickAction) {
+        guard let session else { return }
+        for usage in action.usages { session.send(.key(usage: usage, down: true)) }
+        for usage in action.usages.reversed() { session.send(.key(usage: usage, down: false)) }
     }
 
     func setAudio(speaker: Bool, microphone: Bool) {
@@ -465,6 +483,9 @@ struct ControlsPanel: View {
             qualityPreset: Binding(
                 get: { connection.qualityPreset ?? 0 },
                 set: { connection.qualityPreset = $0; app.session?.setQualityPreset($0) }),
+            brightness: Binding(
+                get: { Double(connection.screenBrightness) },
+                set: { app.setScreenBrightness(Float($0)) }),
             showStatsHUD: $showStatsHUD,
             speaker: Binding(get: { connection.speakerOn },
                              set: { app.setAudio(speaker: $0, microphone: connection.microphoneOn) }),
@@ -476,6 +497,10 @@ struct ControlsPanel: View {
             pencilAction: Binding(
                 get: { PencilAction(rawValue: pencilActionRaw) ?? .rightClick },
                 set: { pencilActionRaw = $0.rawValue; app.videoView.pencilAction = $0 }),
+            quickAction: { action in
+                close()
+                app.sendQuickAction(action)
+            },
             pairedMacs: connection.pairedMacs.map { PairedMacRow(name: $0.name, fingerprint: $0.fingerprint) },
             forgetPaired: { app.session?.forgetPairedMacs() },
             reconnect: { app.reconnect() },

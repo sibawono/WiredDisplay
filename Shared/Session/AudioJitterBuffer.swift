@@ -35,12 +35,20 @@ public final class AudioJitterBuffer: @unchecked Sendable {
         var stats = Stats()
         /// +1 skipping (too full), -1 repeating (too empty), 0 none.
         var correcting = 0
+        /// Preallocated per-channel last output sample for click-free decay on underrun.
+        var lastSample: [Float]
+        /// Remaining fade-in frames after recovering from an underrun.
+        var fadeInRemaining = 0
+        var hadUnderrun = false
     }
 
     private let capacity: Int
     /// Drift band: correct above `high` or below `low`, stop once within
     /// `settle` of the target.
     private let high: Int, low: Int, settle: Int
+    /// Short ramp (~0.67 ms at 48 kHz) to prevent audible clicks on underrun/recovery;
+    /// disabled for tiny synthetic test buffers (`targetFrames < 64`).
+    private let fadeFrames: Int
     private let state: OSAllocatedUnfairLock<State>
 
     public init(channels: Int, targetFrames: Int, maxFrames: Int) {
@@ -52,7 +60,10 @@ public final class AudioJitterBuffer: @unchecked Sendable {
         high = targetFrames + max(targetFrames / 3, 1)
         low = targetFrames / 2
         settle = max(targetFrames / 12, 1)
-        state = OSAllocatedUnfairLock(initialState: State(ring: [Float](repeating: 0, count: capacity * channels)))
+        fadeFrames = targetFrames >= 64 ? 32 : 0
+        state = OSAllocatedUnfairLock(initialState: State(
+            ring: [Float](repeating: 0, count: capacity * channels),
+            lastSample: [Float](repeating: 0, count: channels)))
     }
 
     public var stats: Stats { state.withLock { var s = $0.stats; s.bufferedFrames = $0.count; return s } }
@@ -63,6 +74,9 @@ public final class AudioJitterBuffer: @unchecked Sendable {
             $0.count = 0
             $0.playing = false
             $0.correcting = 0
+            $0.fadeInRemaining = 0
+            $0.hadUnderrun = false
+            for i in 0..<$0.lastSample.count { $0.lastSample[i] = 0 }
         }
     }
 
@@ -86,7 +100,13 @@ public final class AudioJitterBuffer: @unchecked Sendable {
                 s.count -= drop
                 s.stats.droppedFrames += drop
             }
-            if !s.playing && s.count >= targetFrames { s.playing = true }
+            if !s.playing && s.count >= targetFrames {
+                s.playing = true
+                if s.hadUnderrun {
+                    s.fadeInRemaining = fadeFrames
+                    s.hadUnderrun = false
+                }
+            }
         }
     }
 
@@ -138,10 +158,48 @@ public final class AudioJitterBuffer: @unchecked Sendable {
                 s.count -= 1
                 s.stats.driftCorrections += 1
             }
+            // Smooth fade-in when resuming after a dropout.
+            if s.fadeInRemaining > 0 && produced > 0 && fadeFrames > 0 {
+                let ramp = min(produced, s.fadeInRemaining)
+                let startStep = fadeFrames - s.fadeInRemaining
+                for i in 0..<ramp {
+                    let gain = Float(startStep + i + 1) / Float(fadeFrames)
+                    for index in 0..<outputs { buffer(index)[i] *= gain }
+                }
+                s.fadeInRemaining -= ramp
+            }
+            if produced > 0 {
+                for c in 0..<channels {
+                    s.lastSample[c] = buffer(min(c, outputs - 1))[produced - 1]
+                }
+            }
             if produced < frames {
                 s.playing = false // re-prebuffer before resuming
                 s.correcting = 0
                 s.stats.underruns += 1
+                if fadeFrames > 0 {
+                    s.hadUnderrun = true
+                    if produced > 0 {
+                        // Ramp the tail of produced audio smoothly down to zero.
+                        let ramp = min(produced, fadeFrames)
+                        let start = produced - ramp
+                        for i in 0..<ramp {
+                            let gain = Float(ramp - 1 - i) / Float(ramp)
+                            for index in 0..<outputs { buffer(index)[start + i] *= gain }
+                        }
+                    } else {
+                        // Buffer was already empty: decay smoothly from lastSample to zero.
+                        let ramp = min(frames, fadeFrames)
+                        for i in 0..<ramp {
+                            let gain = Float(ramp - 1 - i) / Float(ramp)
+                            for index in 0..<outputs {
+                                buffer(index)[i] = s.lastSample[min(index, channels - 1)] * gain
+                            }
+                        }
+                        produced = ramp
+                    }
+                    for c in 0..<channels { s.lastSample[c] = 0 }
+                }
             }
         }
         for index in 0..<outputs where produced < frames {

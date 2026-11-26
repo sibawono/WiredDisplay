@@ -122,9 +122,37 @@ final class ChromaConverter: @unchecked Sendable {
         guard cache != nil else { return nil }
     }
 
+    private struct TextureRetain: @unchecked Sendable {
+        let input: CVMetalTexture
+        let luma: CVMetalTexture
+        let chroma: CVMetalTexture
+    }
+
     /// Converts `source` (32BGRA, panel size or larger) into `destination`, a Metal-compatible
     /// bi-planar video-range buffer in this converter's chroma format. Synchronous.
     func convert(_ source: CVPixelBuffer, into destination: CVPixelBuffer) -> Bool {
+        guard let (commands, textures) = enqueue(source, into: destination) else { return false }
+        commands.commit()
+        commands.waitUntilCompleted()
+        _ = textures // alive until the GPU is done
+        return commands.status == .completed
+    }
+
+    /// Enqueues GPU conversion asynchronously and invokes `completion(succeeded)` from Metal's
+    /// completion handler once the GPU finishes writing `destination`, allowing the next frame's
+    /// GPU conversion to overlap with VideoToolbox encoding the previous frame.
+    func convertAsync(_ source: CVPixelBuffer, into destination: CVPixelBuffer,
+                      completion: @escaping @Sendable (Bool) -> Void) -> Bool {
+        guard let (commands, textures) = enqueue(source, into: destination) else { return false }
+        commands.addCompletedHandler { buffer in
+            _ = textures // keep CVMetalTexture wrappers alive until the GPU finishes
+            completion(buffer.status == .completed)
+        }
+        commands.commit()
+        return true
+    }
+
+    private func enqueue(_ source: CVPixelBuffer, into destination: CVPixelBuffer) -> (MTLCommandBuffer, TextureRetain)? {
         guard let cache,
               CVPixelBufferGetPixelFormatType(source) == kCVPixelFormatType_32BGRA,
               let input = texture(source, plane: 0, format: .bgra8Unorm),
@@ -132,7 +160,7 @@ final class ChromaConverter: @unchecked Sendable {
               let chromaTexture = texture(destination, plane: 1, format: tenBit ? .rg16Unorm : .rg8Unorm),
               let commands = queue.makeCommandBuffer(), let encoder = commands.makeComputeCommandEncoder(),
               let inputTex = CVMetalTextureGetTexture(input), let lumaTex = CVMetalTextureGetTexture(lumaTexture),
-              let chromaTex = CVMetalTextureGetTexture(chromaTexture) else { return false }
+              let chromaTex = CVMetalTextureGetTexture(chromaTexture) else { return nil }
         encoder.setComputePipelineState(pipeline)
         encoder.setTexture(inputTex, index: 0)
         encoder.setTexture(lumaTex, index: 1)
@@ -146,10 +174,6 @@ final class ChromaConverter: @unchecked Sendable {
         let grid = MTLSize(width: chromaTex.width, height: chromaTex.height, depth: 1) // 4:4:4: the full size
         encoder.dispatchThreads(grid, threadsPerThreadgroup: group)
         encoder.endEncoding()
-        commands.commit()
-        commands.waitUntilCompleted()
-        _ = (input, lumaTexture, chromaTexture) // alive until the GPU is done
-        guard commands.status == .completed else { return false }
         var attachments = [(kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_709_2),
                            (kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_709_2),
                            (kCVImageBufferTransferFunctionKey, kCVImageBufferTransferFunction_ITU_R_709_2)]
@@ -160,7 +184,7 @@ final class ChromaConverter: @unchecked Sendable {
         for (key, value) in attachments { CVBufferSetAttachment(destination, key, value, .shouldPropagate) }
         conversions += 1
         if conversions % 600 == 0 { CVMetalTextureCacheFlush(cache, 0) }
-        return true
+        return (commands, TextureRetain(input: input, luma: lumaTexture, chroma: chromaTexture))
     }
 
     private func texture(_ buffer: CVPixelBuffer, plane: Int, format: MTLPixelFormat) -> CVMetalTexture? {

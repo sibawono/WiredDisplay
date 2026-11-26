@@ -118,10 +118,14 @@ final class VideoEncoder: @unchecked Sendable {
 
     private let repeatQueue = DispatchQueue(label: "wireddisplay.host.encoder.repeat")
 
-    /// Conversion and submission run here, never on ScreenCaptureKit's callback, which a slow
-    /// submission would stall. Only the newest waiting frame is kept. Guarded by `stateLock`.
+    /// Conversion runs here, never on ScreenCaptureKit's callback. GPU conversion
+    /// completes asynchronously into `encodeQueue`, allowing frame N+1's GPU
+    /// conversion to overlap with frame N's hardware HEVC encode (bounded to at
+    /// most 2 in-flight GPU conversions so stale frames still coalesce).
     private let submitQueue = DispatchQueue(label: "wireddisplay.host.encoder.submit", qos: .userInteractive)
+    private let encodeQueue = DispatchQueue(label: "wireddisplay.host.encoder.encode", qos: .userInteractive)
     private var submitting = false
+    private var inFlightGPU = 0
     private var waitingSubmit: (job: Job, time: CMTime)?
 
     init(codec: VideoCodec, width: Int, height: Int, fps: Int, bitrateMbps: Int, displayP3: Bool,
@@ -288,7 +292,7 @@ final class VideoEncoder: @unchecked Sendable {
     /// replaced by this newer one (its keyframe request carries over).
     private func schedule(_ job: Job, presentationTime: CMTime) {
         let start: Bool = stateLock.withLock {
-            if submitting {
+            if submitting || inFlightGPU >= 2 {
                 let replaced = waitingSubmit
                 waitingSubmit = (job.forcing(replaced?.job.force ?? false), presentationTime)
                 if replaced != nil { stats.coalesced() }
@@ -306,13 +310,26 @@ final class VideoEncoder: @unchecked Sendable {
         while let current = next {
             submit(current.job, presentationTime: current.time)
             next = stateLock.withLock {
-                guard let waiting = waitingSubmit else {
+                guard inFlightGPU < 2, let waiting = waitingSubmit else {
                     submitting = false
                     return nil
                 }
                 waitingSubmit = nil
                 return waiting
             }
+        }
+    }
+
+    private func releaseGPUSlot() {
+        let next: (job: Job, time: CMTime)? = stateLock.withLock {
+            inFlightGPU = max(0, inFlightGPU - 1)
+            guard !submitting, inFlightGPU < 2, let waiting = waitingSubmit else { return nil }
+            waitingSubmit = nil
+            submitting = true
+            return waiting
+        }
+        if let next {
+            submitQueue.async { [weak self] in self?.drainSubmits(next.job, next.time) }
         }
     }
 
@@ -425,14 +442,41 @@ final class VideoEncoder: @unchecked Sendable {
     /// Keeps `invalidate` from tearing a session down under a running submission.
     private let submitLock = NSLock()
 
+    private struct SendableBuffer: @unchecked Sendable {
+        let buffer: CVPixelBuffer
+    }
+
     private func submit(_ job: Job, presentationTime: CMTime) {
-        submitLock.lock()
-        defer { submitLock.unlock() }
         guard !invalidated.withLock({ $0 }) else { return }
         let lane = job.lane
         let hostAtSubmit = CMClockGetTime(CMClockGetHostTimeClock())
         let sourceAgeAtSubmit = CMTimeGetSeconds(CMTimeSubtract(hostAtSubmit, job.captureTime))
         let convertStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        if let gpu = lane.gpu, let pool = lane.pool {
+            var destination: CVPixelBuffer?
+            if CVPixelBufferPoolCreatePixelBuffer(nil, pool, &destination) == kCVReturnSuccess, let destination {
+                stateLock.withLock { inFlightGPU += 1 }
+                let box = SendableBuffer(buffer: destination)
+                let laneLabel = lane.label
+                let enqueued = gpu.convertAsync(job.source, into: destination) { [weak self] succeeded in
+                    guard let self else { return }
+                    let converted = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+                    self.stats.converted(nanos: converted &- convertStart)
+                    self.releaseGPUSlot()
+                    guard succeeded else {
+                        Log.warn("\(laneLabel) async GPU conversion failed; frame dropped")
+                        if job.force { self.stateLock.withLock { self.pendingKeyframe = true } }
+                        return
+                    }
+                    self.encodeQueue.async {
+                        self.encodePrepared(job, pixelBuffer: box.buffer, presentationTime: presentationTime,
+                                            sourceAgeAtSubmit: sourceAgeAtSubmit, convertStart: convertStart, converted: converted)
+                    }
+                }
+                if enqueued { return }
+                releaseGPUSlot()
+            }
+        }
         let prepared = lane.prepare(job.source)
         let converted = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         if lane.transfer != nil { stats.converted(nanos: converted &- convertStart) }
@@ -441,6 +485,19 @@ final class VideoEncoder: @unchecked Sendable {
             if job.force { stateLock.withLock { pendingKeyframe = true } }
             return
         }
+        let box = SendableBuffer(buffer: pixelBuffer)
+        encodeQueue.async { [weak self] in
+            self?.encodePrepared(job, pixelBuffer: box.buffer, presentationTime: presentationTime,
+                                 sourceAgeAtSubmit: sourceAgeAtSubmit, convertStart: convertStart, converted: converted)
+        }
+    }
+
+    private func encodePrepared(_ job: Job, pixelBuffer: CVPixelBuffer, presentationTime: CMTime,
+                                sourceAgeAtSubmit: Double, convertStart: UInt64, converted: UInt64) {
+        submitLock.lock()
+        defer { submitLock.unlock() }
+        guard !invalidated.withLock({ $0 }) else { return }
+        let lane = job.lane
         let frameEpoch = job.epoch
         let frameProperties = job.force ? [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary : nil
         let kind: VideoCodecKind = codec == .hevc ? .hevc : .h264

@@ -39,6 +39,8 @@ final class ConnectionModel {
     /// Brightness indicator (D-033): the value and a token that changes on
     /// every Mac-driven change, so the overlay can hide after a moment.
     var brightnessHUD: (value: Float, token: Int)?
+    /// Live iPad screen brightness (0...1), kept in sync with Mac brightness keys and slider.
+    var screenBrightness: Float = 0.7
 }
 
 /// Client side of a session (iPad). Listens on 127.0.0.1:9100; the Mac dials in

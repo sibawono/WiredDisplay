@@ -1217,4 +1217,18 @@ During scrolling, sampled medians were 0.05 ms capture-delivery-to-conversion, 4
   - Added Apple Pencil pressure sensitivity (`.stylus` events) and `UIPencilInteraction` double-tap / Apple Pencil Pro squeeze action (`Off / Right Click / Undo ⌘Z`).
 
 **VERIFIED:**
-- Pending `macos-26` CI verification via Draft PR #3.
+- `macos-26` CI passed on Draft PR #3; Mac + iPad verified on hardware.
+
+## CHANGE ID: P1-075 — GPU/encode pipeline overlap, audio dropout smoothing, PLW-06 idle sleep fix, iPad brightness slider & Quick Actions
+
+**WHAT:**
+- `macOSHost/Host/{ChromaConverter,VideoEncoder}.swift`: added `ChromaConverter.convertAsync` and pipelined GPU chroma conversion into a dedicated `encodeQueue` (bounded to 2 in-flight GPU conversions with waiting-frame coalescing), allowing frame N+1's GPU conversion to overlap with frame N's hardware HEVC encode instead of blocking synchronously.
+- `Shared/Session/AudioJitterBuffer.swift` & `Tests/Unit/WDSessionTests/SessionTests.swift`: added RT-safe 32-frame (~0.67 ms) anti-click fade-out on underrun (including smooth decay from `lastSample` when empty) and fade-in on recovery for real-time audio buffers (`targetFrames >= 64`), plus unit test coverage.
+- `macOSHost/Host/HostController.swift`: fixed `PLW-06` by pausing the speaker tap IOProc when Mac displays sleep (releasing `coreaudiod`'s idle-sleep assertion) and resuming it automatically on display wake.
+- `iPadOSClient/WiredDisplayClient/Sources/{ClientSession,ClientApp,ClientUI}.swift`:
+  - Added a Brightness slider card in the iPad Display tab, synced bidirectionally with Mac brightness keys and menu bar slider.
+  - Added a 3×2 Quick Actions grid in the iPad Input tab (`Spotlight`, `Mission Ctrl`, `Switch App`, `Screenshot`, `Show Dock`, `Lock Mac`) for one-tap control without a hardware keyboard.
+
+**VERIFIED:**
+- Pending `macos-26` CI verification on Draft PR #3.
+

@@ -314,6 +314,46 @@ struct DeviceInfo: Equatable {
     var hevcHardware: Bool
 }
 
+/// One-tap macOS shortcuts sent from the iPad Input tab (works without a hardware keyboard).
+enum QuickAction: String, CaseIterable, Identifiable {
+    case spotlight, missionControl, appSwitch, screenshot, dock, lockMac
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .spotlight: return "Spotlight"
+        case .missionControl: return "Mission Ctrl"
+        case .appSwitch: return "Switch App"
+        case .screenshot: return "Screenshot"
+        case .dock: return "Show Dock"
+        case .lockMac: return "Lock Mac"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .spotlight: return "magnifyingglass"
+        case .missionControl: return "rectangle.3.group"
+        case .appSwitch: return "square.on.square"
+        case .screenshot: return "camera.viewfinder"
+        case .dock: return "dock.rectangle"
+        case .lockMac: return "lock.fill"
+        }
+    }
+
+    /// USB HID keyboard usages (page 0x07), pressed in order and released in reverse.
+    var usages: [UInt16] {
+        switch self {
+        case .spotlight: return [0xE3, 0x2C]         // ⌘ Space
+        case .missionControl: return [0xE0, 0x52]    // ⌃ ↑
+        case .appSwitch: return [0xE3, 0x2B]         // ⌘ Tab
+        case .screenshot: return [0xE3, 0xE1, 0x22]  // ⌘ ⇧ 5
+        case .dock: return [0xE3, 0xE2, 0x07]        // ⌘ ⌥ D
+        case .lockMac: return [0xE0, 0xE3, 0x14]     // ⌃ ⌘ Q
+        }
+    }
+}
+
 struct ControlsContent: View {
     enum Tab: String, CaseIterable, Identifiable {
         case display, audio, input, more
@@ -339,12 +379,14 @@ struct ControlsContent: View {
     let summary: SessionSummary
     @Binding var displaySpace: Int
     @Binding var qualityPreset: Int
+    @Binding var brightness: Double
     @Binding var showStatsHUD: Bool
     @Binding var speaker: Bool
     @Binding var microphone: Bool
     @Binding var smoothGradients: Bool
     var metalRenderer: Binding<Bool>? = nil
     @Binding var pencilAction: PencilAction
+    var quickAction: (QuickAction) -> Void = { _ in }
     let pairedMacs: [PairedMacRow]
     let forgetPaired: () -> Void
     let reconnect: () -> Void
@@ -495,6 +537,22 @@ struct ControlsContent: View {
                         .font(.caption).foregroundStyle(Brand.secondaryText)
                 }
             }
+            card("Brightness") {
+                HStack(spacing: 10) {
+                    Image(systemName: "sun.min.fill")
+                        .font(.caption)
+                        .foregroundStyle(Brand.secondaryText)
+                    Slider(value: $brightness, in: 0.05...1)
+                        .tint(Brand.blue)
+                    Image(systemName: "sun.max.fill")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.85))
+                    Text("\(Int((brightness * 100).rounded()))%")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(Brand.secondaryText)
+                        .frame(width: 34, alignment: .trailing)
+                }
+            }
             card("Renderer & HUD") {
                 ToggleRow(symbol: "gauge.with.dots.needle.67percent", title: "Live stats HUD",
                           detail: "Show FPS and latency in the corner.", isOn: $showStatsHUD)
@@ -542,6 +600,31 @@ struct ControlsContent: View {
 
     private var inputTab: some View {
         Group {
+            card("Quick Actions") {
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 8),
+                                    GridItem(.flexible(), spacing: 8),
+                                    GridItem(.flexible(), spacing: 8)], spacing: 8) {
+                    ForEach(QuickAction.allCases) { action in
+                        Button { quickAction(action) } label: {
+                            VStack(spacing: 5) {
+                                Image(systemName: action.symbol)
+                                    .font(.system(size: 15, weight: .medium))
+                                Text(action.title)
+                                    .font(.system(size: 10.5, weight: .medium))
+                                    .lineLimit(1)
+                            }
+                            .foregroundStyle(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(.white.opacity(0.08)))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(!summary.streaming)
+                        .opacity(summary.streaming ? 1 : 0.45)
+                    }
+                }
+            }
             card("Apple Pencil") {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Double-tap / Squeeze")
