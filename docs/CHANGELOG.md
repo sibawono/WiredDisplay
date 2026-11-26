@@ -1185,3 +1185,11 @@ During scrolling, sampled medians were 0.05 ms capture-delivery-to-conversion, 4
 
 **VERIFIED:**
 - Pending `macos-26` CI verification on PR #2.
+
+## CHANGE ID: P1-072 — Apple Pencil direct click/drag, coalesced 240 Hz strokes, and palm rejection
+
+**WHAT:**
+- `iPadOSClient/WiredDisplayClient/Sources/VideoView.swift`: added dedicated Apple Pencil handling (`touch.type == .pencil`) for immediate precision click/drag/draw without the 350 ms finger hold delay, sub-pixel `preciseLocation(in:)` coordinates, `coalescedTouches(for:)` for smooth high-rate strokes, hover guard, and palm rejection (suppressing resting-hand finger touches and multi-finger gesture recognizers while the Pencil is active and for 250 ms after lift).
+
+**VERIFIED:**
+- Pending iPad hardware test via `scripts/install-ipad-app.sh`.
