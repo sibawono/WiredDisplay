@@ -64,8 +64,9 @@ With every release, update the website to that release in the same step (owner: 
 
 Unreleased work on `main` stays off the site. Deploy only on the owner's yes.
 
-## State (2026-11-23, evening)
-- v0.5.2 (build 11) is released on GitHub. Local `main` and the published `public` tree match, except `docs/evidence`.
+## State (2026-11-26)
+- v0.5.3 (build 12) is built and ready for release.
+- 0.5.3 adds (P1-067 to P1-077): SideStore Connect; RT-safe audio FIFOs & lock-free HAL timestamps; Both Speakers (Mac + iPad) with sync delay & balance; Apple Pencil direct click/drag, 240 Hz strokes, palm rejection, pressure & double-tap/squeeze; Magic Keyboard global shortcuts fixes & remaps; redesigned 4-tab iPad Controls panel (Display Space, Quality, Brightness, Mac Volume & Mute, 3×2 Quick Actions, confirmed Sleep Mac, On-Screen Soft Keyboard, Live Stats HUD); GPU/encode pipeline overlap; audio dropout smoothing; PLW-06 idle-sleep fix.
 - 0.5.2 adds (P1-057 to P1-063): More/Most Space when the iPad is the only screen (D-043); background audio lifecycle on the iPad; GPU 4:4:4 conversion; the `WDHostCore` module; CI; the publish scripts; UI contrast fixes; the movable, idle-fading Controls button with its own panel.
 - 0.5.1 adds: the fix for GitHub issue #1 (capture no longer waits for the encoder; bounded iPad decode queue), "Keep the display on" / "Keep the Mac awake", and golden protocol vectors for a second (Android) client (`Tests/Vectors`, `docs/ANDROID_COMPATIBILITY.md`).
 - New since 0.4.2:

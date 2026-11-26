@@ -1,9 +1,9 @@
-WiredDisplay 0.5.2: Panduan Instalasi
+WiredDisplay 0.5.3: Panduan Instalasi
 iPad jadi layar Mac lewat kabel USB-C (dengan suara dan input sentuh)
 
 Isi paket
-- WiredDisplay-0.5.2.dmg   → app untuk Mac (host)
-- WiredDisplay-0.5.2.ipa   → app untuk iPad (dipasang lewat AltStore)
+- WiredDisplay-0.5.3.dmg   → app untuk Mac (host)
+- WiredDisplay-0.5.3.ipa   → app untuk iPad (dipasang lewat AltStore atau SideStore)
 - PANDUAN-INSTALASI.txt    → file ini
 
 Yang dibutuhkan
@@ -11,10 +11,10 @@ Yang dibutuhkan
   disarankan.
 - iPad dengan iPadOS 17 atau lebih baru, dan kabel USB-C yang mendukung data
   (bukan kabel khusus charging).
-- Apple ID gratis (milik kamu sendiri) untuk AltStore.
+- Apple ID gratis (milik kamu sendiri) untuk AltStore atau SideStore.
 
 
-BAGIAN A: Pasang app iPad lewat AltStore
+BAGIAN A: Pasang app iPad lewat AltStore atau SideStore
 
 1. Di Mac, unduh AltServer dari situs resminya: https://altstore.io
    Pasang dan jalankan. AltServer muncul sebagai ikon di menu bar.
@@ -33,9 +33,10 @@ BAGIAN A: Pasang app iPad lewat AltStore
 5. Nyalakan Developer Mode: Settings › Privacy & Security › Developer Mode → On.
    iPad akan restart; setelah menyala, konfirmasi "Turn On".
 
-6. Kirim file WiredDisplay-0.5.2.ipa ke iPad (AirDrop, atau simpan di app Files).
+6. Kirim file WiredDisplay-0.5.3.ipa ke iPad (AirDrop, atau simpan di app Files).
    Buka AltStore › My Apps › tombol + di kiri atas → pilih file .ipa itu.
    Tunggu sampai WiredDisplay muncul di layar utama.
+   (Alternatif: pasang lewat SideStore jika kamu memakai SideStore.)
 
 Perpanjangan 7 hari (penting)
 - App dari Apple ID gratis berlaku 7 hari. AltStore memperpanjangnya sendiri di
@@ -51,7 +52,7 @@ Perpanjangan 7 hari (penting)
 
 BAGIAN B: Pasang app Mac (host)
 
-1. Buka WiredDisplay-0.5.2.dmg. Seret WiredDisplayHost ke folder Applications.
+1. Buka WiredDisplay-0.5.3.dmg. Seret WiredDisplayHost ke folder Applications.
 
 2. Buka WiredDisplayHost. Karena app ini tidak dinotarisasi Apple, macOS akan
    menolak saat pertama dibuka. Buka System Settings › Privacy & Security,
@@ -98,7 +99,9 @@ Panel di menu bar Mac (klik ikon WiredDisplay)
   AirPods/earphone USB-C yang tersambung otomatis jadi speaker dan mic,
   dan saat dilepas suara kembali ke iPad. Matikan "Use their microphone
   too" kalau ingin suara saja di AirPods sementara mic tetap di iPad
-  (kualitas suara AirPods tetap penuh).
+  (kualitas suara AirPods tetap penuh). Ada juga "Play on Mac speakers
+  too" (Both Speakers) dengan slider sync delay dan Mac speaker balance
+  bila ingin suara keluar serentak di Mac dan iPad.
 - Tab Security (kode koneksi, iPad yang di-pair beserta nama dan
   modelnya), General (izin, Open at Login, dan dua pilihan selama iPad
   terhubung: "Keep the display on": layar Mac tidak mati sendiri, dan
@@ -111,23 +114,33 @@ Panel di menu bar Mac (klik ikon WiredDisplay)
   High Color (4:4:4 8-bit). Bisa diganti kapan saja.
 - Forget Paired iPads: hapus pairing bila ingin pairing ulang.
 
-Gestur sentuh (bila input dinyalakan)
+Gestur sentuh & Apple Pencil (bila input dinyalakan)
 - Ketuk = klik · geser 1 jari = scroll · tahan lalu geser = drag/pilih teks
 - Ketuk 2 jari = klik kanan · cubit = zoom
 - Putar 2 jari = rotate
 - 3 jari: cubit masuk = copy, 2× = cut, cubit keluar = paste,
   geser kiri = undo, geser kanan = redo
+- Apple Pencil: klik/drag langsung tanpa jeda tahan, 240 Hz coalesced
+  strokes, palm rejection, pressure sensitivity, serta aksi double-tap /
+  Apple Pencil Pro squeeze (Off / Right Click / Undo ⌘Z) di tab Input iPad.
 
 Magic Keyboard & trackpad di iPad
 - Trackpad: scroll 2 jari, klik 2 jari = klik kanan, pinch = zoom, putar = rotate.
-- iPadOS mengambil Cmd+Tab, Cmd+Space dan Cmd+Shift+3/4/5, jadi pakai Ctrl:
+- iPadOS mengambil beberapa pintasan global Mac, jadi pakai Ctrl:
   Ctrl+Tab = Cmd+Tab (tahan Ctrl, tekan Tab lagi untuk pindah app)
-  Ctrl+Shift+Tab, Ctrl+` , Ctrl+Space = Spotlight, Ctrl+Shift+3/4/5 = screenshot
+  Ctrl+Shift+Tab, Ctrl+`, Ctrl+Space = Spotlight, Ctrl+Shift+3/4/5 = screenshot
+  Ctrl+H / Ctrl+Opt+H = Hide App / Hide Others, Ctrl+Opt+D = Show/Hide Dock
+  Ctrl+Opt+Esc = Force Quit, Ctrl+Opt+Space = Finder Search
 - Ctrl+↑ = Mission Control, Ctrl+←/→ = pindah Space.
-- Daftar lengkap ada di app iPad: tombol Controls › Keyboard & trackpad.
+- Daftar lengkap ada di app iPad: tombol Controls › tab Input.
 - Tombol Controls (ikon slider) bisa digeser ke tepi kiri atau kanan, di ketinggian
   mana saja, dan posisinya diingat. Saat streaming tombol meredup sendiri setelah
   4 detik, tapi tetap bisa diketuk di tempatnya.
+- Panel Controls iPad kini terdiri dari 4 tab (Display, Audio, Input, More):
+  atur Display Space, Quality, Brightness iPad, Mac Volume & Mute, Live Stats HUD,
+  3×2 Quick Actions (Spotlight, Mission Control, Switch App, Screenshot, Show Dock,
+  Lock Mac), Sleep Mac (dengan konfirmasi), dan On-Screen Soft Keyboard lengkap
+  dengan tombol Esc, Tab, dan panah.
 
 Fitur lain
 - Putar iPad ke portrait: layar Mac ikut menjadi vertikal (layar hilang

@@ -1255,5 +1255,28 @@ During scrolling, sampled medians were 0.05 ms capture-delivery-to-conversion, 4
 **VERIFIED:**
 - Pending `macos-26` CI verification via Draft PR #4.
 
+## CHANGE ID: P1-078 — Release 0.5.3 (build 12)
+
+**CONTENTS:** P1-067 to P1-077.
+- SideStore Connect integration (workflow + publish script).
+- Audit fixes: RT-safe speaker/mic FIFOs, lock-free HAL timestamps, reconnect while audio is active, zero-copy frame metrics, unplugged USB cleanup, Swift 6 warning cleanup.
+- Both Speakers (Mac + iPad) with configurable sync delay and Mac speaker balance.
+- Apple Pencil direct click/drag, 240 Hz coalesced strokes, palm rejection, pressure sensitivity, and double-tap/squeeze actions.
+- Magic Keyboard global shortcuts audit & remaps (`⌃H`, `⌃⌥H`, `⌃⌥D`, `⌃⌥Esc`, `⌃⌥Space`), modifier `flagsChanged`, and modifier-attached clicks/scrolls.
+- Redesigned 4-tab iPad Controls panel (`Display`, `Audio`, `Input`, `More`) with Display Space, Quality, Brightness, Mac Volume & Mute, Live Stats HUD, 3×2 Quick Actions, confirmed Sleep Mac, and On-Screen Soft Keyboard with Esc/Tab/Arrow bar.
+- GPU/encode pipeline overlap, RT-safe audio dropout smoothing, and PLW-06 idle-sleep fix.
+
+**FILES CHANGED:**
+- `scripts/build-host-app.sh` and `iPadOSClient/WiredDisplayClient/WiredDisplayClient.xcodeproj/project.pbxproj`: 0.5.3, build 12.
+- `docs/share/PANDUAN-INSTALASI.txt`: updated to 0.5.3 with SideStore, Both Speakers, Apple Pencil, Magic Keyboard remaps, and 4-tab iPad Controls.
+- `docs/images/host-*.png`: rendered live from the 0.5.3 build.
+- `AGENTS.md`: updated release state.
+
+**VERIFIED:**
+- `swift test` passed (0 failures).
+- `scripts/build-host-app.sh`, `scripts/build-ipa.sh` (`dist/WiredDisplay-0.5.3.ipa`, 724,642 bytes), and `SIGN_IDENTITY=- scripts/build-dmg.sh` (`dist/WiredDisplay-0.5.3.dmg`, 1,155,395 bytes) all succeeded.
+- Identifier scan on `dist/WiredDisplay-0.5.3.{dmg,ipa}` returned clean.
+
+
 
 
