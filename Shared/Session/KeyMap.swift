@@ -59,4 +59,68 @@ public enum KeyMap {
         // Modifiers: left/right control, shift, option, command
         0xE0: 0x3B, 0xE1: 0x38, 0xE2: 0x3A, 0xE3: 0x37, 0xE4: 0x3E, 0xE5: 0x3C, 0xE6: 0x3D, 0xE7: 0x36,
     ]
+
+    /// Maps an ASCII character from the iPad on-screen keyboard to a USB HID usage
+    /// (US layout) plus whether left Shift (0xE1) is needed.
+    public static func usage(for character: Character) -> (usage: UInt16, shift: Bool)? {
+        guard let scalar = character.asciiValue else { return nil }
+        switch scalar {
+        case 0x61...0x7A: return (UInt16(scalar - 0x61) + 0x04, false) // a-z
+        case 0x41...0x5A: return (UInt16(scalar - 0x41) + 0x04, true)  // A-Z
+        case 0x31...0x39: return (UInt16(scalar - 0x31) + 0x1E, false) // 1-9
+        case 0x30: return (0x27, false)                                 // 0
+        case 0x0A, 0x0D: return (0x28, false)                           // Return
+        case 0x09: return (0x2B, false)                                 // Tab
+        case 0x20: return (0x2C, false)                                 // Space
+        default: break
+        }
+        switch character {
+        case "!": return (0x1E, true)
+        case "@": return (0x1F, true)
+        case "#": return (0x20, true)
+        case "$": return (0x21, true)
+        case "%": return (0x22, true)
+        case "^": return (0x23, true)
+        case "&": return (0x24, true)
+        case "*": return (0x25, true)
+        case "(": return (0x26, true)
+        case ")": return (0x27, true)
+        case "-": return (0x2D, false)
+        case "_": return (0x2D, true)
+        case "=": return (0x2E, false)
+        case "+": return (0x2E, true)
+        case "[": return (0x2F, false)
+        case "{": return (0x2F, true)
+        case "]": return (0x30, false)
+        case "}": return (0x30, true)
+        case "\\": return (0x31, false)
+        case "|": return (0x31, true)
+        case ";": return (0x33, false)
+        case ":": return (0x33, true)
+        case "'": return (0x34, false)
+        case "\"": return (0x34, true)
+        case "`": return (0x35, false)
+        case "~": return (0x35, true)
+        case ",": return (0x36, false)
+        case "<": return (0x36, true)
+        case ".": return (0x37, false)
+        case ">": return (0x37, true)
+        case "/": return (0x38, false)
+        case "?": return (0x38, true)
+        default: return nil
+        }
+    }
+
+    /// Converts typed text from the iPad on-screen keyboard into `.key` press/release events.
+    public static func keyEvents(for text: String) -> [InputEvent] {
+        var events: [InputEvent] = []
+        for character in text {
+            guard let (usage, shift) = usage(for: character) else { continue }
+            if shift { events.append(.key(usage: 0xE1, down: true)) }
+            events.append(.key(usage: usage, down: true))
+            events.append(.key(usage: usage, down: false))
+            if shift { events.append(.key(usage: 0xE1, down: false)) }
+        }
+        return events
+    }
 }

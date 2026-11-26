@@ -521,6 +521,12 @@ struct ControlsPanel: View {
                 close()
                 app.sendQuickAction(action)
             },
+            showKeyboard: {
+                close()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    app.videoView.showSoftKeyboard()
+                }
+            },
             sleepMac: {
                 close()
                 app.session?.sleepMac()

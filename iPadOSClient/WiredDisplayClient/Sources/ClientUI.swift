@@ -389,6 +389,7 @@ struct ControlsContent: View {
     var metalRenderer: Binding<Bool>? = nil
     @Binding var pencilAction: PencilAction
     var quickAction: (QuickAction) -> Void = { _ in }
+    var showKeyboard: () -> Void = {}
     var sleepMac: () -> Void = {}
     let pairedMacs: [PairedMacRow]
     let forgetPaired: () -> Void
@@ -625,6 +626,23 @@ struct ControlsContent: View {
 
     private var inputTab: some View {
         Group {
+            card("On-Screen Keyboard") {
+                Button(action: showKeyboard) {
+                    Label("Show Keyboard", systemImage: "keyboard.fill")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .background(Brand.blue.opacity(0.28), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous)
+                            .strokeBorder(Brand.blue.opacity(0.6)))
+                }
+                .buttonStyle(.plain)
+                .disabled(!summary.streaming)
+                .opacity(summary.streaming ? 1 : 0.45)
+                Text("Includes Esc, Tab, and arrow keys for typing without a hardware keyboard.")
+                    .font(.caption).foregroundStyle(Brand.secondaryText)
+            }
             card("Quick Actions") {
                 LazyVGrid(columns: [GridItem(.flexible(), spacing: 8),
                                     GridItem(.flexible(), spacing: 8),
