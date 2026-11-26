@@ -334,7 +334,9 @@ final class StatusMenu: NSObject {
             alert.addButton(withTitle: "Pair")
             alert.addButton(withTitle: "Don't Pair")
             NSApp.activate(ignoringOtherApps: true)
-            let timer = Timer(timeInterval: 120, repeats: false) { _ in NSApp.abortModal() }
+            let timer = Timer(timeInterval: 120, repeats: false) { _ in
+                MainActor.assumeIsolated { NSApp.abortModal() }
+            }
             RunLoop.main.add(timer, forMode: .modalPanel)
             defer { timer.invalidate() }
             return alert.runModal() == .alertFirstButtonReturn

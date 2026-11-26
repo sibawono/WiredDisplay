@@ -83,8 +83,6 @@ final class SwitchableSink: VideoSink, @unchecked Sendable {
         self.metal = metal
     }
 
-    var hasMetal: Bool { metal != nil }
-
     func select(metal wanted: Bool) {
         let previous: VideoSink? = lock.withLock {
             let next = wanted && metal != nil

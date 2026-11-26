@@ -21,7 +21,6 @@ final class ClientAudio {
     private var engine: AVAudioEngine?
     private var interruptionObserver: NSObjectProtocol?
     private var configObserver: NSObjectProtocol?
-    private var ignoreConfigChangesUntil = Date.distantPast
     private var restartWork: DispatchWorkItem?
     private var formatRetries = 0
     private var recentRestarts: [Date] = []
@@ -135,7 +134,6 @@ final class ClientAudio {
                 engine.mainMixerNode.outputVolume = 0
                 _ = engine.mainMixerNode
             }
-            ignoreConfigChangesUntil = Date().addingTimeInterval(1.0)
             engine.prepare()
             try engine.start()
             self.engine = engine

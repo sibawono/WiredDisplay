@@ -110,7 +110,7 @@ struct StatusPanelView: View {
     private var s: PanelSnapshot { model.snapshot }
 
     var body: some View {
-        GlassGroup(spacing: 10) { panel }
+        panel
     }
 
     private var panel: some View {
@@ -717,14 +717,6 @@ private struct GlassPlate: View {
                 .overlay(shape.strokeBorder(Color(nsColor: .separatorColor), lineWidth: 0.5))
         }
     }
-}
-
-/// Keeps the panel's children grouped (layout only; the controls inside
-/// bring their own Liquid Glass).
-private struct GlassGroup<Content: View>: View {
-    let spacing: CGFloat
-    @ViewBuilder var content: Content
-    var body: some View { content }
 }
 
 private extension View {

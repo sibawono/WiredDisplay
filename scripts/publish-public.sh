@@ -14,11 +14,12 @@ RX="$(grep -A1 'Identifier scan list' "$HANDOVER" | sed -n 's/.*`\(.*\)`.*/\1/p'
 ALLOWED='sibawono|memanggil'
 
 MAIN_AT_START="$(git rev-parse main)" PUBLIC_AT_START="$(git rev-parse public)"
-INDEX="$(mktemp -d)/index"
+INDEX_DIR="$(mktemp -d)"
+trap 'rm -rf "$INDEX_DIR"' EXIT
+INDEX="$INDEX_DIR/index"
 GIT_INDEX_FILE="$INDEX" git read-tree main
-GIT_INDEX_FILE="$INDEX" git rm -r -q --cached docs/evidence
+GIT_INDEX_FILE="$INDEX" git rm -r -q --cached --ignore-unmatch docs/evidence
 TREE="$(GIT_INDEX_FILE="$INDEX" git write-tree)"
-rm -rf "$(dirname "$INDEX")"
 
 HITS="$(git grep -n -I -i -E "$RX" "$TREE" -- . \
   | RX="$RX" ALLOWED="$ALLOWED" perl -ne 'my $l = $_; $l =~ s/$ENV{ALLOWED}//gi; print if $l =~ /$ENV{RX}/i' || true)"

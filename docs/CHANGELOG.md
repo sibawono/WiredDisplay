@@ -1161,3 +1161,18 @@ During scrolling, sampled medians were 0.05 ms capture-delivery-to-conversion, 4
 
 **VERIFIED:**
 - Pending `macos-26` CI verification via Draft PR.
+
+## CHANGE ID: P1-070 — Audit Tahap 3: dead code removal, Swift 6 warning cleanup, script hardening
+
+**WHAT:**
+- `macOSHost/Host/NativeControls.swift`: removed unused `NativeSwitch` wrapper (replaced by `KitSwitch`).
+- `macOSHost/Host/StatusPanel.swift`: removed no-op `GlassGroup` wrapper.
+- `macOSHost/Host/BrightnessKeys.swift`, `CursorEcho.swift`, `main.swift`: removed unused `runLoop` property and fixed pre-existing Swift 6 compiler warnings (`stepBrightness` unused result, `nonisolated(unsafe)` on Sendable `Fn?`, `NSApp.abortModal()` MainActor isolation).
+- `macOSHost/Host/VideoEncoder.swift`: removed duplicate doc comment on `wantsBGRA` and redundant `clock_gettime_nsec_np` read.
+- `iPadOSClient/WiredDisplayClient/Sources/{ClientAudio,MetalVideoRenderer,ClientUI,VideoView}.swift`: removed dead `ignoreConfigChangesUntil`, `SwitchableSink.hasMetal`, `Brand.deep`, and write-only `ignoredTouches`.
+- `scripts/e05b-monitor.sh`: removed obsolete Phase 0 monitor script with hardcoded local paths.
+- `scripts/build-dmg.sh`: defaulted `SIGN_IDENTITY` to `-` (ad-hoc) per `AGENTS.md` release rules.
+- `scripts/publish-public.sh`: added `trap` cleanup for temporary index directory and `--ignore-unmatch` for `git rm`.
+
+**VERIFIED:**
+- Pending `macos-26` CI verification on PR #2.

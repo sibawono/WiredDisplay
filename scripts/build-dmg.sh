@@ -2,13 +2,14 @@
 # Builds dist/WiredDisplay-<version>.dmg: the host app, an Applications
 # shortcut, the audio driver with an install/uninstall script, and a README.
 #
-# Signing: Apple Development identity (same as build-host-app.sh). The DMG is
+# Signing: ad-hoc (-) by default for public release DMGs (AGENTS.md). The DMG is
 # NOT notarized: on another Mac, Gatekeeper asks the user to approve the app
 # once (System Settings > Privacy & Security > Open Anyway).
 # This script never uses sudo; the driver installer asks for the password
 # when the user runs it.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+export SIGN_IDENTITY="${SIGN_IDENTITY:--}"
 
 VERSION="$(sed -n 's/.*<key>CFBundleShortVersionString<\/key><string>\(.*\)<\/string>.*/\1/p' scripts/build-host-app.sh)"
 STAGE="$(mktemp -d "${TMPDIR:-/tmp}/wd-dmg.XXXXXX")"

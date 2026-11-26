@@ -146,7 +146,6 @@ final class VideoView: UIView, UIPointerInteractionDelegate, UIGestureRecognizer
     private var primaryTouch: UITouch?
     private var transformTracker = TransformTracker()
     private var lastEdit: (gesture: EditGesture, time: TimeInterval)?
-    private var ignoredTouches = Set<UITouch>()
     private var longPress: DispatchWorkItem?
     /// Trackpad/mouse button presses in progress, with the button they hold.
     private var pointerPresses: [UITouch: PointerButton] = [:]
@@ -425,7 +424,7 @@ final class VideoView: UIView, UIPointerInteractionDelegate, UIGestureRecognizer
             // (drag, double click). Secondary (two-finger click) = right button.
             if touch.type == .indirectPointer {
                 let button: PointerButton = event?.buttonMask.contains(.secondary) == true ? .right : .left
-                guard let point = normalized(touch.location(in: self)) else { ignoredTouches.insert(touch); continue }
+                guard let point = normalized(touch.location(in: self)) else { continue }
                 pointerPresses[touch] = button
                 lastPointerPoint = point
                 let x = Float(point.x), y = Float(point.y)
@@ -457,7 +456,6 @@ final class VideoView: UIView, UIPointerInteractionDelegate, UIGestureRecognizer
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-        ignoredTouches.subtract(touches)
         endPointerPresses(touches)
         guard let primary = primaryTouch, touches.contains(primary) else { return }
         primaryTouch = nil
@@ -468,7 +466,6 @@ final class VideoView: UIView, UIPointerInteractionDelegate, UIGestureRecognizer
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
         // A recognizer (two or more fingers) took over, or the system did.
-        ignoredTouches.subtract(touches)
         endPointerPresses(touches)
         guard let primary = primaryTouch, touches.contains(primary) else { return }
         primaryTouch = nil
@@ -521,7 +518,6 @@ final class VideoView: UIView, UIPointerInteractionDelegate, UIGestureRecognizer
         }
         cancelLongPress()
         primaryTouch = nil
-        ignoredTouches.removeAll()
         emit(interpreter.cancelled())
     }
 

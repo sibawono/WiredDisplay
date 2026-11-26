@@ -71,7 +71,7 @@ final class CursorEcho: @unchecked Sendable {
     /// Hidden while typing (macOS hides the pointer) and by apps that hide it.
     private static func cursorShown() -> Bool {
         typealias Fn = @convention(c) () -> Int32
-        struct Lookup { nonisolated(unsafe) static let fn: Fn? = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CGCursorIsVisible")
+        struct Lookup { static let fn: Fn? = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CGCursorIsVisible")
             .map { unsafeBitCast($0, to: Fn.self) } }
         return Lookup.fn.map { $0() != 0 } ?? true
     }
