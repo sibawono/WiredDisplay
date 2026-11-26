@@ -61,6 +61,9 @@ final class StatusMenu: NSObject {
                 BrightnessKeys.shared.add(controller)
             }
         }
+        fleet.onControllerRemoved = { controller in
+            BrightnessKeys.shared.remove(controller)
+        }
         refresh()
     }
 

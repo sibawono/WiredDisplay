@@ -1176,3 +1176,12 @@ During scrolling, sampled medians were 0.05 ms capture-delivery-to-conversion, 4
 
 **VERIFIED:**
 - Pending `macos-26` CI verification on PR #2.
+
+## CHANGE ID: P1-071 — iPad Mic RT-safe FIFO and unplugged USB controller cleanup
+
+**WHAT:**
+- `iPadOSClient/WiredDisplayClient/Sources/ClientAudio.swift`: added `MicFifo` so the CoreAudio real-time input callback only try-locks and copies Float32 samples into a preallocated ring buffer; `AVAudioConverter`, packetization, sending, and logging now run on a dedicated `wireddisplay.mic-sender` thread.
+- `macOSHost/Host/HostFleet.swift`, `BrightnessKeys.swift`, `main.swift`: stopped and removed idle `HostController` instances whose USB device has been absent from `usbmuxd` for >= 10 s, and released them from `BrightnessKeys`.
+
+**VERIFIED:**
+- Pending `macos-26` CI verification on PR #2.

@@ -21,6 +21,8 @@ final class HostFleet: @unchecked Sendable {
     var onChange: (@Sendable () -> Void)?
     /// Main queue: a controller was created (for per-iPad brightness keys).
     var onControllerAdded: (@Sendable (HostController) -> Void)?
+    /// Main queue: an unplugged idle controller was removed.
+    var onControllerRemoved: (@Sendable (HostController) -> Void)?
 
     init(options: HostController.Options, confirmPairing: @escaping @Sendable (SecureChannel.Peer) -> Bool) {
         currentOptions = OSAllocatedUnfairLock(initialState: options)
@@ -49,13 +51,31 @@ final class HostFleet: @unchecked Sendable {
         for controller in controllers { controller.stop() }
     }
 
-    /// Every 2 s: a controller for each cabled device that has none yet.
+    /// Every 2 s: add a controller for each new cabled device, and remove idle
+    /// controllers whose USB device has been absent for at least 10 s.
     private func watchDevices() {
+        var lastSeen: [String: TimeInterval] = [:]
         while !stopping.withLock({ $0 }) {
+            let now = ProcessInfo.processInfo.systemUptime
             if let devices = try? UsbmuxConnection().listDevices() {
+                let wired = UsbmuxDevice.wiredOnly(devices)
+                let present = Set(wired.map(\.serialNumber))
+                for serial in present { lastSeen[serial] = now }
                 let known = Set(controllers.compactMap(\.deviceSerial))
-                for device in UsbmuxDevice.wiredOnly(devices) where !known.contains(device.serialNumber) {
+                for device in wired where !known.contains(device.serialNumber) {
                     add(serial: device.serialNumber)
+                }
+                let stale = controllers.filter { controller in
+                    guard let serial = controller.deviceSerial, !present.contains(serial) else { return false }
+                    guard now - (lastSeen[serial] ?? 0) >= 10 else { return false }
+                    switch state(of: controller) {
+                    case .waitingForDevice, .backingOff, .stopped: return true
+                    case .connecting, .streaming, .paused, .audioOnly, .pairing: return false
+                    }
+                }
+                for controller in stale {
+                    if let serial = controller.deviceSerial { lastSeen.removeValue(forKey: serial) }
+                    remove(controller)
                 }
             }
             Thread.sleep(forTimeInterval: 2)
@@ -76,6 +96,21 @@ final class HostFleet: @unchecked Sendable {
         let added = onControllerAdded
         DispatchQueue.main.async { added?(controller) }
         controller.start()
+        changed()
+    }
+
+    private func remove(_ controller: HostController) {
+        let removed: Bool = lock.withLock {
+            guard let index = $0.controllers.firstIndex(where: { $0 === controller }) else { return false }
+            $0.controllers.remove(at: index)
+            $0.states.removeValue(forKey: ObjectIdentifier(controller))
+            return true
+        }
+        guard removed else { return }
+        controller.stop()
+        Log.info("fleet: stopped idle controller for unplugged device \(controller.deviceSerial?.prefix(8) ?? "?")… (\(controllers.count) remaining)")
+        let notify = onControllerRemoved
+        DispatchQueue.main.async { notify?(controller) }
         changed()
     }
 

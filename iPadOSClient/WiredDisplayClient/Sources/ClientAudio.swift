@@ -19,6 +19,7 @@ final class ClientAudio {
     private(set) var speakerOn = false
     private(set) var microphoneOn = false
     private var engine: AVAudioEngine?
+    private var micFifo: MicFifo?
     private var interruptionObserver: NSObjectProtocol?
     private var configObserver: NSObjectProtocol?
     private var restartWork: DispatchWorkItem?
@@ -187,9 +188,12 @@ final class ClientAudio {
     }
 
     private func teardown() {
-        guard let engine else { return }
-        engine.stop()
-        self.engine = nil
+        if let engine {
+            engine.stop()
+            self.engine = nil
+        }
+        micFifo?.stopSender()
+        micFifo = nil
     }
 
     private func installMicrophoneSink(on engine: AVAudioEngine) throws {
@@ -197,76 +201,199 @@ final class ClientAudio {
         let inputFormat = input.outputFormat(forBus: 0)
         // A tap on an invalid format raises an Objective-C exception (BUG-026).
         guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else { throw InputNotReady() }
-        guard let target = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: SessionConstants.audioSampleRate,
+        guard inputFormat.commonFormat == .pcmFormatFloat32,
+              let target = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: SessionConstants.audioSampleRate,
                                          channels: 1, interleaved: false),
               let converter = AVAudioConverter(from: inputFormat, to: target) else {
             throw NSError(domain: "WiredDisplay", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "unsupported microphone format \(inputFormat)"])
         }
-        let box = ConverterBox(converter: converter, target: target)
+        let fifo = MicFifo(inputFormat: inputFormat, converter: converter, target: target)
+        if let send = onMicrophone { fifo.startSender(send) }
+        micFifo = fifo
         ClientLog.write("microphone sink format \(inputFormat), IO buffer \(AVAudioSession.sharedInstance().ioBufferDuration * 1000) ms")
         // A sink node receives every IO cycle (~5 ms) instead of the ~50 ms
-        // chunks a tap delivered (step 2).
-        let sink = AVAudioSinkNode(receiverBlock: Self.makeMicrophoneSink(format: inputFormat, box: box, send: onMicrophone))
+        // chunks a tap delivered (step 2). The real-time callback only copies
+        // into `fifo`; conversion, packetization, encryption and logging run
+        // on the FIFO's sender thread.
+        let sink = AVAudioSinkNode(receiverBlock: Self.makeMicrophoneSink(fifo: fifo))
         engine.attach(sink)
         engine.connect(input, to: sink, format: inputFormat)
     }
 
     /// Built outside the main actor: AVAudioEngine calls it on its real-time
     /// thread, and a main-actor-isolated closure there traps under Swift 6
-    /// (BUG-031).
-    private nonisolated static func makeMicrophoneSink(format: AVAudioFormat, box: ConverterBox,
-                                                       send: (@Sendable (AudioPacket) -> Void)?) -> AVAudioSinkNodeReceiverBlock {
+    /// (BUG-031). Never allocates or blocks.
+    private nonisolated static func makeMicrophoneSink(fifo: MicFifo) -> AVAudioSinkNodeReceiverBlock {
         return { _, frameCount, bufferList -> OSStatus in
-            guard let send, frameCount > 0,
-                  let buffer = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: bufferList, deallocator: nil)
-            else { return noErr }
-            buffer.frameLength = frameCount
-            guard let packets = box.convert(buffer) else { return noErr }
-            for packet in packets { send(packet) }
-            box.sentPackets += packets.count
-            if box.sentPackets == packets.count || box.sentPackets % 1000 < packets.count {
-                let peak = packets.last?.samples.map { abs(Int($0)) }.max() ?? 0
-                ClientLog.write("microphone packets captured \(box.sentPackets), last peak \(peak), frames/packet \(packets.last?.frameCount ?? 0)")
-            }
+            guard frameCount > 0 else { return noErr }
+            fifo.write(frameCount: frameCount, bufferList: bufferList)
             return noErr
         }
     }
 
-    /// Converter state used only on the tap's thread.
-    private final class ConverterBox: @unchecked Sendable {
+    /// Single-producer (CoreAudio RT input thread) / single-consumer (sender
+    /// thread) Float32 FIFO for the iPad microphone. The RT thread never
+    /// allocates and only try-locks; conversion, packetization, sending and
+    /// logging happen off the RT thread.
+    private final class MicFifo: @unchecked Sendable {
+        let inputFormat: AVAudioFormat
         let converter: AVAudioConverter
         let target: AVAudioFormat
-        var sentPackets = 0
+        private let channels: Int
+        private let capacityFrames: Int
+        private let maxChunkFrames = 4800
+        private let storage: UnsafeMutablePointer<Float>
+        private let drainScratch: UnsafeMutablePointer<Float>
+        private var readFrame = 0, writeFrame = 0, count = 0
+        private let lock: UnsafeMutablePointer<os_unfair_lock> = {
+            let pointer = UnsafeMutablePointer<os_unfair_lock>.allocate(capacity: 1)
+            pointer.initialize(to: os_unfair_lock())
+            return pointer
+        }()
+        private let wake = DispatchSemaphore(value: 0)
+        private var signaled = false
+        private var running = false
+        private var sentPackets = 0
 
-        init(converter: AVAudioConverter, target: AVAudioFormat) {
+        init(inputFormat: AVAudioFormat, converter: AVAudioConverter, target: AVAudioFormat) {
+            self.inputFormat = inputFormat
             self.converter = converter
             self.target = target
+            self.channels = max(Int(inputFormat.channelCount), 1)
+            self.capacityFrames = max(Int(inputFormat.sampleRate.rounded()), 48_000)
+            self.storage = .allocate(capacity: capacityFrames * channels)
+            self.drainScratch = .allocate(capacity: maxChunkFrames * channels)
         }
 
-        func convert(_ buffer: AVAudioPCMBuffer) -> [AudioPacket]? {
-            let ratio = target.sampleRate / buffer.format.sampleRate
-            let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio + 16)
-            guard let output = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else { return nil }
+        deinit {
+            storage.deallocate()
+            drainScratch.deallocate()
+            lock.deallocate()
+        }
+
+        /// Real-time audio IO thread: no allocation, no blocking lock.
+        func write(frameCount: UInt32, bufferList: UnsafePointer<AudioBufferList>) {
+            let frames = Int(frameCount)
+            guard frames > 0, os_unfair_lock_trylock(lock) else { return }
+            let list = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: bufferList))
+            if frames <= capacityFrames - count, let first = list.first, let firstData = first.mData {
+                let interleaved = list.count == 1
+                let sourceChannels = interleaved ? max(Int(first.mNumberChannels), 1) : 1
+                let firstFloats = firstData.assumingMemoryBound(to: Float.self)
+                for frame in 0..<frames {
+                    let base = writeFrame * channels
+                    for channel in 0..<channels {
+                        let sample: Float
+                        if interleaved {
+                            sample = firstFloats[frame * sourceChannels + min(channel, sourceChannels - 1)]
+                        } else {
+                            let buf = list[min(channel, list.count - 1)]
+                            sample = buf.mData.map { $0.assumingMemoryBound(to: Float.self)[frame] } ?? 0
+                        }
+                        storage[base + channel] = sample
+                    }
+                    writeFrame = (writeFrame + 1) % capacityFrames
+                }
+                count += frames
+            }
+            let shouldWake = !signaled && count > 0
+            if shouldWake { signaled = true }
+            os_unfair_lock_unlock(lock)
+            if shouldWake { wake.signal() }
+        }
+
+        /// Sender thread: drains up to `maxChunkFrames` into `drainScratch`.
+        private func drain() -> Int {
+            os_unfair_lock_lock(lock)
+            let frames = min(count, maxChunkFrames)
+            guard frames > 0 else {
+                signaled = false
+                os_unfair_lock_unlock(lock)
+                return 0
+            }
+            let firstFrames = min(frames, capacityFrames - readFrame)
+            let firstSamples = firstFrames * channels
+            drainScratch.update(from: storage + readFrame * channels, count: firstSamples)
+            let remainingSamples = (frames - firstFrames) * channels
+            if remainingSamples > 0 {
+                (drainScratch + firstSamples).update(from: storage, count: remainingSamples)
+            }
+            readFrame = (readFrame + frames) % capacityFrames
+            count -= frames
+            os_unfair_lock_unlock(lock)
+            return frames
+        }
+
+        func startSender(_ send: @escaping @Sendable (AudioPacket) -> Void) {
+            os_unfair_lock_lock(lock); running = true; os_unfair_lock_unlock(lock)
+            let thread = Thread { [self] in
+                guard let inputBuffer = AVAudioPCMBuffer(pcmFormat: inputFormat, frameCapacity: AVAudioFrameCount(maxChunkFrames)) else { return }
+                let ratio = target.sampleRate / inputFormat.sampleRate
+                let outCap = AVAudioFrameCount(Double(maxChunkFrames) * ratio + 64)
+                guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: outCap) else { return }
+                while true {
+                    wake.wait()
+                    os_unfair_lock_lock(lock); let keepGoing = running; os_unfair_lock_unlock(lock)
+                    guard keepGoing else { return }
+                    while case let frames = drain(), frames > 0 {
+                        process(frames: frames, inputBuffer: inputBuffer, outputBuffer: outputBuffer, send: send)
+                    }
+                }
+            }
+            thread.qualityOfService = .userInteractive
+            thread.name = "wireddisplay.mic-sender"
+            thread.start()
+        }
+
+        private func process(frames: Int, inputBuffer: AVAudioPCMBuffer, outputBuffer: AVAudioPCMBuffer,
+                             send: @Sendable (AudioPacket) -> Void) {
+            inputBuffer.frameLength = AVAudioFrameCount(frames)
+            guard let channelData = inputBuffer.floatChannelData else { return }
+            if inputFormat.isInterleaved {
+                channelData[0].update(from: drainScratch, count: frames * channels)
+            } else {
+                for ch in 0..<channels {
+                    let dst = channelData[ch]
+                    for frame in 0..<frames { dst[frame] = drainScratch[frame * channels + ch] }
+                }
+            }
+            outputBuffer.frameLength = 0
             var consumed = false
             var error: NSError?
-            converter.convert(to: output, error: &error) { _, status in
+            converter.convert(to: outputBuffer, error: &error) { _, status in
                 if consumed { status.pointee = .noDataNow; return nil }
                 consumed = true
                 status.pointee = .haveData
-                return buffer
+                return inputBuffer
             }
-            guard error == nil, let data = output.floatChannelData, output.frameLength > 0 else { return nil }
-            var packets: [AudioPacket] = []
+            guard error == nil, let outData = outputBuffer.floatChannelData, outputBuffer.frameLength > 0 else { return }
             var offset = 0
-            let frames = Int(output.frameLength)
-            while offset < frames {
-                let count = min(frames - offset, SessionConstants.maxAudioFramesPerPacket)
-                packets.append(AudioPacket(channels: SessionConstants.microphoneChannels,
-                                           samples: PCM.interleave([UnsafePointer(data[0] + offset)], frames: count)))
-                offset += count
+            let outFrames = Int(outputBuffer.frameLength)
+            var lastPacket: AudioPacket?
+            var countSent = 0
+            while offset < outFrames {
+                let n = min(outFrames - offset, SessionConstants.maxAudioFramesPerPacket)
+                let packet = AudioPacket(channels: SessionConstants.microphoneChannels,
+                                         samples: PCM.interleave([UnsafePointer(outData[0] + offset)], frames: n))
+                send(packet)
+                lastPacket = packet
+                countSent += 1
+                offset += n
             }
-            return packets
+            sentPackets += countSent
+            if sentPackets == countSent || sentPackets % 1000 < countSent {
+                let peak = lastPacket?.samples.map { abs(Int($0)) }.max() ?? 0
+                ClientLog.write("microphone packets captured \(sentPackets), last peak \(peak), frames/packet \(lastPacket?.frameCount ?? 0)")
+            }
+        }
+
+        func stopSender() {
+            os_unfair_lock_lock(lock)
+            running = false
+            signaled = true
+            os_unfair_lock_unlock(lock)
+            wake.signal()
         }
     }
 

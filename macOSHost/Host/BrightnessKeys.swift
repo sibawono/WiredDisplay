@@ -53,6 +53,11 @@ final class BrightnessKeys: @unchecked Sendable {
         thread.start()
     }
 
+    /// Removes an unplugged iPad's controller so it can be deallocated.
+    func remove(_ controller: HostController) {
+        lock.withLock { controllers.removeAll { $0 === controller } }
+    }
+
     /// The iPad the keys act on now: the first whose screen has the pointer
     /// (or the only display).
     private var target: HostController? {
