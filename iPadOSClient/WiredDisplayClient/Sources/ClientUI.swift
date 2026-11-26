@@ -651,19 +651,14 @@ struct ControlsContent: View {
                 }
                 Divider().overlay(.white.opacity(0.08))
                 Button { confirmSleep = true } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: "moon.zzz.fill")
-                            .font(.subheadline)
-                            .foregroundStyle(.indigo)
-                        Text("Sleep Mac…")
-                            .font(.subheadline.weight(.medium))
-                        Spacer()
-                        Text("Confirm")
-                            .font(.caption)
-                            .foregroundStyle(Brand.secondaryText)
-                    }
-                    .foregroundStyle(.white)
-                    .padding(.vertical, 4)
+                    Label("Sleep Mac", systemImage: "moon.zzz.fill")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .background(Color.indigo.opacity(0.32), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous)
+                            .strokeBorder(Color.indigo.opacity(0.65)))
                 }
                 .buttonStyle(.plain)
                 .disabled(!summary.streaming)
