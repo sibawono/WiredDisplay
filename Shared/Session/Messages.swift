@@ -150,6 +150,10 @@ public enum ControlMessage: Sendable, Equatable {
     case displaySpace(UInt8)
     /// Bidirectional: Quality preset (0 = Balanced, 1 = Pro, 2 = Ultra, 3 = High Color).
     case qualityPreset(UInt8)
+    /// Bidirectional: Mac default output volume (0...1) and mute state.
+    case volume(level: Float, muted: Bool)
+    /// Client -> host: put the Mac to system sleep (confirmed by user on iPad).
+    case sleepMac
 }
 
 public struct CursorImage: Sendable, Equatable {
@@ -261,7 +265,7 @@ public enum InputEvent: Sendable, Equatable {
 
 public enum SessionCodec {
     private enum ControlTag: UInt8 {
-        case hello = 1, streamConfig, requestKeyframe, ping, pong, bye, audioRoute, videoActive, authHello, authProof, decodeFailed, brightness, cursor, cursorImage, panelSize, displaySpace, qualityPreset
+        case hello = 1, streamConfig, requestKeyframe, ping, pong, bye, audioRoute, videoActive, authHello, authProof, decodeFailed, brightness, cursor, cursorImage, panelSize, displaySpace, qualityPreset, volume, sleepMac
     }
 
     private enum InputTag: UInt8 {
@@ -335,6 +339,12 @@ public enum SessionCodec {
         case .qualityPreset(let raw):
             writer.u8(ControlTag.qualityPreset.rawValue)
             writer.u8(raw)
+        case .volume(let level, let muted):
+            writer.u8(ControlTag.volume.rawValue)
+            writer.f32(level)
+            writer.u8(muted ? 1 : 0)
+        case .sleepMac:
+            writer.u8(ControlTag.sleepMac.rawValue)
         case .cursorImage(let image):
             writer.u8(ControlTag.cursorImage.rawValue)
             writer.f32(image.width)
@@ -435,6 +445,15 @@ public enum SessionCodec {
             let raw = try reader.u8()
             guard raw <= 3 else { throw WireError.invalidValue("qualityPreset \(raw)") }
             message = .qualityPreset(raw)
+        case .volume:
+            let level = try reader.f32()
+            let mutedRaw = try reader.u8()
+            guard level.isFinite, (0...1).contains(level), mutedRaw <= 1 else {
+                throw WireError.invalidValue("volume \(level) muted \(mutedRaw)")
+            }
+            message = .volume(level: level, muted: mutedRaw != 0)
+        case .sleepMac:
+            message = .sleepMac
         case .cursorImage:
             let width = try reader.f32(), height = try reader.f32()
             let hotX = try reader.f32(), hotY = try reader.f32()

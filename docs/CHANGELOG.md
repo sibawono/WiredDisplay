@@ -1230,5 +1230,19 @@ During scrolling, sampled medians were 0.05 ms capture-delivery-to-conversion, 4
   - Added a 3×2 Quick Actions grid in the iPad Input tab (`Spotlight`, `Mission Ctrl`, `Switch App`, `Screenshot`, `Show Dock`, `Lock Mac`) for one-tap control without a hardware keyboard.
 
 **VERIFIED:**
+- `macos-26` CI passed on Draft PR #3.
+
+## CHANGE ID: P1-076 — Mac Volume + Mute slider in iPad Audio tab and confirmed Sleep Mac action
+
+**WHAT:**
+- `Shared/Session/Messages.swift` & `Tests/Unit/WDSessionTests/SecureChannelTests.swift`: added backward-compatible `ControlMessage.volume(level:muted:)` and `ControlMessage.sleepMac` with round-trip and bounds tests.
+- `Shared/MacAudio/AudioDevices.swift`: added CoreAudio `outputVolume`, `setOutputVolume`, `outputMuted`, and `setOutputMuted` helpers (using `VirtualMainVolume` with per-channel fallback).
+- `macOSHost/Host/HostController.swift`: synced Mac default output volume & mute state to the iPad on video start, applied `.volume` updates live, and handled `.sleepMac` (gated on `isInputEnabled` and `allowsInput`) via `IOPMSleepSystem`.
+- `iPadOSClient/WiredDisplayClient/Sources/{ClientSession,ClientApp,ClientUI}.swift`:
+  - Added Mac Volume slider + Mute toggle button at the top of the iPad Audio tab.
+  - Added "Sleep Mac…" button with a confirmation dialog in the iPad Input tab.
+
+**VERIFIED:**
 - Pending `macos-26` CI verification on Draft PR #3.
+
 

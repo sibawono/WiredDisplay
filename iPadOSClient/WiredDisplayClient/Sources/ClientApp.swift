@@ -490,6 +490,20 @@ struct ControlsPanel: View {
             speaker: Binding(get: { connection.speakerOn },
                              set: { app.setAudio(speaker: $0, microphone: connection.microphoneOn) }),
             microphone: Binding(get: { connection.microphoneOn }, set: { app.setMicrophone($0) }),
+            macVolume: Binding(
+                get: { Double(connection.macVolume) },
+                set: {
+                    let level = Float($0)
+                    connection.macVolume = level
+                    if level > 0.01 && connection.macMuted { connection.macMuted = false }
+                    app.session?.setMacVolume(level: level, muted: connection.macMuted)
+                }),
+            macMuted: Binding(
+                get: { connection.macMuted },
+                set: {
+                    connection.macMuted = $0
+                    app.session?.setMacVolume(level: connection.macVolume, muted: $0)
+                }),
             smoothGradients: Binding(get: { smoothGradients },
                                      set: { smoothGradients = $0; app.videoView.smoothGradients = $0 }),
             metalRenderer: app.videoView.metalRenderer == nil ? nil
@@ -500,6 +514,10 @@ struct ControlsPanel: View {
             quickAction: { action in
                 close()
                 app.sendQuickAction(action)
+            },
+            sleepMac: {
+                close()
+                app.session?.sleepMac()
             },
             pairedMacs: connection.pairedMacs.map { PairedMacRow(name: $0.name, fingerprint: $0.fingerprint) },
             forgetPaired: { app.session?.forgetPairedMacs() },

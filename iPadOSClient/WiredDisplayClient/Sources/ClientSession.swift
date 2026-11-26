@@ -41,6 +41,9 @@ final class ConnectionModel {
     var brightnessHUD: (value: Float, token: Int)?
     /// Live iPad screen brightness (0...1), kept in sync with Mac brightness keys and slider.
     var screenBrightness: Float = 0.7
+    /// Mac default output volume (0...1) and mute state.
+    var macVolume: Float = 0.7
+    var macMuted = false
 }
 
 /// Client side of a session (iPad). Listens on 127.0.0.1:9100; the Mac dials in
@@ -483,7 +486,9 @@ final class ClientSession: @unchecked Sendable {
                 ui { $0.displaySpace = Int(raw) }
             case .qualityPreset(let raw):
                 ui { $0.qualityPreset = Int(raw) }
-            case .pong, .requestKeyframe, .audioRoute, .videoActive, .decodeFailed, .panelSize:
+            case .volume(let level, let muted):
+                ui { $0.macVolume = level; $0.macMuted = muted }
+            case .pong, .requestKeyframe, .audioRoute, .videoActive, .decodeFailed, .panelSize, .sleepMac:
                 break
             case .authHello, .authProof:
                 throw WireError.invalidValue("handshake message after handshake")
@@ -528,6 +533,23 @@ final class ClientSession: @unchecked Sendable {
         queue.async { [self] in
             guard trustedPeer != nil, let connection else { return }
             send(stream: .control, payload: SessionCodec.encode(.qualityPreset(UInt8(index))), on: connection)
+        }
+    }
+
+    /// Ask the Mac to set its default output volume (0...1) and mute state.
+    func setMacVolume(level: Float, muted: Bool) {
+        let clamped = min(max(level, 0), 1)
+        queue.async { [self] in
+            guard trustedPeer != nil, let connection else { return }
+            send(stream: .control, payload: SessionCodec.encode(.volume(level: clamped, muted: muted)), on: connection)
+        }
+    }
+
+    /// Ask the Mac to enter system sleep.
+    func sleepMac() {
+        queue.async { [self] in
+            guard trustedPeer != nil, let connection else { return }
+            send(stream: .control, payload: SessionCodec.encode(.sleepMac), on: connection)
         }
     }
 

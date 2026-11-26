@@ -420,4 +420,14 @@ final class CursorMessageTests: XCTestCase {
         huge.png = [UInt8](repeating: 0, count: CursorImage.maxPNGBytes + 1)
         XCTAssertThrowsError(try SessionCodec.decodeControl(SessionCodec.encode(.cursorImage(huge))))
     }
+
+    func testVolumeAndSleepMacMessagesRoundTrip() throws {
+        XCTAssertEqual(try SessionCodec.decodeControl(SessionCodec.encode(.volume(level: 0.6, muted: false))),
+                       .volume(level: 0.6, muted: false))
+        XCTAssertEqual(try SessionCodec.decodeControl(SessionCodec.encode(.volume(level: 0, muted: true))),
+                       .volume(level: 0, muted: true))
+        XCTAssertEqual(try SessionCodec.decodeControl(SessionCodec.encode(.sleepMac)), .sleepMac)
+        XCTAssertThrowsError(try SessionCodec.decodeControl(SessionCodec.encode(.volume(level: 1.5, muted: false))))
+        XCTAssertThrowsError(try SessionCodec.decodeControl(SessionCodec.encode(.volume(level: .nan, muted: false))))
+    }
 }

@@ -383,10 +383,13 @@ struct ControlsContent: View {
     @Binding var showStatsHUD: Bool
     @Binding var speaker: Bool
     @Binding var microphone: Bool
+    @Binding var macVolume: Double
+    @Binding var macMuted: Bool
     @Binding var smoothGradients: Bool
     var metalRenderer: Binding<Bool>? = nil
     @Binding var pencilAction: PencilAction
     var quickAction: (QuickAction) -> Void = { _ in }
+    var sleepMac: () -> Void = {}
     let pairedMacs: [PairedMacRow]
     let forgetPaired: () -> Void
     let reconnect: () -> Void
@@ -395,6 +398,7 @@ struct ControlsContent: View {
 
     @State private var tab: Tab = .display
     @State private var confirmForget = false
+    @State private var confirmSleep = false
     @State private var showGestures = false
     @State private var showShortcuts = false
 
@@ -576,6 +580,27 @@ struct ControlsContent: View {
 
     private var audioTab: some View {
         Group {
+            card("Mac Volume") {
+                HStack(spacing: 10) {
+                    Button { macMuted.toggle() } label: {
+                        Image(systemName: macMuted || macVolume < 0.01 ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(macMuted ? .orange : .white)
+                            .frame(width: 30, height: 30)
+                            .background((macMuted ? Color.orange.opacity(0.2) : .white.opacity(0.1)), in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!summary.streaming)
+                    .accessibilityLabel(macMuted ? "Unmute Mac" : "Mute Mac")
+                    Slider(value: $macVolume, in: 0...1)
+                        .tint(macMuted ? .secondary : Brand.blue)
+                        .disabled(!summary.streaming)
+                    Text(macMuted ? "Mute" : "\(Int((macVolume * 100).rounded()))%")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(macMuted ? .orange : Brand.secondaryText)
+                        .frame(width: 36, alignment: .trailing)
+                }
+            }
             card("iPad Audio") {
                 ToggleRow(symbol: "speaker.wave.2.fill", title: "Mac audio on iPad",
                           detail: "Plays Mac sound through this iPad.", isOn: $speaker)
@@ -623,6 +648,30 @@ struct ControlsContent: View {
                         .disabled(!summary.streaming)
                         .opacity(summary.streaming ? 1 : 0.45)
                     }
+                }
+                Divider().overlay(.white.opacity(0.08))
+                Button { confirmSleep = true } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "moon.zzz.fill")
+                            .font(.subheadline)
+                            .foregroundStyle(.indigo)
+                        Text("Sleep Mac…")
+                            .font(.subheadline.weight(.medium))
+                        Spacer()
+                        Text("Confirm")
+                            .font(.caption)
+                            .foregroundStyle(Brand.secondaryText)
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.vertical, 4)
+                }
+                .buttonStyle(.plain)
+                .disabled(!summary.streaming)
+                .opacity(summary.streaming ? 1 : 0.45)
+                .confirmationDialog("Put Mac to sleep?", isPresented: $confirmSleep) {
+                    Button("Sleep Mac", role: .destructive, action: sleepMac)
+                } message: {
+                    Text("USB display will disconnect until the Mac is woken from a keyboard, power button, or Wake-on-LAN.")
                 }
             }
             card("Apple Pencil") {

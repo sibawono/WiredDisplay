@@ -1096,6 +1096,10 @@ final class HostController: @unchecked Sendable {
         if let preset = qualityPreset, let idx = QualityPreset.allCases.firstIndex(of: preset) {
             send(.qualityPreset(UInt8(idx)), on: socket)
         }
+        let defaultOut = AudioDevices.defaultDevice(input: false)
+        if let vol = AudioDevices.outputVolume(defaultOut) {
+            send(.volume(level: vol, muted: AudioDevices.outputMuted(defaultOut)), on: socket)
+        }
         Log.info("streaming to \(hello.deviceName): \(pipeline.config) input \(isInputEnabled ? "enabled" : "disabled")")
         if options.testDecodeFallback {
             queue.asyncAfter(deadline: .now() + 8) { [weak self, weak socket] in
@@ -1416,6 +1420,21 @@ final class HostController: @unchecked Sendable {
             let presets = QualityPreset.allCases
             guard presets.indices.contains(Int(raw)) else { return }
             setQuality(presets[Int(raw)])
+        case .volume(let level, let muted):
+            let defaultOut = AudioDevices.defaultDevice(input: false)
+            AudioDevices.setOutputVolume(defaultOut, level)
+            AudioDevices.setOutputMuted(defaultOut, muted)
+        case .sleepMac:
+            guard isInputEnabled, currentPowerState.withLock({ $0.allowsInput }) else {
+                Log.info("sleepMac ignored (input disabled or Mac locked/asleep)")
+                return
+            }
+            Log.info("sleepMac requested from iPad")
+            let port = IOPMFindPowerManagement(kIOMainPortDefault)
+            if port != 0 {
+                IOPMSleepSystem(port)
+                IOServiceClose(port)
+            }
         case .videoActive(let active):
             guard let hello = peerHello else { return }
             Log.info("iPad video \(active ? "resumed" : "paused (app in background)")")
