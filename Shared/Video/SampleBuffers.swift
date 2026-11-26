@@ -18,6 +18,7 @@ public enum SampleBuffers {
     public static func accessUnit(from sample: CMSampleBuffer, codec: VideoCodecKind) throws -> AccessUnit {
         guard let block = CMSampleBufferGetDataBuffer(sample) else { throw Error.noDataBuffer }
         let length = CMBlockBufferGetDataLength(block)
+        guard length > 0 else { return AccessUnit(codec: codec, nals: []) }
         var bytes = [UInt8](repeating: 0, count: length)
         let status = bytes.withUnsafeMutableBytes { raw in
             CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: length, destination: raw.baseAddress!)
@@ -26,11 +27,15 @@ public enum SampleBuffers {
 
         var lengthSize: Int32 = 4
         let format = CMSampleBufferGetFormatDescription(sample)
+        var sets: [[UInt8]]?
+        if let format {
+            sets = try? parameterSets(of: format, codec: codec, lengthSize: &lengthSize)
+        }
         var nals = try AnnexB.splitLengthPrefixed(bytes, lengthSize: Int(lengthSize))
         let picture = AccessUnit(codec: codec, nals: nals)
         if picture.isKeyframe, let format {
-            let sets = try parameterSets(of: format, codec: codec, lengthSize: &lengthSize)
-            nals = sets + nals.filter { codec.kind(of: $0) != .parameterSet }
+            let paramSets = try sets ?? parameterSets(of: format, codec: codec, lengthSize: &lengthSize)
+            nals = paramSets + nals.filter { codec.kind(of: $0) != .parameterSet }
         }
         return AccessUnit(codec: codec, nals: nals)
     }

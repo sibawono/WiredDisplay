@@ -488,7 +488,7 @@ final class ClientSession: @unchecked Sendable {
                 return
             }
             present(AccessUnit(codec: config.codec == .hevc ? .hevc : .h264, annexB: frame.payload),
-                    timestamp: frame.header.timestampNanos, on: current)
+                    wireBytes: frame.payload.count, timestamp: frame.header.timestampNanos, on: current)
         case .speaker:
             guard trustedPeer != nil else { throw WireError.invalidValue("audio before pairing") }
             speakerSink.push(try AudioPacket.decode(frame.payload, expectedChannels: SessionConstants.speakerChannels))
@@ -521,7 +521,7 @@ final class ClientSession: @unchecked Sendable {
         if let peer = trustedPeer { trust.rename(peer.identityKey, to: host.deviceName); refreshPairedMacs() }
     }
 
-    private func present(_ unit: AccessUnit, timestamp: UInt64, on current: NWConnection) {
+    private func present(_ unit: AccessUnit, wireBytes: Int, timestamp: UInt64, on current: NWConnection) {
         if unit.isKeyframe {
             let sets = unit.parameterSets
             if format == nil || sets != formatSets {
@@ -594,7 +594,7 @@ final class ClientSession: @unchecked Sendable {
                 let local = Int64(bitPattern: clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) &+ offset
                 transitSamples.append(Double(local &- Int64(bitPattern: timestamp)) / 1_000_000)
             }
-            if let report = presentMeter.tick(bytes: unit.annexB.count) {
+            if let report = presentMeter.tick(bytes: wireBytes) {
                 var line = "video presented: \(report)"
                 if !transitSamples.isEmpty {
                     let sorted = transitSamples.sorted()

@@ -1,5 +1,6 @@
 import CoreAudio
 import Foundation
+import os
 import WDMacAudio
 
 /// Automatic audio device switching (D-034, user request): headphones that
@@ -27,7 +28,7 @@ final class AudioRouter: @unchecked Sendable {
     private var lastOtherInput: AudioDeviceID?
     /// The last default output / input that was not a WiredDisplay device:
     /// where sound goes back to when the iPad stops carrying it.
-    private var lastRealOutput: AudioDeviceID?
+    private let lastRealOutput = OSAllocatedUnfairLock<AudioDeviceID?>(initialState: nil)
     private var lastRealInput: AudioDeviceID?
 
     var isEnabled: Bool {
@@ -80,11 +81,25 @@ final class AudioRouter: @unchecked Sendable {
         }
     }
 
+    /// Best physical Mac output device for "Both Speakers" mirroring (any thread).
+    /// Prefers the last non-WiredDisplay output, then built-in speakers, then any real output.
+    func preferredMacSpeaker() -> AudioDeviceID? {
+        let devices = AudioDevices.all()
+        let usable: (AudioDeviceInfo) -> Bool = { info in
+            WiredAudioDevice(rawValue: info.uid) == nil && info.outputChannels > 0
+        }
+        let remembered = lastRealOutput.withLock { $0 }
+        let target = devices.first { $0.id == remembered && usable($0) }
+            ?? devices.first { usable($0) && $0.transport == kAudioDeviceTransportTypeBuiltIn }
+            ?? devices.first(where: usable)
+        return target?.id
+    }
+
     /// Remembers the default device when it is a real one (not ours).
     private func noteRealDefault(input: Bool) {
         let current = AudioDevices.defaultDevice(input: input)
         guard current != 0, !isWired(current) else { return }
-        if input { lastRealInput = current } else { lastRealOutput = current }
+        if input { lastRealInput = current } else { lastRealOutput.withLock { $0 = current } }
     }
 
     private func isWired(_ id: AudioDeviceID) -> Bool {
@@ -103,7 +118,7 @@ final class AudioRouter: @unchecked Sendable {
         let usable: (AudioDeviceInfo) -> Bool = { info in
             WiredAudioDevice(rawValue: info.uid) == nil && (input ? info.inputChannels > 0 : info.outputChannels > 0)
         }
-        let remembered = input ? lastRealInput : lastRealOutput
+        let remembered = input ? lastRealInput : lastRealOutput.withLock { $0 }
         let target = devices.first { $0.id == remembered && usable($0) }
             ?? devices.first { usable($0) && $0.transport == kAudioDeviceTransportTypeBuiltIn }
             ?? devices.first(where: usable)
@@ -169,7 +184,7 @@ final class AudioRouter: @unchecked Sendable {
                 queue.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.defaultInputChanged() }
             }
         }
-        if usesHeadsetMicrophone, let headset = added.first(where: { isHeadsetInput($0, among: added + now) }) {
+        if usesHeadsetMicrophone, let headset = added.first(where: { isHeadsetInput($0, among: added, sameChange: true) }) {
             setDefault(headset.id, input: true, reason: "\(headset.name) connected")
         }
         guard !removed.isEmpty else { return }
@@ -178,7 +193,7 @@ final class AudioRouter: @unchecked Sendable {
         if removed.contains(where: isHeadphoneOutput), iPadSpeaker, !now.contains(where: isHeadphoneOutput) {
             select(.speaker, input: false, reason: "\(gone) disconnected")
         }
-        if usesHeadsetMicrophone, removed.contains(where: { isHeadsetInput($0, among: removed) }), iPadMicrophone,
+        if usesHeadsetMicrophone, removed.contains(where: { isHeadsetInput($0, among: removed, sameChange: true) }), iPadMicrophone,
            !now.contains(where: { isHeadsetInput($0, among: now) }) {
             select(.microphone, input: true, reason: "\(gone) disconnected")
         }
@@ -249,7 +264,7 @@ final class AudioRouter: @unchecked Sendable {
     /// "Headset" next to "CtoL Audio". It counts when it has an output itself,
     /// shares the UID prefix with a headphone output, or comes and goes in the
     /// same change as one (`among`).
-    private func isHeadsetInput(_ device: AudioDeviceInfo, among others: [AudioDeviceInfo]) -> Bool {
+    private func isHeadsetInput(_ device: AudioDeviceInfo, among others: [AudioDeviceInfo], sameChange: Bool = false) -> Bool {
         guard device.inputChannels > 0, WiredAudioDevice(rawValue: device.uid) == nil,
               !Self.isDisplayOrDock(device) else { return false }
         switch device.transport {
@@ -262,7 +277,7 @@ final class AudioRouter: @unchecked Sendable {
         let prefix = device.uid.split(separator: ":").first.map(String.init) ?? device.uid
         return others.contains { other in
             other.id != device.id && isHeadphoneOutput(other)
-                && (other.uid.hasPrefix(prefix) || other.transport == device.transport)
+                && (other.uid.hasPrefix(prefix) || (sameChange && other.transport == device.transport))
         }
     }
 }

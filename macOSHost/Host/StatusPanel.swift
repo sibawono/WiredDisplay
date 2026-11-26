@@ -40,6 +40,8 @@ struct PanelSnapshot {
     var matchRefresh = true
     var localCursor = true
     var autoSwitchMicrophone = true
+    var bothSpeakers = false
+    var bothSpeakersDelayMs: Double = 45
     var paired: [Paired] = []
     var connectionCode: String?
     var openAtLogin = false
@@ -61,6 +63,8 @@ struct PanelActions {
     var setKeepMacAwake: (Bool) -> Void = { _ in }
     var setLocalCursor: (Bool) -> Void = { _ in }
     var setAutoSwitchMicrophone: (Bool) -> Void = { _ in }
+    var setBothSpeakers: (Bool) -> Void = { _ in }
+    var setBothSpeakersDelayMs: (Double) -> Void = { _ in }
     var openDisplaySettings: () -> Void = {}
     var openSoundSettings: () -> Void = {}
     var openAccessibility: () -> Void = {}
@@ -255,6 +259,7 @@ struct StatusPanelView: View {
                 NativeSegmented(segments: QualityPreset.allCases.map { .titled($0.shortTitle, symbol: $0.symbol) },
                                 selection: Binding(get: { s.quality.flatMap { QualityPreset.allCases.firstIndex(of: $0) } ?? -1 },
                                                    set: { index in
+                                                       guard QualityPreset.allCases.indices.contains(index) else { return }
                                                        let preset = QualityPreset.allCases[index]
                                                        model.snapshot.quality = preset
                                                        model.actions.setQuality(preset)
@@ -319,6 +324,40 @@ struct StatusPanelView: View {
                 Text("Turn these on or off in the WiredDisplay app on the iPad.")
                     .font(.system(size: 11)).foregroundStyle(Color.caption)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+            Card {
+                ToggleLine(title: "Play on Mac speakers too",
+                           detail: s.microphone
+                               ? "Paused while the iPad microphone is on to avoid echo"
+                               : "Plays Mac sound on both the Mac and the iPad together",
+                           isOn: Binding(get: { s.bothSpeakers },
+                                         set: { model.snapshot.bothSpeakers = $0; model.actions.setBothSpeakers($0) }))
+                if s.bothSpeakers {
+                    CardDivider()
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("Sync delay").font(.system(size: 11, weight: .semibold))
+                            Spacer()
+                            Text("\(Int(s.bothSpeakersDelayMs.rounded())) ms")
+                                .font(.system(size: 11)).foregroundStyle(Color.caption).monospacedDigit()
+                        }
+                        NativeSlider(
+                            value: Binding(
+                                get: { s.bothSpeakersDelayMs / HostController.maxBothSpeakersDelayMs },
+                                set: {
+                                    let ms = ($0 * HostController.maxBothSpeakersDelayMs).rounded()
+                                    model.snapshot.bothSpeakersDelayMs = ms
+                                    model.actions.setBothSpeakersDelayMs(ms)
+                                }),
+                            isEnabled: true)
+                            .frame(height: NativeSlider.sliderHeight + 2 * NativeSlider.overflow)
+                            .padding(.horizontal, -NativeSlider.overflow)
+                            .frame(height: NativeSlider.sliderHeight)
+                        Text("Adjust if you hear an echo between the Mac and the iPad.")
+                            .font(.system(size: 10.5)).foregroundStyle(Color.caption)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
             }
             Card {
                 ToggleLine(title: "Switch to headphones automatically",

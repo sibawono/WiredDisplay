@@ -71,7 +71,8 @@ public final class TrustStore: @unchecked Sendable {
             var peers = loadPeers()
             guard let index = peers.firstIndex(where: { $0.identityKey == identityKey }), peers[index].name != name else { return }
             peers[index].name = name
-            try? storage.write(Self.peersAccount, (try? JSONEncoder().encode(peers)) ?? Data())
+            guard let encoded = try? JSONEncoder().encode(peers) else { return }
+            try? storage.write(Self.peersAccount, encoded)
         }
     }
 
@@ -85,7 +86,8 @@ public final class TrustStore: @unchecked Sendable {
             guard peers[index].name != name || peers[index].model != newModel else { return }
             peers[index].name = name
             peers[index].model = newModel
-            try? storage.write(Self.peersAccount, (try? JSONEncoder().encode(peers)) ?? Data())
+            guard let encoded = try? JSONEncoder().encode(peers) else { return }
+            try? storage.write(Self.peersAccount, encoded)
         }
     }
 

@@ -77,6 +77,7 @@ public final class FramedSocket: @unchecked Sendable {
     public func sendVideo(_ payload: [UInt8], isKeyframe: Bool, timestampNanos: UInt64? = nil) -> VideoResult {
         condition.withLock {
             guard !closed else { return .closed }
+            if scheduler.dropVideoIfWaiting(isKeyframe: isKeyframe) { return .queued }
             guard let wire = try? framer.frame(.video, payload: payload, keyframe: isKeyframe, timestampNanos: timestampNanos) else {
                 return .needKeyframe // e.g. over the 8 MiB cap: later P-frames would be orphans
             }

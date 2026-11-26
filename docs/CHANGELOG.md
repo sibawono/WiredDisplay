@@ -1133,3 +1133,31 @@ During scrolling, sampled medians were 0.05 ms capture-delivery-to-conversion, 4
 - The workflow YAML parses.
 
 **NOT VERIFIED:** a real upload; it needs the owner's account and token.
+
+## CHANGE ID: P1-068 — Audit Tahap 1: audio RT & FIFO fixes, reconnect, hot-path zero-copy, panel state
+
+**WHAT:**
+- `macOSHost/Host/HostAudioBridge.swift`: `SpeakerFifo.drain()` now copies into a preallocated scratch buffer under `os_unfair_lock` and allocates `[Int16]` outside the lock; `write()` coalesces `wake.signal()` via a `signaled` flag to avoid semaphore buildup and RT IO thread contention.
+- `MacVirtualDevices/AudioDriver/WiredDisplayAudio.c`: `GetZeroTimeStamp` and `kAudioDevicePropertyDeviceIsRunning` are now lock-free (using atomic `anchorHostTime` and `ioClients`, computing timestamp count directly so stalls > 341 ms never fall behind); zero-initialized `scratch` in `GetPropertyDataSize`; atomic CAS loop in `Release`; bitmask `RingIndex` instead of `fmod`.
+- `macOSHost/Host/HostController.swift`: guarded `ownsAudio` on `.audioRoute(false, false)` so a second iPad cannot clear the active audio owner's route.
+- `macOSHost/Host/AudioRouter.swift`: `isHeadsetInput` only matches by transport type within the same arrival/removal change, preventing separate USB microphones/webcams from being treated as headset mics on full device scans.
+- `macOSHost/Host/HostFleet.swift`, `macOSHost/Host/main.swift`, `macOSHost/Host/StatusPanel.swift`: synchronized `HostFleet.stopping`, removed duplicate `changed()` notifications, persisted global settings to `UserDefaults` even when no iPad controller exists yet, populated paired iPads and saved settings in the waiting snapshot (and `forgetPaired`), and bounds-checked `QualityPreset.allCases[index]`.
+- `iPadOSClient/WiredDisplayClient/Sources/ClientApp.swift`: added `AppModel.reconnect()` so the Controls panel Reconnect button tears down and restarts the session even while audio is active.
+- `iPadOSClient/WiredDisplayClient/Sources/ClientSession.swift`: passed `frame.payload.count` as `wireBytes` to `present()` instead of rebuilding `unit.annexB` on every frame just to read `.count`.
+- `iPadOSClient/WiredDisplayClient/Sources/MetalVideoRenderer.swift`: `SwitchableSink.select(metal:)` flushes the previous sink so old `VTDecompressionSession`s are not leaked; `MetalVideoRenderer.flush(removingImage: true)` clears `layer.contents`.
+- `Shared/Session/SendScheduler.swift` & `Shared/Transport/FramedSocket.swift`: skip AES-GCM encryption of P-frames when `SendScheduler` is already waiting for a keyframe.
+- `Shared/Session/TrustStore.swift`: guard `JSONEncoder().encode(peers)` in `rename` and `update` so encode failures cannot overwrite the Keychain peers list with empty `Data()`.
+- `Shared/Video/SampleBuffers.swift`: guard empty `CMBlockBuffer` before `baseAddress!` and read NAL `lengthSize` before splitting length-prefixed NALs.
+
+**VERIFIED:**
+- Code review of diff; not yet compiled on macOS (edited on Linux environment; needs `swift build`, `swift test`, and `scripts/build-audio-driver.sh` on macOS or CI).
+
+## CHANGE ID: P1-069 — Both Speakers (Mac + iPad) with configurable sync delay
+
+**WHAT:**
+- `macOSHost/Host/AudioRouter.swift`: stored `lastRealOutput` behind `OSAllocatedUnfairLock` and added `preferredMacSpeaker()` so the host can pick the Mac's physical output device from any thread.
+- `macOSHost/Host/HostAudioBridge.swift`: added optional local Mac speaker fanout (`setLocalMirror(enabled:delayMs:)`) that mirrors tapped post-volume speaker PCM into the Mac's speaker via an `AVAudioEngine` + `AudioJitterBuffer` (providing both configurable sync delay and clock-drift correction). Automatically pauses while the iPad microphone is active to prevent echo.
+- `macOSHost/Host/HostController.swift`, `macOSHost/Host/HostFleet.swift`, `macOSHost/Host/StatusPanel.swift`, `macOSHost/Host/main.swift`: added persisted `bothSpeakers` (default off) and `bothSpeakersDelayMs` (default 45 ms, 0–120 ms) settings, plus the "Play on Mac speakers too" toggle and "Sync delay" slider in the Audio tab.
+
+**VERIFIED:**
+- Pending `macos-26` CI verification via Draft PR.
