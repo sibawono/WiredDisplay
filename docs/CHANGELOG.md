@@ -1243,6 +1243,17 @@ During scrolling, sampled medians were 0.05 ms capture-delivery-to-conversion, 4
   - Added "Sleep Mac…" button with a confirmation dialog in the iPad Input tab.
 
 **VERIFIED:**
-- Pending `macos-26` CI verification on Draft PR #3.
+- `macos-26` CI passed and merged in PR #3 (`1a03477`).
+
+## CHANGE ID: P1-077 — On-Screen Soft Keyboard for iPad Input tab
+
+**WHAT:**
+- `Shared/Session/KeyMap.swift` & `Tests/Unit/WDSessionTests/SecureChannelTests.swift`: added `KeyMap.usage(for:)` and `KeyMap.keyEvents(for:)` mapping ASCII characters (letters, digits, symbols, Space, Tab, Return) to USB HID key events with unit tests.
+- `iPadOSClient/WiredDisplayClient/Sources/VideoView.swift`: added hidden `SoftKeyboardInputView` (`UIKeyInput`) with autocorrect/smart-quotes disabled and a dark accessory toolbar (`Esc`, `Tab`, `← ↓ ↑ →`, `Done`), keeping normal screen taps from popping up the keyboard while preserving focus when tapping Mac text fields.
+- `iPadOSClient/WiredDisplayClient/Sources/{ClientUI,ClientApp}.swift`: added "Show Keyboard" button in the iPad Input tab.
+
+**VERIFIED:**
+- Pending `macos-26` CI verification via Draft PR #4.
+
 
 

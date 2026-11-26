@@ -242,6 +242,22 @@ final class KeyboardAndScrollCodecTests: XCTestCase {
         XCTAssertEqual(codes.count, 36)
         XCTAssertEqual(Set(codes).count, 36)
     }
+
+    func testSoftKeyboardKeyEvents() {
+        XCTAssertEqual(KeyMap.keyEvents(for: "a"), [.key(usage: 0x04, down: true), .key(usage: 0x04, down: false)])
+        XCTAssertEqual(KeyMap.keyEvents(for: "A"), [
+            .key(usage: 0xE1, down: true), .key(usage: 0x04, down: true),
+            .key(usage: 0x04, down: false), .key(usage: 0xE1, down: false),
+        ])
+        XCTAssertEqual(KeyMap.keyEvents(for: "0\n"), [
+            .key(usage: 0x27, down: true), .key(usage: 0x27, down: false),
+            .key(usage: 0x28, down: true), .key(usage: 0x28, down: false),
+        ])
+        XCTAssertEqual(KeyMap.keyEvents(for: "@"), [
+            .key(usage: 0xE1, down: true), .key(usage: 0x1F, down: true),
+            .key(usage: 0x1F, down: false), .key(usage: 0xE1, down: false),
+        ])
+    }
 }
 
 final class TransformGestureTests: XCTestCase {

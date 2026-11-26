@@ -178,6 +178,14 @@ final class VideoView: UIView, UIPointerInteractionDelegate, UIGestureRecognizer
     private var momentumVelocity = CGPoint.zero
     private var momentumStarted = false
 
+    private let softKeyboard = SoftKeyboardInputView()
+
+    /// Brings up the iPad on-screen keyboard for typing into the Mac when no
+    /// hardware keyboard is attached (e.g. Mac Lock Screen password).
+    func showSoftKeyboard() {
+        softKeyboard.becomeFirstResponder()
+    }
+
     override init(frame: CGRect) {
         super.init(frame: frame)
         isMultipleTouchEnabled = true
@@ -228,6 +236,9 @@ final class VideoView: UIView, UIPointerInteractionDelegate, UIGestureRecognizer
         let pencilInteraction = UIPencilInteraction()
         pencilInteraction.delegate = self
         addInteraction(pencilInteraction)
+        softKeyboard.onEvents = { [weak self] events in self?.emit(events) }
+        softKeyboard.onDismiss = { [weak self] in self?.becomeFirstResponder() }
+        addSubview(softKeyboard)
     }
 
     // MARK: Apple Pencil double-tap & squeeze
@@ -491,7 +502,7 @@ final class VideoView: UIView, UIPointerInteractionDelegate, UIGestureRecognizer
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard streamSize != nil else { return }
-        if !isFirstResponder { becomeFirstResponder() }
+        if !isFirstResponder, !softKeyboard.isFirstResponder { becomeFirstResponder() }
         stopMomentum()
         let now = ProcessInfo.processInfo.systemUptime
         for touch in touches {
@@ -728,5 +739,86 @@ final class ThreeFingerRecognizer: UIGestureRecognizer {
         let points = touches.map { $0.location(in: view) }
         guard !points.isEmpty else { return 0 }
         return points.map { hypot($0.x - center.x, $0.y - center.y) }.reduce(0, +) / CGFloat(points.count)
+    }
+}
+
+/// Hidden `UIKeyInput` responder that summons the iPad on-screen keyboard on
+/// demand without popping it up on normal screen taps, and forwards typed
+/// characters + accessory bar keys (Esc, Tab, arrows) to the Mac as HID keys.
+@MainActor
+private final class SoftKeyboardInputView: UIView, UIKeyInput {
+    var onEvents: (([InputEvent]) -> Void)?
+    var onDismiss: (() -> Void)?
+
+    // Always true so Backspace works even for text already on the Mac.
+    var hasText: Bool { true }
+    override var canBecomeFirstResponder: Bool { true }
+
+    // Disable iPadOS text rewriting so passwords and Terminal commands are never altered.
+    var autocorrectionType: UITextAutocorrectionType = .no
+    var autocapitalizationType: UITextAutocapitalizationType = .none
+    var spellCheckingType: UITextSpellCheckingType = .no
+    var smartQuotesType: UITextSmartQuotesType = .no
+    var smartDashesType: UITextSmartDashesType = .no
+    var smartInsertDeleteType: UITextSmartInsertDeleteType = .no
+    var keyboardAppearance: UIKeyboardAppearance = .dark
+
+    private lazy var accessoryBar: UIToolbar = {
+        let bar = UIToolbar(frame: CGRect(x: 0, y: 0, width: 320, height: 44))
+        bar.barStyle = .black
+        bar.tintColor = .white
+        func keyButton(_ title: String, usage: UInt16) -> UIBarButtonItem {
+            let item = UIBarButtonItem(title: title, style: .plain, target: self, action: #selector(accessoryKeyTapped(_:)))
+            item.tag = Int(usage)
+            return item
+        }
+        bar.items = [
+            keyButton("Esc", usage: 0x29),
+            keyButton("Tab", usage: 0x2B),
+            UIBarButtonItem(barButtonSystemItem: .fixedSpace, target: nil, action: nil),
+            keyButton("←", usage: 0x50),
+            keyButton("↓", usage: 0x51),
+            keyButton("↑", usage: 0x52),
+            keyButton("→", usage: 0x4F),
+            UIBarButtonItem(barButtonSystemItem: .flexibleSpace, target: nil, action: nil),
+            UIBarButtonItem(barButtonSystemItem: .done, target: self, action: #selector(dismissTapped)),
+        ]
+        bar.sizeToFit()
+        return bar
+    }()
+
+    override var inputAccessoryView: UIView? { accessoryBar }
+
+    init() {
+        super.init(frame: CGRect(x: 0, y: 0, width: 1, height: 1))
+        alpha = 0.01
+        isUserInteractionEnabled = false
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    func insertText(_ text: String) {
+        let events = KeyMap.keyEvents(for: text)
+        if !events.isEmpty { onEvents?(events) }
+    }
+
+    func deleteBackward() {
+        onEvents?([.key(usage: 0x2A, down: true), .key(usage: 0x2A, down: false)])
+    }
+
+    @objc private func accessoryKeyTapped(_ sender: UIBarButtonItem) {
+        let usage = UInt16(sender.tag)
+        onEvents?([.key(usage: usage, down: true), .key(usage: usage, down: false)])
+    }
+
+    @objc private func dismissTapped() {
+        _ = resignFirstResponder()
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned { onDismiss?() }
+        return resigned
     }
 }
