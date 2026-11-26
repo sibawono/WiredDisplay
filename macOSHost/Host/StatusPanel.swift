@@ -42,6 +42,7 @@ struct PanelSnapshot {
     var autoSwitchMicrophone = true
     var bothSpeakers = false
     var bothSpeakersDelayMs: Double = 45
+    var bothSpeakersBalance: Double = 1.0
     var paired: [Paired] = []
     var connectionCode: String?
     var openAtLogin = false
@@ -65,6 +66,7 @@ struct PanelActions {
     var setAutoSwitchMicrophone: (Bool) -> Void = { _ in }
     var setBothSpeakers: (Bool) -> Void = { _ in }
     var setBothSpeakersDelayMs: (Double) -> Void = { _ in }
+    var setBothSpeakersBalance: (Double) -> Void = { _ in }
     var openDisplaySettings: () -> Void = {}
     var openSoundSettings: () -> Void = {}
     var openAccessibility: () -> Void = {}
@@ -357,6 +359,30 @@ struct StatusPanelView: View {
                             .padding(.horizontal, -NativeSlider.overflow)
                             .frame(height: NativeSlider.sliderHeight)
                         Text("Adjust if you hear an echo between the Mac and the iPad.")
+                            .font(.system(size: 10.5)).foregroundStyle(Color.caption)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    CardDivider()
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("Mac speaker level").font(.system(size: 11, weight: .semibold))
+                            Spacer()
+                            Text("\(Int((s.bothSpeakersBalance * 100).rounded()))%")
+                                .font(.system(size: 11)).foregroundStyle(Color.caption).monospacedDigit()
+                        }
+                        NativeSlider(
+                            value: Binding(
+                                get: { s.bothSpeakersBalance / HostController.maxBothSpeakersBalance },
+                                set: {
+                                    let bal = ($0 * HostController.maxBothSpeakersBalance * 20).rounded() / 20
+                                    model.snapshot.bothSpeakersBalance = bal
+                                    model.actions.setBothSpeakersBalance(bal)
+                                }),
+                            isEnabled: true)
+                            .frame(height: NativeSlider.sliderHeight + 2 * NativeSlider.overflow)
+                            .padding(.horizontal, -NativeSlider.overflow)
+                            .frame(height: NativeSlider.sliderHeight)
+                        Text("Balance the Mac speaker against the iPad speaker.")
                             .font(.system(size: 10.5)).foregroundStyle(Color.caption)
                             .fixedSize(horizontal: false, vertical: true)
                     }

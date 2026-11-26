@@ -345,6 +345,17 @@ final class ShortcutRemapperTests: XCTestCase {
         XCTAssertEqual(r4.key(usage: space, down: true),
                        [.key(usage: control, down: false), .key(usage: command, down: true), .key(usage: space, down: true)])
     }
+
+    func testDisplaySpaceQualityAndStylusMessagesRoundTrip() throws {
+        XCTAssertEqual(try SessionCodec.decodeControl(SessionCodec.encode(.displaySpace(2))), .displaySpace(2))
+        XCTAssertEqual(try SessionCodec.decodeControl(SessionCodec.encode(.qualityPreset(1))), .qualityPreset(1))
+        XCTAssertThrowsError(try SessionCodec.decodeControl(SessionCodec.encode(.displaySpace(5))))
+        XCTAssertThrowsError(try SessionCodec.decodeControl(SessionCodec.encode(.qualityPreset(9))))
+
+        let stylus = InputEvent.stylus(phase: .move, x: 0.25, y: 0.75, pressure: 0.6)
+        XCTAssertEqual(try SessionCodec.decodeInput(SessionCodec.encode(stylus)), stylus)
+        XCTAssertThrowsError(try SessionCodec.decodeInput(SessionCodec.encode(.stylus(phase: .down, x: 0.5, y: 0.5, pressure: 1.5))))
+    }
 }
 
 final class DecodeLimitTests: XCTestCase {

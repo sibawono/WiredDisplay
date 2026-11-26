@@ -159,4 +159,9 @@ final class HostFleet: @unchecked Sendable {
         UserDefaults.standard.set(clamped, forKey: HostController.bothSpeakersDelayMsKey)
         controllers.forEach { $0.updateBothSpeakers() }
     }
+    func setBothSpeakersBalance(_ balance: Double) {
+        let clamped = min(max(balance, 0), HostController.maxBothSpeakersBalance)
+        UserDefaults.standard.set(clamped, forKey: HostController.bothSpeakersBalanceKey)
+        controllers.forEach { $0.updateBothSpeakers() }
+    }
 }

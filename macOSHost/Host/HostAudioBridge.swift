@@ -32,13 +32,15 @@ final class HostAudioBridge: @unchecked Sendable {
     private var localMirrorDevice: AudioDeviceID = 0
     private var localMirrorEnabled = false
     private var localMirrorDelayMs: Double = 45
+    private var localMirrorGain: Float = 1.0
 
     init(macSpeaker: @escaping @Sendable () -> AudioDeviceID? = { nil },
-         localMirrorEnabled: Bool = false, localMirrorDelayMs: Double = 45,
+         localMirrorEnabled: Bool = false, localMirrorDelayMs: Double = 45, localMirrorGain: Float = 1.0,
          send: @escaping @Sendable (AudioPacket) -> Void) {
         self.macSpeakerProvider = macSpeaker
         self.localMirrorEnabled = localMirrorEnabled
         self.localMirrorDelayMs = localMirrorDelayMs
+        self.localMirrorGain = min(max(localMirrorGain, 0), 1.5)
         let counters = counters
         let mirrorBuffer = localMirrorBuffer
         self.send = { packet in
@@ -107,9 +109,10 @@ final class HostAudioBridge: @unchecked Sendable {
     }
 
     /// Updates "Both Speakers" settings (called on `audioQueue`).
-    func setLocalMirror(enabled: Bool, delayMs: Double) {
+    func setLocalMirror(enabled: Bool, delayMs: Double, gain: Float) {
         localMirrorEnabled = enabled
         localMirrorDelayMs = min(max(delayMs, 0), 120)
+        localMirrorGain = min(max(gain, 0), 1.5)
         reconcileLocalMirror()
     }
 
@@ -125,7 +128,8 @@ final class HostAudioBridge: @unchecked Sendable {
         let targetFrames = max(Int((localMirrorDelayMs * SessionConstants.audioSampleRate / 1000.0).rounded()),
                                Int(Self.ioBufferFrames))
         let maxFrames = max(targetFrames + 2400, 4800)
-        if localMirrorEngine != nil, localMirrorDevice == device {
+        if let engine = localMirrorEngine, localMirrorDevice == device {
+            engine.mainMixerNode.outputVolume = localMirrorGain
             // Delay slider moved: swap the jitter buffer without restarting AVAudioEngine.
             let currentTarget = localMirrorBuffer.withLock { $0?.targetFrames }
             if currentTarget != targetFrames {
@@ -147,10 +151,11 @@ final class HostAudioBridge: @unchecked Sendable {
             engine.attach(source)
             engine.connect(source, to: engine.mainMixerNode,
                            format: AVAudioFormat(standardFormatWithSampleRate: SessionConstants.audioSampleRate, channels: 2))
+            engine.mainMixerNode.outputVolume = localMirrorGain
             try engine.start()
             localMirrorEngine = engine
             localMirrorDevice = device
-            Log.info("audio: Mac speaker mirror started on device \(device) (sync delay \(Int(localMirrorDelayMs.rounded())) ms)")
+            Log.info("audio: Mac speaker mirror started on device \(device) (sync delay \(Int(localMirrorDelayMs.rounded())) ms, level \(Int((localMirrorGain * 100).rounded()))%)")
         } catch {
             localMirrorBuffer.withLock { $0 = nil }
             Log.warn("audio: Mac speaker mirror could not start: \(error)")

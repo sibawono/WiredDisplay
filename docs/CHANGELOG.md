@@ -1204,3 +1204,17 @@ During scrolling, sampled medians were 0.05 ms capture-delivery-to-conversion, 4
 
 **VERIFIED:**
 - Pending `macos-26` CI verification on PR #2.
+
+## CHANGE ID: P1-074 — iPad Controls UI redesign, Display Space & Quality from iPad, Mac speaker balance, Apple Pencil pressure + double-tap/squeeze, Live Stats HUD
+
+**WHAT:**
+- `Shared/Session/Messages.swift` & `Tests/Unit/WDSessionTests/SecureChannelTests.swift`: added backward-compatible `ControlMessage.displaySpace(UInt8)`, `ControlMessage.qualityPreset(UInt8)`, and `InputEvent.stylus(phase:x:y:pressure:)` with round-trip and bounds tests.
+- `macOSHost/Host/{HostAudioBridge,HostController,HostFleet,StatusPanel,main}.swift`: added Mac speaker level balance (0–150%, default 100%) for Both Speakers, bidirectional Display Space & Quality preset sync with the iPad, and `InputInjector` tablet-point pressure injection (`CGEventMouseSubtype.tabletPoint` + `tabletEventPointPressure`).
+- `iPadOSClient/WiredDisplayClient/Sources/{VideoView,ClientSession,ClientApp,ClientUI}.swift`:
+  - Redesigned the iPad Controls panel into a compact 360×540 frosted-glass 4-tab layout (`Display`, `Audio`, `Input`, `More`) with fixed header, close button, and fixed Reconnect footer.
+  - Added Display Space (`Default / More / Most`) and Quality (`Balanced / Pro / Ultra / High`) pickers on the iPad, synced with the Mac.
+  - Added optional `StatsHUD` overlay (live FPS, median transit latency ms, codec) in the top-left corner.
+  - Added Apple Pencil pressure sensitivity (`.stylus` events) and `UIPencilInteraction` double-tap / Apple Pencil Pro squeeze action (`Off / Right Click / Undo ⌘Z`).
+
+**VERIFIED:**
+- Pending `macos-26` CI verification via Draft PR #3.

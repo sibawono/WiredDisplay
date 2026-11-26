@@ -206,6 +206,7 @@ final class StatusMenu: NSObject {
             waiting.autoSwitchMicrophone = fleet?.audioRouter.usesHeadsetMicrophone ?? true
             waiting.bothSpeakers = HostController.bothSpeakers
             waiting.bothSpeakersDelayMs = HostController.bothSpeakersDelayMs
+            waiting.bothSpeakersBalance = HostController.bothSpeakersBalance
             waiting.version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
             model.snapshot = waiting
             return
@@ -254,6 +255,7 @@ final class StatusMenu: NSObject {
         s.autoSwitchMicrophone = controller.audioRouter.usesHeadsetMicrophone
         s.bothSpeakers = HostController.bothSpeakers
         s.bothSpeakersDelayMs = HostController.bothSpeakersDelayMs
+        s.bothSpeakersBalance = HostController.bothSpeakersBalance
         s.paired = controller.trust.peers.map { .init(name: $0.name, model: $0.model, key: String($0.fingerprint.prefix(8))) }
         if status.iPadName != nil { s.connectionCode = controller.connectionCode.withLock { $0 } }
         s.openAtLogin = LoginItem.isEnabled
@@ -293,6 +295,7 @@ final class StatusMenu: NSObject {
         a.setAutoSwitchMicrophone = { fleet.audioRouter.usesHeadsetMicrophone = $0 }
         a.setBothSpeakers = { fleet.setBothSpeakers($0) }
         a.setBothSpeakersDelayMs = { fleet.setBothSpeakersDelayMs($0) }
+        a.setBothSpeakersBalance = { fleet.setBothSpeakersBalance($0) }
         a.openDisplaySettings = { Self.open("x-apple.systempreferences:com.apple.Displays-Settings.extension") }
         a.openSoundSettings = { Self.open("x-apple.systempreferences:com.apple.Sound-Settings.extension") }
         a.openAccessibility = { Self.open("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") }

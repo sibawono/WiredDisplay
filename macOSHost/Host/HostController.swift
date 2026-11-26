@@ -416,6 +416,12 @@ final class HostController: @unchecked Sendable {
         quality.withLock { $0 = (preset.chroma, preset.tenBit) }
         UserDefaults.standard.set(preset.rawValue, forKey: QualityPreset.defaultsKey)
         Log.info("quality set to \(preset.rawValue) (\(preset.chroma.rawValue), \(preset.tenBit ? 10 : 8)-bit)")
+        if let idx = QualityPreset.allCases.firstIndex(of: preset) {
+            queue.async { [self] in
+                guard trusted, let socket, !socket.isClosed else { return }
+                send(.qualityPreset(UInt8(idx)), on: socket)
+            }
+        }
         videoQueue.async { [self] in
             do { try restartEncoding() } catch {
                 Log.warn("quality switch failed: \(error)")
@@ -473,21 +479,29 @@ final class HostController: @unchecked Sendable {
 
     static let bothSpeakersKey = "bothSpeakers"
     static let bothSpeakersDelayMsKey = "bothSpeakersDelayMs"
+    static let bothSpeakersBalanceKey = "bothSpeakersBalance"
     static let defaultBothSpeakersDelayMs: Double = 45
     static let maxBothSpeakersDelayMs: Double = 120
+    static let defaultBothSpeakersBalance: Double = 1.0
+    static let maxBothSpeakersBalance: Double = 1.5
     static var bothSpeakers: Bool { UserDefaults.standard.bool(forKey: bothSpeakersKey) }
     static var bothSpeakersDelayMs: Double {
         let value = UserDefaults.standard.object(forKey: bothSpeakersDelayMsKey) as? Double ?? defaultBothSpeakersDelayMs
         return min(max(value, 0), maxBothSpeakersDelayMs)
+    }
+    static var bothSpeakersBalance: Double {
+        let value = UserDefaults.standard.object(forKey: bothSpeakersBalanceKey) as? Double ?? defaultBothSpeakersBalance
+        return min(max(value, 0), maxBothSpeakersBalance)
     }
 
     /// Updates the local Mac speaker mirror to match UserDefaults.
     func updateBothSpeakers() {
         let enabled = Self.bothSpeakers
         let delayMs = Self.bothSpeakersDelayMs
+        let gain = Float(Self.bothSpeakersBalance)
         queue.async { [self] in
             guard let audio else { return }
-            audioQueue.async { audio.setLocalMirror(enabled: enabled, delayMs: delayMs) }
+            audioQueue.async { audio.setLocalMirror(enabled: enabled, delayMs: delayMs, gain: gain) }
         }
     }
 
@@ -841,7 +855,8 @@ final class HostController: @unchecked Sendable {
         let audio = HostAudioBridge(
             macSpeaker: { [weak audioRouter] in audioRouter?.preferredMacSpeaker() },
             localMirrorEnabled: Self.bothSpeakers,
-            localMirrorDelayMs: Self.bothSpeakersDelayMs
+            localMirrorDelayMs: Self.bothSpeakersDelayMs,
+            localMirrorGain: Float(Self.bothSpeakersBalance)
         ) { [weak socket] packet in
             socket?.send(.speaker, payload: packet.encoded())
         }
@@ -1033,15 +1048,22 @@ final class HostController: @unchecked Sendable {
         streamingState = streaming
         onState(streaming)
         let streamed = pipeline.config
+        let matchedSpace = Self.displaySpace(for: streamed, hiDPI: hello.scale >= 2)
         sessionStatus.withLock {
             $0.iPadName = sessionIdentity.withLock { $0?.name } ?? hello.deviceName
             $0.iPadModel = sessionIdentity.withLock { $0?.model }
             $0.pixelSize = "\(streamed.pixelWidth) × \(streamed.pixelHeight)"
             $0.pointSize = "\(streamed.pointWidth) × \(streamed.pointHeight)"
-            $0.displaySpace = Self.displaySpace(for: streamed, hiDPI: hello.scale >= 2)
+            $0.displaySpace = matchedSpace
             $0.displaySpaceError = false
             $0.refreshHz = Int(streamed.refreshHz)
             $0.streamingSince = Date()
+        }
+        if let matchedSpace, let idx = VirtualDisplayController.Space.allCases.firstIndex(of: matchedSpace) {
+            send(.displaySpace(UInt8(idx)), on: socket)
+        }
+        if let preset = qualityPreset, let idx = QualityPreset.allCases.firstIndex(of: preset) {
+            send(.qualityPreset(UInt8(idx)), on: socket)
         }
         Log.info("streaming to \(hello.deviceName): \(pipeline.config) input \(isInputEnabled ? "enabled" : "disabled")")
         if options.testDecodeFallback {
@@ -1141,6 +1163,9 @@ final class HostController: @unchecked Sendable {
         }
         Log.info("display mode changed: now looks like \(width)x\(height) pt; telling the iPad")
         send(.streamConfig(pipeline.config), on: socket)
+        if let space, let idx = VirtualDisplayController.Space.allCases.firstIndex(of: space) {
+            send(.displaySpace(UInt8(idx)), on: socket)
+        }
         // A new "looks like" mode has a new framebuffer size: capture it at
         // its own size again (own downscale).
         if let encoder = pipeline.encoder,
@@ -1351,6 +1376,14 @@ final class HostController: @unchecked Sendable {
                     if microphone { try audio.startMicrophone() } else { audio.stopMicrophone() }
                 } catch { Log.warn("microphone route not applied: \(error)") }
             }
+        case .displaySpace(let raw):
+            let spaces = VirtualDisplayController.Space.allCases
+            guard spaces.indices.contains(Int(raw)) else { return }
+            setDisplaySpace(spaces[Int(raw)])
+        case .qualityPreset(let raw):
+            let presets = QualityPreset.allCases
+            guard presets.indices.contains(Int(raw)) else { return }
+            setQuality(presets[Int(raw)])
         case .videoActive(let active):
             guard let hello = peerHello else { return }
             Log.info("iPad video \(active ? "resumed" : "paused (app in background)")")

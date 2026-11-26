@@ -15,8 +15,21 @@ import WDSession
 ///   a two-finger click is a right click, two-finger scroll carries gesture and
 ///   momentum phases like a Mac trackpad.
 /// - Hardware keyboard: every key press/release as a HID usage (R-INP-02).
+/// Action triggered by Apple Pencil double-tap (Gen 2 / Pro) or squeeze (Pro).
+enum PencilAction: String, CaseIterable {
+    case off, rightClick, undo
+
+    var title: String {
+        switch self {
+        case .off: return "Off"
+        case .rightClick: return "Right Click"
+        case .undo: return "Undo (⌘Z)"
+        }
+    }
+}
+
 @MainActor
-final class VideoView: UIView, UIPointerInteractionDelegate, UIGestureRecognizerDelegate {
+final class VideoView: UIView, UIPointerInteractionDelegate, UIGestureRecognizerDelegate, UIPencilInteractionDelegate {
     override class var layerClass: AnyClass { AVSampleBufferDisplayLayer.self }
 
     var displayLayer: AVSampleBufferDisplayLayer {
@@ -150,6 +163,10 @@ final class VideoView: UIView, UIPointerInteractionDelegate, UIGestureRecognizer
     /// Trackpad/mouse button presses in progress, with the button they hold.
     private var pointerPresses: [UITouch: PointerButton] = [:]
     private var lastPointerPoint = CGPoint(x: 0.5, y: 0.5)
+    static let pencilActionKey = "pencilAction"
+    var pencilAction: PencilAction = UserDefaults.standard.string(forKey: VideoView.pencilActionKey)
+        .flatMap(PencilAction.init(rawValue:)) ?? .rightClick
+
     /// Apple Pencil touch in progress (direct click/drag/draw, no hold delay).
     private var pencilTouch: UITouch?
     private var lastPencilPoint = CGPoint(x: 0.5, y: 0.5)
@@ -208,6 +225,39 @@ final class VideoView: UIView, UIPointerInteractionDelegate, UIGestureRecognizer
         three.delegate = self
         addGestureRecognizer(three)
         addInteraction(UIPointerInteraction(delegate: self))
+        let pencilInteraction = UIPencilInteraction()
+        pencilInteraction.delegate = self
+        addInteraction(pencilInteraction)
+    }
+
+    // MARK: Apple Pencil double-tap & squeeze
+
+    nonisolated func pencilInteractionDidTap(_ interaction: UIPencilInteraction) {
+        MainActor.assumeIsolated { performPencilAction() }
+    }
+
+    @available(iOS 17.5, *)
+    nonisolated func pencilInteraction(_ interaction: UIPencilInteraction, didReceiveSqueeze squeeze: UIPencilInteraction.Squeeze) {
+        guard squeeze.phase == .ended else { return }
+        MainActor.assumeIsolated { performPencilAction() }
+    }
+
+    private func performPencilAction() {
+        guard streamSize != nil else { return }
+        switch pencilAction {
+        case .off:
+            break
+        case .rightClick:
+            let point = cursorPoint ?? lastPencilPoint
+            let x = Float(point.x), y = Float(point.y)
+            emit([.pointer(phase: .move, button: .none, x: x, y: y),
+                  .pointer(phase: .down, button: .right, x: x, y: y),
+                  .pointer(phase: .up, button: .right, x: x, y: y)])
+        case .undo:
+            // Command-Z
+            emit([.key(usage: 0xE3, down: true), .key(usage: 0x1D, down: true),
+                  .key(usage: 0x1D, down: false), .key(usage: 0xE3, down: false)])
+        }
     }
 
     /// Keep Apple Pencil touches out of multi-finger gesture recognizers and
@@ -444,7 +494,7 @@ final class VideoView: UIView, UIPointerInteractionDelegate, UIGestureRecognizer
         let now = ProcessInfo.processInfo.systemUptime
         for touch in touches {
             // Apple Pencil: immediate precision left-click / drag / draw with
-            // palm rejection (never scrolls on drag, no hold delay).
+            // pressure sensitivity and palm rejection (no hold delay).
             if touch.type == .pencil {
                 if primaryTouch != nil {
                     primaryTouch = nil
@@ -455,8 +505,7 @@ final class VideoView: UIView, UIPointerInteractionDelegate, UIGestureRecognizer
                 pencilTouch = touch
                 lastPencilPoint = point
                 let x = Float(point.x), y = Float(point.y)
-                emit([.pointer(phase: .move, button: .none, x: x, y: y),
-                      .pointer(phase: .down, button: .left, x: x, y: y)])
+                emit([.stylus(phase: .down, x: x, y: y, pressure: pencilPressure(touch))])
                 continue
             }
             // Trackpad/mouse click: a real button press, held until release
@@ -491,7 +540,8 @@ final class VideoView: UIView, UIPointerInteractionDelegate, UIGestureRecognizer
             for sample in samples {
                 if let point = normalized(sample.preciseLocation(in: self)) {
                     lastPencilPoint = point
-                    events.append(.pointer(phase: .move, button: .none, x: Float(point.x), y: Float(point.y)))
+                    events.append(.stylus(phase: .move, x: Float(point.x), y: Float(point.y),
+                                          pressure: pencilPressure(sample)))
                 }
             }
             if !events.isEmpty { emit(events) }
@@ -528,12 +578,17 @@ final class VideoView: UIView, UIPointerInteractionDelegate, UIGestureRecognizer
         emit(interpreter.cancelled())
     }
 
+    private func pencilPressure(_ touch: UITouch) -> Float {
+        guard touch.maximumPossibleForce > 0 else { return 0.5 }
+        return Float(min(max(touch.force / touch.maximumPossibleForce, 0), 1))
+    }
+
     private func endPencilIfNeeded(_ touches: Set<UITouch>) {
         guard let pencil = pencilTouch, touches.contains(pencil) else { return }
         pencilTouch = nil
         palmRejectUntil = ProcessInfo.processInfo.systemUptime + 0.25
         let point = normalized(pencil.preciseLocation(in: self)) ?? lastPencilPoint
-        emit([.pointer(phase: .up, button: .left, x: Float(point.x), y: Float(point.y))])
+        emit([.stylus(phase: .up, x: Float(point.x), y: Float(point.y), pressure: 0)])
     }
 
     private func endPointerPresses(_ touches: Set<UITouch>) {
@@ -587,13 +642,15 @@ final class VideoView: UIView, UIPointerInteractionDelegate, UIGestureRecognizer
 
     private func emit(_ events: [InputEvent]) {
         for event in events {
-            // Local echo for every pointer position the iPad sends (drags,
-            // trackpad clicks, touches), not only for hover (audit C-6): the
-            // cursor follows at once instead of one round trip later.
-            if case .pointer(_, _, let x, let y) = event {
+            // Local echo for every pointer/stylus position the iPad sends,
+            // so the cursor follows at once instead of one round trip later.
+            switch event {
+            case .pointer(_, _, let x, let y), .stylus(_, let x, let y, _):
                 localPointerUntil = ProcessInfo.processInfo.systemUptime + 0.15
                 cursorPoint = CGPoint(x: CGFloat(x), y: CGFloat(y))
                 layoutCursor()
+            default:
+                break
             }
             onInput?(event)
         }
