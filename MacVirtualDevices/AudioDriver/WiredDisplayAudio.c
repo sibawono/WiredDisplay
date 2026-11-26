@@ -600,7 +600,7 @@ static OSStatus BeginIOOperation(AudioServerPlugInDriverRef d, AudioObjectID inD
 }
 
 static inline UInt32 RingIndex(Float64 sampleTime) {
-    return (UInt32)((UInt64)(Int64)sampleTime & (kRingFrames - 1));
+    return (UInt32)((UInt64)(SInt64)sampleTime & (kRingFrames - 1));
 }
 
 // Real-time path: no locks, no allocation, bounded copies.
