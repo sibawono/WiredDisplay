@@ -439,6 +439,7 @@ final class VideoView: UIView, UIPointerInteractionDelegate, UIGestureRecognizer
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard streamSize != nil else { return }
+        if !isFirstResponder { becomeFirstResponder() }
         stopMomentum()
         let now = ProcessInfo.processInfo.systemUptime
         for touch in touches {

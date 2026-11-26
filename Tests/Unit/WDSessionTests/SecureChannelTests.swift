@@ -311,6 +311,40 @@ final class ShortcutRemapperTests: XCTestCase {
         XCTAssertEqual(remapper.key(usage: 0x2C, down: true), [.key(usage: 0x2C, down: true)])
         XCTAssertFalse(remapper.isRemapping)
     }
+
+    func testOptionShortcutsAndHideAppRemap() {
+        let option: UInt16 = 0xE2, keyD: UInt16 = 0x07, keyH: UInt16 = 0x0B, esc: UInt16 = 0x29, space: UInt16 = 0x2C
+        // Ctrl+D without Option stays Ctrl+D (EOF in terminal).
+        var r1 = ShortcutRemapper()
+        _ = r1.key(usage: control, down: true)
+        XCTAssertEqual(r1.key(usage: keyD, down: true), [.key(usage: keyD, down: true)])
+        XCTAssertFalse(r1.isRemapping)
+        _ = r1.key(usage: keyD, down: false)
+        // Ctrl+Opt+D -> Cmd+Opt+D (Show/Hide Dock).
+        _ = r1.key(usage: option, down: true)
+        XCTAssertEqual(r1.key(usage: keyD, down: true),
+                       [.key(usage: control, down: false), .key(usage: command, down: true), .key(usage: keyD, down: true)])
+        XCTAssertTrue(r1.isRemapping)
+
+        // Ctrl+Opt+Esc -> Cmd+Opt+Esc (Force Quit).
+        var r2 = ShortcutRemapper()
+        _ = r2.key(usage: control, down: true)
+        _ = r2.key(usage: option, down: true)
+        XCTAssertEqual(r2.key(usage: esc, down: true),
+                       [.key(usage: control, down: false), .key(usage: command, down: true), .key(usage: esc, down: true)])
+
+        // Ctrl+H -> Cmd+H (Hide app) and Ctrl+Opt+Space -> Cmd+Opt+Space (Finder Search).
+        var r3 = ShortcutRemapper()
+        _ = r3.key(usage: control, down: true)
+        XCTAssertEqual(r3.key(usage: keyH, down: true),
+                       [.key(usage: control, down: false), .key(usage: command, down: true), .key(usage: keyH, down: true)])
+
+        var r4 = ShortcutRemapper()
+        _ = r4.key(usage: control, down: true)
+        _ = r4.key(usage: option, down: true)
+        XCTAssertEqual(r4.key(usage: space, down: true),
+                       [.key(usage: control, down: false), .key(usage: command, down: true), .key(usage: space, down: true)])
+    }
 }
 
 final class DecodeLimitTests: XCTestCase {

@@ -1193,3 +1193,14 @@ During scrolling, sampled medians were 0.05 ms capture-delivery-to-conversion, 4
 
 **VERIFIED:**
 - Pending iPad hardware test via `scripts/install-ipad-app.sh`.
+
+## CHANGE ID: P1-073 — Magic Keyboard global shortcuts audit & fixes
+
+**WHAT:**
+- `macOSHost/Host/InputInjector.swift`: posted modifier keys and Caps Lock with `event.type = .flagsChanged` (so macOS global hotkeys, WindowServer, and `⌘Tab` release work reliably) and attached active keyboard modifier `flags` to mouse click/drag and scroll `CGEvent`s (`⌘+Click`, `⇧+Click`, `⌥+Drag`, `⌘+Scroll`).
+- `Shared/Session/ShortcutRemapper.swift` & `Tests/Unit/WDSessionTests/SecureChannelTests.swift`: added per-shortcut `shift`/`option` rules so iPadOS-stolen global Mac shortcuts remap via Control: `⌃H` / `⌃⌥H` → `⌘H` / `⌘⌥H` (Hide App / Hide Others), `⌃⌥D` → `⌘⌥D` (Show/Hide Dock), `⌃⌥Esc` → `⌘⌥Esc` (Force Quit), and `⌃⌥Space` → `⌘⌥Space` (Finder Search), while keeping `⌃C`/`⌃D`/`⌃3` untouched; added unit tests.
+- `iPadOSClient/WiredDisplayClient/Sources/{VideoView,ClientApp}.swift`: reclaimed `VideoView` first responder on touch and foreground resume so keyboard shortcuts do not drop after opening Controls or switching apps.
+- `macOSHost/Host/StatusPanel.swift`: updated the Input tab shortcut reference card.
+
+**VERIFIED:**
+- Pending `macos-26` CI verification on PR #2.

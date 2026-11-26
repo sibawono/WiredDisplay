@@ -101,6 +101,7 @@ final class AppModel {
         reportBrightness()
         session?.start()
         if echoEnabled { echo.start() }
+        videoView.becomeFirstResponder()
         UIApplication.shared.isIdleTimerDisabled = true
     }
 
