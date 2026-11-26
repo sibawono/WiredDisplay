@@ -49,11 +49,18 @@ public struct SendScheduler: Sendable {
         }
     }
 
+    /// True (and counted as dropped) when a non-keyframe would be discarded
+    /// while waiting for a keyframe; callers can skip encrypting it.
+    public mutating func dropVideoIfWaiting(isKeyframe: Bool) -> Bool {
+        guard waitingForKeyframe && !isKeyframe else { return false }
+        stats.videoDropped += 1
+        return true
+    }
+
     /// Returns true when the caller must force the encoder to emit a keyframe.
     @discardableResult
     public mutating func enqueue(video wire: [UInt8], isKeyframe: Bool) -> Bool {
-        if waitingForKeyframe && !isKeyframe {
-            stats.videoDropped += 1
+        if dropVideoIfWaiting(isKeyframe: isKeyframe) {
             return false // already asked for one
         }
         if isKeyframe {

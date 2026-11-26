@@ -469,6 +469,28 @@ final class HostController: @unchecked Sendable {
         Log.info("touch input \(enabled ? "ENABLED" : "disabled") by user")
     }
 
+    // MARK: both speakers (Mac + iPad)
+
+    static let bothSpeakersKey = "bothSpeakers"
+    static let bothSpeakersDelayMsKey = "bothSpeakersDelayMs"
+    static let defaultBothSpeakersDelayMs: Double = 45
+    static let maxBothSpeakersDelayMs: Double = 120
+    static var bothSpeakers: Bool { UserDefaults.standard.bool(forKey: bothSpeakersKey) }
+    static var bothSpeakersDelayMs: Double {
+        let value = UserDefaults.standard.object(forKey: bothSpeakersDelayMsKey) as? Double ?? defaultBothSpeakersDelayMs
+        return min(max(value, 0), maxBothSpeakersDelayMs)
+    }
+
+    /// Updates the local Mac speaker mirror to match UserDefaults.
+    func updateBothSpeakers() {
+        let enabled = Self.bothSpeakers
+        let delayMs = Self.bothSpeakersDelayMs
+        queue.async { [self] in
+            guard let audio else { return }
+            audioQueue.async { audio.setLocalMirror(enabled: enabled, delayMs: delayMs) }
+        }
+    }
+
     // MARK: staying awake while connected
 
     /// Default on: the Mac's displays do not sleep on their own while an iPad is connected.
@@ -816,7 +838,11 @@ final class HostController: @unchecked Sendable {
                 verified.signal()
                 self?.helloArrived.signal()
             })
-        let audio = HostAudioBridge { [weak socket] packet in
+        let audio = HostAudioBridge(
+            macSpeaker: { [weak audioRouter] in audioRouter?.preferredMacSpeaker() },
+            localMirrorEnabled: Self.bothSpeakers,
+            localMirrorDelayMs: Self.bothSpeakersDelayMs
+        ) { [weak socket] packet in
             socket?.send(.speaker, payload: packet.encoded())
         }
         queue.sync {
@@ -1305,6 +1331,8 @@ final class HostController: @unchecked Sendable {
                     Log.info("audio stays with the other iPad; ignoring this one's audio route")
                     return
                 }
+            } else {
+                guard ownsAudio else { return }
             }
             sessionStatus.withLock { $0.speaker = speaker; $0.microphone = microphone }
             audioRouter.iPadRoute(speaker: speaker, microphone: microphone)

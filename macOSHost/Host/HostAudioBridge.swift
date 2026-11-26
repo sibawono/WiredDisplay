@@ -23,10 +23,27 @@ final class HostAudioBridge: @unchecked Sendable {
     /// Diagnostics: packets each way, logged periodically.
     private let counters = OSAllocatedUnfairLock(initialState: (sent: 0, received: 0, receivedFrames: 0))
 
-    init(send: @escaping @Sendable (AudioPacket) -> Void) {
+    // Local Mac speaker mirror ("Both Speakers"): feeds tapped speaker packets
+    // into the Mac's own speaker with a configurable delay buffer so Mac and
+    // iPad stay aligned without echo, while macOS volume keys control both.
+    private let macSpeakerProvider: @Sendable () -> AudioDeviceID?
+    private let localMirrorBuffer = OSAllocatedUnfairLock<AudioJitterBuffer?>(initialState: nil)
+    private var localMirrorEngine: AVAudioEngine?
+    private var localMirrorDevice: AudioDeviceID = 0
+    private var localMirrorEnabled = false
+    private var localMirrorDelayMs: Double = 45
+
+    init(macSpeaker: @escaping @Sendable () -> AudioDeviceID? = { nil },
+         localMirrorEnabled: Bool = false, localMirrorDelayMs: Double = 45,
+         send: @escaping @Sendable (AudioPacket) -> Void) {
+        self.macSpeakerProvider = macSpeaker
+        self.localMirrorEnabled = localMirrorEnabled
+        self.localMirrorDelayMs = localMirrorDelayMs
         let counters = counters
+        let mirrorBuffer = localMirrorBuffer
         self.send = { packet in
             send(packet)
+            if let mirror = mirrorBuffer.withLock({ $0 }) { mirror.push(packet) }
             let sent = counters.withLock { $0.sent += 1; return $0.sent }
             if sent == 1 || sent % 5000 == 0 { Log.info("audio: speaker packets sent to iPad: \(sent)") }
         }
@@ -37,7 +54,7 @@ final class HostAudioBridge: @unchecked Sendable {
     var isSpeakerRunning: Bool { speakerProc != nil }
     var isMicrophoneRunning: Bool { microphoneEngine != nil }
 
-    // MARK: speaker (Mac -> iPad)
+    // MARK: speaker (Mac -> iPad, optional local Mac mirror)
 
     /// IO buffer requested from CoreAudio for both bridges: 240 frames = 5 ms.
     /// Replaces AVAudioEngine taps, which delivered ~100 ms chunks (step 2).
@@ -72,12 +89,14 @@ final class HostAudioBridge: @unchecked Sendable {
         speakerProc = procID
         speakerFifo = fifo
         Log.info("audio: speaker bridge started (iPad Speaker -> iPad, IOProc)")
+        reconcileLocalMirror()
         DispatchQueue.global().asyncAfter(deadline: .now() + 3) {
             Log.info("audio: speaker IO check after 3 s: \(fifo.ioCycles) IO cycles, \(fifo.overflows) overflows")
         }
     }
 
     func stopSpeaker() {
+        stopLocalMirror()
         guard let procID = speakerProc else { return }
         AudioDeviceStop(speakerDevice, procID)
         AudioDeviceDestroyIOProcID(speakerDevice, procID)
@@ -85,6 +104,66 @@ final class HostAudioBridge: @unchecked Sendable {
         speakerFifo?.stopSender()
         speakerFifo = nil
         Log.info("audio: speaker bridge stopped")
+    }
+
+    /// Updates "Both Speakers" settings (called on `audioQueue`).
+    func setLocalMirror(enabled: Bool, delayMs: Double) {
+        localMirrorEnabled = enabled
+        localMirrorDelayMs = min(max(delayMs, 0), 120)
+        reconcileLocalMirror()
+    }
+
+    /// Keeps the Mac speaker mirror running iff enabled, speaker is active, and
+    /// the iPad microphone is off (Mac speaker output cannot be echo-cancelled
+    /// by the iPad's AEC).
+    private func reconcileLocalMirror() {
+        guard localMirrorEnabled, isSpeakerRunning, !isMicrophoneRunning,
+              let device = macSpeakerProvider(), device != 0 else {
+            stopLocalMirror()
+            return
+        }
+        let targetFrames = max(Int((localMirrorDelayMs * SessionConstants.audioSampleRate / 1000.0).rounded()),
+                               Int(Self.ioBufferFrames))
+        let maxFrames = max(targetFrames + 2400, 4800)
+        if localMirrorEngine != nil, localMirrorDevice == device {
+            // Delay slider moved: swap the jitter buffer without restarting AVAudioEngine.
+            let currentTarget = localMirrorBuffer.withLock { $0?.targetFrames }
+            if currentTarget != targetFrames {
+                let updated = AudioJitterBuffer(channels: Int(SessionConstants.speakerChannels),
+                                                targetFrames: targetFrames, maxFrames: maxFrames)
+                localMirrorBuffer.withLock { $0 = updated }
+            }
+            return
+        }
+        stopLocalMirror()
+        do {
+            let buffer = AudioJitterBuffer(channels: Int(SessionConstants.speakerChannels),
+                                           targetFrames: targetFrames, maxFrames: maxFrames)
+            localMirrorBuffer.withLock { $0 = buffer }
+            let engine = AVAudioEngine()
+            try AudioDevices.bind(engine.outputNode, to: device)
+            AudioDevices.setBufferFrameSize(device, frames: Self.ioBufferFrames)
+            let source = Self.makeMirrorSource(bufferLock: localMirrorBuffer)
+            engine.attach(source)
+            engine.connect(source, to: engine.mainMixerNode,
+                           format: AVAudioFormat(standardFormatWithSampleRate: SessionConstants.audioSampleRate, channels: 2))
+            try engine.start()
+            localMirrorEngine = engine
+            localMirrorDevice = device
+            Log.info("audio: Mac speaker mirror started on device \(device) (sync delay \(Int(localMirrorDelayMs.rounded())) ms)")
+        } catch {
+            localMirrorBuffer.withLock { $0 = nil }
+            Log.warn("audio: Mac speaker mirror could not start: \(error)")
+        }
+    }
+
+    private func stopLocalMirror() {
+        localMirrorBuffer.withLock { $0 = nil }
+        guard let engine = localMirrorEngine else { return }
+        engine.stop()
+        localMirrorEngine = nil
+        localMirrorDevice = 0
+        Log.info("audio: Mac speaker mirror stopped")
     }
 
     /// Converts each IO cycle's input (Float32, interleaved or not) into
@@ -112,6 +191,7 @@ final class HostAudioBridge: @unchecked Sendable {
                        format: AVAudioFormat(standardFormatWithSampleRate: SessionConstants.audioSampleRate, channels: 2))
         try engine.start()
         microphoneEngine = engine
+        reconcileLocalMirror()
         Log.info("audio: microphone bridge started (iPad -> iPad Microphone)")
     }
 
@@ -120,6 +200,7 @@ final class HostAudioBridge: @unchecked Sendable {
         engine.stop()
         microphoneEngine = nil
         microphoneBuffer.reset()
+        reconcileLocalMirror()
         Log.info("audio: microphone bridge stopped; jitter stats \(microphoneBuffer.stats)")
     }
 
@@ -155,6 +236,25 @@ final class HostAudioBridge: @unchecked Sendable {
             return noErr
         }
     }
+
+    /// Render block for the local Mac speaker mirror; reads the current buffer
+    /// so sync delay adjustments apply live without restarting the engine.
+    private nonisolated static func makeMirrorSource(bufferLock: OSAllocatedUnfairLock<AudioJitterBuffer?>) -> AVAudioSourceNode {
+        let format = AVAudioFormat(standardFormatWithSampleRate: SessionConstants.audioSampleRate, channels: 2)!
+        return AVAudioSourceNode(format: format) { _, _, frameCount, bufferList -> OSStatus in
+            let list = UnsafeMutableAudioBufferListPointer(bufferList)
+            let first = list.count > 0 ? list[0].mData?.assumingMemoryBound(to: Float.self) : nil
+            let second = list.count > 1 ? list[1].mData?.assumingMemoryBound(to: Float.self) : nil
+            if let buffer = bufferLock.withLock({ $0 }) {
+                buffer.pull(first, second, frames: Int(frameCount))
+            } else {
+                let count = Int(frameCount)
+                first?.update(repeating: 0, count: count)
+                second?.update(repeating: 0, count: count)
+            }
+            return noErr
+        }
+    }
 }
 
 /// Single-producer (CoreAudio IO thread) / single-consumer (sender thread)
@@ -166,6 +266,9 @@ final class SpeakerFifo: @unchecked Sendable {
     /// One second of audio: far more than the sender ever leaves behind.
     private let capacityFrames = 48_000
     private let storage: UnsafeMutablePointer<Int16>
+    /// Preallocated scratch buffer for the sender thread so `drain()` never
+    /// allocates while holding `lock` (avoids contending with the RT IO thread).
+    private let drainScratch: UnsafeMutablePointer<Int16>
     private var readFrame = 0, writeFrame = 0, count = 0
     /// Heap-allocated: an os_unfair_lock must not move (no `&property`).
     private let lock: UnsafeMutablePointer<os_unfair_lock> = {
@@ -174,16 +277,19 @@ final class SpeakerFifo: @unchecked Sendable {
         return pointer
     }()
     private let wake = DispatchSemaphore(value: 0)
+    private var signaled = false
     private var running = false
     private var cycles = 0, dropped = 0
 
     init(channels: Int) {
         self.channels = channels
         storage = .allocate(capacity: capacityFrames * channels)
+        drainScratch = .allocate(capacity: SessionConstants.maxAudioFramesPerPacket * channels)
     }
 
     deinit {
         storage.deallocate()
+        drainScratch.deallocate()
         lock.deallocate()
     }
 
@@ -218,24 +324,33 @@ final class SpeakerFifo: @unchecked Sendable {
             }
             count += frames
         }
+        let shouldWake = frames > 0 && !signaled
+        if shouldWake { signaled = true }
         os_unfair_lock_unlock(lock)
-        if frames > 0 { wake.signal() }
+        if shouldWake { wake.signal() }
     }
 
-    /// Everything buffered so far, oldest first (sender thread).
+    /// Everything buffered so far, oldest first (sender thread). Copies out
+    /// under the lock into `drainScratch` and allocates the `[Int16]` outside.
     private func drain() -> [Int16] {
         os_unfair_lock_lock(lock)
-        defer { os_unfair_lock_unlock(lock) }
         let frames = min(count, SessionConstants.maxAudioFramesPerPacket)
-        guard frames > 0 else { return [] }
-        var out = [Int16](repeating: 0, count: frames * channels)
-        for index in 0..<frames {
-            let source = ((readFrame + index) % capacityFrames) * channels
-            for channel in 0..<channels { out[index * channels + channel] = storage[source + channel] }
+        guard frames > 0 else {
+            signaled = false
+            os_unfair_lock_unlock(lock)
+            return []
+        }
+        let firstFrames = min(frames, capacityFrames - readFrame)
+        let firstSamples = firstFrames * channels
+        drainScratch.update(from: storage + readFrame * channels, count: firstSamples)
+        let remainingSamples = (frames - firstFrames) * channels
+        if remainingSamples > 0 {
+            (drainScratch + firstSamples).update(from: storage, count: remainingSamples)
         }
         readFrame = (readFrame + frames) % capacityFrames
         count -= frames
-        return out
+        os_unfair_lock_unlock(lock)
+        return Array(UnsafeBufferPointer(start: drainScratch, count: frames * channels))
     }
 
     func startSender(_ send: @escaping @Sendable (AudioPacket) -> Void) {
@@ -257,7 +372,10 @@ final class SpeakerFifo: @unchecked Sendable {
     }
 
     func stopSender() {
-        os_unfair_lock_lock(lock); running = false; os_unfair_lock_unlock(lock)
+        os_unfair_lock_lock(lock)
+        running = false
+        signaled = true
+        os_unfair_lock_unlock(lock)
         wake.signal()
     }
 }

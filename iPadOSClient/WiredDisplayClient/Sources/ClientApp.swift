@@ -101,6 +101,7 @@ final class AppModel {
         reportBrightness()
         session?.start()
         if echoEnabled { echo.start() }
+        videoView.becomeFirstResponder()
         UIApplication.shared.isIdleTimerDisabled = true
     }
 
@@ -117,6 +118,18 @@ final class AppModel {
             session?.stop(reason: reason)
         }
         UIApplication.shared.isIdleTimerDisabled = false
+    }
+
+    /// Explicit user reconnect: always tears down the session even while audio
+    /// is active (unlike `deactivate`, which keeps the session for background audio).
+    func reconnect() {
+        ClientLog.write("user requested reconnect")
+        if echoEnabled { echo.stop(reason: "user reconnect") }
+        session?.send(.releaseAll)
+        session?.stop(reason: "user reconnect")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.activate()
+        }
     }
 
     // MARK: brightness (D-033)
@@ -440,10 +453,7 @@ struct ControlsPanel: View {
                 : Binding(get: { metalRenderer }, set: { metalRenderer = $0; app.setMetalRenderer($0) }),
             pairedMacs: connection.pairedMacs.map { PairedMacRow(name: $0.name, fingerprint: $0.fingerprint) },
             forgetPaired: { app.session?.forgetPairedMacs() },
-            reconnect: {
-                app.deactivate(reason: "user reconnect")
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { app.activate() }
-            },
+            reconnect: { app.reconnect() },
             device: app.deviceInfo)
     }
 

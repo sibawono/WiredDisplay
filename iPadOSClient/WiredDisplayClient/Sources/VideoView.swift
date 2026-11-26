@@ -146,11 +146,16 @@ final class VideoView: UIView, UIPointerInteractionDelegate, UIGestureRecognizer
     private var primaryTouch: UITouch?
     private var transformTracker = TransformTracker()
     private var lastEdit: (gesture: EditGesture, time: TimeInterval)?
-    private var ignoredTouches = Set<UITouch>()
     private var longPress: DispatchWorkItem?
     /// Trackpad/mouse button presses in progress, with the button they hold.
     private var pointerPresses: [UITouch: PointerButton] = [:]
     private var lastPointerPoint = CGPoint(x: 0.5, y: 0.5)
+    /// Apple Pencil touch in progress (direct click/drag/draw, no hold delay).
+    private var pencilTouch: UITouch?
+    private var lastPencilPoint = CGPoint(x: 0.5, y: 0.5)
+    /// Brief palm-rejection window after lifting the Pencil so a resting palm
+    /// does not immediately trigger a finger tap or scroll.
+    private var palmRejectUntil: TimeInterval = 0
     private var heldKeys = Set<UInt16>()
     private var momentum: CADisplayLink?
     private var momentumVelocity = CGPoint.zero
@@ -189,6 +194,7 @@ final class VideoView: UIView, UIPointerInteractionDelegate, UIGestureRecognizer
         let twoFingerTap = UITapGestureRecognizer(target: self, action: #selector(twoFingerTapped(_:)))
         twoFingerTap.numberOfTouchesRequired = 2
         twoFingerTap.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+        twoFingerTap.delegate = self
         addGestureRecognizer(twoFingerTap)
         let pinch = UIPinchGestureRecognizer(target: self, action: #selector(pinched(_:)))
         pinch.delegate = self
@@ -199,8 +205,22 @@ final class VideoView: UIView, UIPointerInteractionDelegate, UIGestureRecognizer
         rotation.delegate = self
         addGestureRecognizer(rotation)
         let three = ThreeFingerRecognizer(target: self, action: #selector(threeFingers(_:)))
+        three.delegate = self
         addGestureRecognizer(three)
         addInteraction(UIPointerInteraction(delegate: self))
+    }
+
+    /// Keep Apple Pencil touches out of multi-finger gesture recognizers and
+    /// reject resting-palm finger touches while the Pencil is active.
+    nonisolated func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        MainActor.assumeIsolated {
+            if gestureRecognizer is UIHoverGestureRecognizer { return true }
+            if touch.type == .pencil { return false }
+            if touch.type == .direct, pencilTouch != nil || ProcessInfo.processInfo.systemUptime < palmRejectUntil {
+                return false
+            }
+            return true
+        }
     }
 
     /// Scroll, pinch and rotate run together, as on a Mac trackpad.
@@ -419,13 +439,31 @@ final class VideoView: UIView, UIPointerInteractionDelegate, UIGestureRecognizer
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard streamSize != nil else { return }
+        if !isFirstResponder { becomeFirstResponder() }
         stopMomentum()
+        let now = ProcessInfo.processInfo.systemUptime
         for touch in touches {
+            // Apple Pencil: immediate precision left-click / drag / draw with
+            // palm rejection (never scrolls on drag, no hold delay).
+            if touch.type == .pencil {
+                if primaryTouch != nil {
+                    primaryTouch = nil
+                    cancelLongPress()
+                    emit(interpreter.cancelled())
+                }
+                guard let point = normalized(touch.preciseLocation(in: self)) else { continue }
+                pencilTouch = touch
+                lastPencilPoint = point
+                let x = Float(point.x), y = Float(point.y)
+                emit([.pointer(phase: .move, button: .none, x: x, y: y),
+                      .pointer(phase: .down, button: .left, x: x, y: y)])
+                continue
+            }
             // Trackpad/mouse click: a real button press, held until release
             // (drag, double click). Secondary (two-finger click) = right button.
             if touch.type == .indirectPointer {
                 let button: PointerButton = event?.buttonMask.contains(.secondary) == true ? .right : .left
-                guard let point = normalized(touch.location(in: self)) else { ignoredTouches.insert(touch); continue }
+                guard let point = normalized(touch.location(in: self)) else { continue }
                 pointerPresses[touch] = button
                 lastPointerPoint = point
                 let x = Float(point.x), y = Float(point.y)
@@ -433,6 +471,8 @@ final class VideoView: UIView, UIPointerInteractionDelegate, UIGestureRecognizer
                       .pointer(phase: .down, button: button, x: x, y: y)])
                 continue
             }
+            // Palm rejection: ignore resting-hand touches while Pencil is active.
+            if pencilTouch != nil || now < palmRejectUntil { continue }
             // Only the first finger drives the interpreter.
             guard primaryTouch == nil else { continue }
             primaryTouch = touch
@@ -444,6 +484,18 @@ final class VideoView: UIView, UIPointerInteractionDelegate, UIGestureRecognizer
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard streamSize != nil else { return }
+        if let pencil = pencilTouch, touches.contains(pencil) {
+            let samples = event?.coalescedTouches(for: pencil) ?? [pencil]
+            var events: [InputEvent] = []
+            events.reserveCapacity(samples.count)
+            for sample in samples {
+                if let point = normalized(sample.preciseLocation(in: self)) {
+                    lastPencilPoint = point
+                    events.append(.pointer(phase: .move, button: .none, x: Float(point.x), y: Float(point.y)))
+                }
+            }
+            if !events.isEmpty { emit(events) }
+        }
         for touch in touches where pointerPresses[touch] != nil {
             if let point = normalized(touch.location(in: self)) {
                 lastPointerPoint = point
@@ -457,7 +509,7 @@ final class VideoView: UIView, UIPointerInteractionDelegate, UIGestureRecognizer
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-        ignoredTouches.subtract(touches)
+        endPencilIfNeeded(touches)
         endPointerPresses(touches)
         guard let primary = primaryTouch, touches.contains(primary) else { return }
         primaryTouch = nil
@@ -468,12 +520,20 @@ final class VideoView: UIView, UIPointerInteractionDelegate, UIGestureRecognizer
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
         // A recognizer (two or more fingers) took over, or the system did.
-        ignoredTouches.subtract(touches)
+        endPencilIfNeeded(touches)
         endPointerPresses(touches)
         guard let primary = primaryTouch, touches.contains(primary) else { return }
         primaryTouch = nil
         cancelLongPress()
         emit(interpreter.cancelled())
+    }
+
+    private func endPencilIfNeeded(_ touches: Set<UITouch>) {
+        guard let pencil = pencilTouch, touches.contains(pencil) else { return }
+        pencilTouch = nil
+        palmRejectUntil = ProcessInfo.processInfo.systemUptime + 0.25
+        let point = normalized(pencil.preciseLocation(in: self)) ?? lastPencilPoint
+        emit([.pointer(phase: .up, button: .left, x: Float(point.x), y: Float(point.y))])
     }
 
     private func endPointerPresses(_ touches: Set<UITouch>) {
@@ -486,7 +546,7 @@ final class VideoView: UIView, UIPointerInteractionDelegate, UIGestureRecognizer
 
     @objc private func hovered(_ recognizer: UIHoverGestureRecognizer) {
         // Trackpad pointer / Pencil hover: move the Mac cursor, no button.
-        guard streamSize != nil, interpreter.state == .idle, pointerPresses.isEmpty,
+        guard streamSize != nil, interpreter.state == .idle, pointerPresses.isEmpty, pencilTouch == nil,
               recognizer.state == .began || recognizer.state == .changed,
               let point = normalized(recognizer.location(in: self)) else { return }
         // Local echo happens in emit().
@@ -513,6 +573,7 @@ final class VideoView: UIView, UIPointerInteractionDelegate, UIGestureRecognizer
 
     private func resetTouches() {
         stopMomentum()
+        if let pencil = pencilTouch { endPencilIfNeeded([pencil]) }
         endPointerPresses(Set(pointerPresses.keys))
         if !heldKeys.isEmpty {
             emit(heldKeys.flatMap { shortcuts.key(usage: $0, down: false) })
@@ -521,7 +582,6 @@ final class VideoView: UIView, UIPointerInteractionDelegate, UIGestureRecognizer
         }
         cancelLongPress()
         primaryTouch = nil
-        ignoredTouches.removeAll()
         emit(interpreter.cancelled())
     }
 

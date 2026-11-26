@@ -5,7 +5,6 @@ import SwiftUI
 
 enum Brand {
     static let blue = Color(red: 0.12, green: 0.48, blue: 1.0)
-    static let deep = Color(red: 0.04, green: 0.13, blue: 0.40)
     /// Secondary text on the app's dark surfaces; the system style measured 3.6:1 there.
     static let secondaryText = Color.white.opacity(0.7)
     /// Filled buttons with white text: Brand.blue gave 3.2:1 under white text.

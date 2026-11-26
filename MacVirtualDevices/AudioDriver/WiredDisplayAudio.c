@@ -88,11 +88,10 @@ static Float32 SpeakerGain(void) {
 // partner's input. Both devices share the timeline below, so the writer's
 // output sample times and the reader's input sample times line up.
 typedef struct {
-    // Timing, guarded by `lock` (never touched by DoIOOperation).
+    // Lifecycle, guarded by `lock` (never touched by RT IO callbacks).
     pthread_mutex_t lock;
-    UInt32 ioClients; // across both devices of the channel
-    UInt64 anchorHostTime;
-    UInt64 timestampCount;
+    _Atomic UInt32 ioClients; // across both devices of the channel
+    _Atomic UInt64 anchorHostTime;
     // End (exclusive, in sample time) of what the writer has put in the ring.
     // Readers only copy frames inside [writtenEnd - kRingFrames, writtenEnd);
     // everything else reads as silence. This replaces "zero after read",
@@ -102,8 +101,8 @@ typedef struct {
     Float32 ring[kRingFrames * kChannels];
 } LoopbackChannel;
 
-static LoopbackChannel gSpeakerChannel = {PTHREAD_MUTEX_INITIALIZER, 0, 0, 0, 0.0, {0}};
-static LoopbackChannel gMicChannel = {PTHREAD_MUTEX_INITIALIZER, 0, 0, 0, 0.0, {0}};
+static LoopbackChannel gSpeakerChannel = {PTHREAD_MUTEX_INITIALIZER, 0, 0, 0.0, {0}};
+static LoopbackChannel gMicChannel = {PTHREAD_MUTEX_INITIALIZER, 0, 0, 0.0, {0}};
 
 // One direction of a channel.
 typedef struct {
@@ -340,9 +339,7 @@ static OSStatus GetDeviceProperty(LoopbackDevice *d, const AudioObjectPropertyAd
     case kAudioDevicePropertyClockDomain: RETURN_VALUE(UInt32, 0);
     case kAudioDevicePropertyDeviceIsAlive: RETURN_VALUE(UInt32, 1);
     case kAudioDevicePropertyDeviceIsRunning: {
-        pthread_mutex_lock(&d->channel->lock);
-        UInt32 running = d->channel->ioClients > 0;
-        pthread_mutex_unlock(&d->channel->lock);
+        UInt32 running = atomic_load(&d->channel->ioClients) > 0;
         RETURN_VALUE(UInt32, running);
     }
     case kAudioDevicePropertyDeviceCanBeDefaultDevice:
@@ -501,7 +498,7 @@ static OSStatus GetPropertyDataSize(AudioServerPlugInDriverRef d, AudioObjectID 
                                     UInt32 *outDataSize) {
     if (a == NULL || outDataSize == NULL) return kAudioHardwareIllegalOperationError;
     // Ask the getter with a buffer large enough for any property here.
-    UInt8 scratch[256];
+    UInt8 scratch[256] = {0};
     UInt32 size = 0;
     OSStatus status = GetPropertyData(d, inObjectID, pid, a, qSize, qData, sizeof(scratch), &size, scratch);
     if (status == kAudioHardwareNoError) *outDataSize = size;
@@ -548,13 +545,13 @@ static OSStatus StartIO(AudioServerPlugInDriverRef d, AudioObjectID inDevice, UI
     if (!device) return kAudioHardwareBadObjectError;
     LoopbackChannel *c = device->channel;
     pthread_mutex_lock(&c->lock);
-    if (c->ioClients == 0) {
-        c->anchorHostTime = mach_absolute_time();
-        c->timestampCount = 0;
+    UInt32 clients = atomic_load(&c->ioClients);
+    if (clients == 0) {
+        atomic_store(&c->anchorHostTime, mach_absolute_time());
         atomic_store(&c->writtenEnd, 0.0);
         memset(c->ring, 0, sizeof(c->ring));
     }
-    c->ioClients++;
+    atomic_store(&c->ioClients, clients + 1);
     pthread_mutex_unlock(&c->lock);
     return kAudioHardwareNoError;
 }
@@ -564,25 +561,26 @@ static OSStatus StopIO(AudioServerPlugInDriverRef d, AudioObjectID inDevice, UIn
     if (!device) return kAudioHardwareBadObjectError;
     LoopbackChannel *c = device->channel;
     pthread_mutex_lock(&c->lock);
-    if (c->ioClients > 0) c->ioClients--;
+    UInt32 clients = atomic_load(&c->ioClients);
+    if (clients > 0) atomic_store(&c->ioClients, clients - 1);
     pthread_mutex_unlock(&c->lock);
     return kAudioHardwareNoError;
 }
 
+// Real-time path: lock-free, computed directly from the IO anchor so a stall
+// longer than one ring period never leaves the zero-timestamp behind.
 static OSStatus GetZeroTimeStamp(AudioServerPlugInDriverRef d, AudioObjectID inDevice, UInt32 inClientID,
                                  Float64 *outSampleTime, UInt64 *outHostTime, UInt64 *outSeed) {
     LoopbackDevice *device = DeviceForObject(inDevice);
     if (!device) return kAudioHardwareBadObjectError;
     LoopbackChannel *c = device->channel;
-    pthread_mutex_lock(&c->lock);
+    UInt64 anchor = atomic_load(&c->anchorHostTime);
     Float64 ticksPerRing = gHostTicksPerFrame * (Float64)kRingFrames;
     UInt64 now = mach_absolute_time();
-    UInt64 next = c->anchorHostTime + (UInt64)((Float64)(c->timestampCount + 1) * ticksPerRing);
-    if (next <= now) c->timestampCount++;
-    *outSampleTime = (Float64)(c->timestampCount * kRingFrames);
-    *outHostTime = c->anchorHostTime + (UInt64)((Float64)c->timestampCount * ticksPerRing);
+    UInt64 count = (now >= anchor && ticksPerRing > 0) ? (UInt64)((Float64)(now - anchor) / ticksPerRing) : 0;
+    *outSampleTime = (Float64)(count * kRingFrames);
+    *outHostTime = anchor + (UInt64)((Float64)count * ticksPerRing);
     *outSeed = 1;
-    pthread_mutex_unlock(&c->lock);
     return kAudioHardwareNoError;
 }
 
@@ -602,9 +600,7 @@ static OSStatus BeginIOOperation(AudioServerPlugInDriverRef d, AudioObjectID inD
 }
 
 static inline UInt32 RingIndex(Float64 sampleTime) {
-    Float64 wrapped = fmod(sampleTime, (Float64)kRingFrames);
-    if (wrapped < 0) wrapped += kRingFrames;
-    return (UInt32)wrapped;
+    return (UInt32)((UInt64)(SInt64)sampleTime & (kRingFrames - 1));
 }
 
 // Real-time path: no locks, no allocation, bounded copies.
@@ -686,8 +682,10 @@ static ULONG AddRef(void *inDriver) { return atomic_fetch_add(&gRefCount, 1) + 1
 
 static ULONG Release(void *inDriver) {
     UInt32 current = atomic_load(&gRefCount);
-    if (current == 0) return 0;
-    return atomic_fetch_sub(&gRefCount, 1) - 1;
+    while (current > 0) {
+        if (atomic_compare_exchange_weak(&gRefCount, &current, current - 1)) return current - 1;
+    }
+    return 0;
 }
 
 // Factory named in Info.plist (CFPlugInFactories).

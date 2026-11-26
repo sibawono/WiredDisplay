@@ -16,7 +16,6 @@ final class BrightnessKeys: @unchecked Sendable {
     private let lock = NSLock()
     private var controllers: [HostController] = []
     private var tap: CFMachPort? // tap thread only, after creation
-    private var runLoop: CFRunLoop?
     private var started = false
     private var warned = false
 
@@ -43,7 +42,6 @@ final class BrightnessKeys: @unchecked Sendable {
         }
         guard first else { return }
         let thread = Thread { [self] in
-            runLoop = CFRunLoopGetCurrent()
             install()
             // Keep the run loop alive while the tap is retried.
             let keepAlive = CFRunLoopTimerCreateWithHandler(nil, CFAbsoluteTimeGetCurrent() + 1e9, 0, 0, 0) { _ in }
@@ -53,6 +51,11 @@ final class BrightnessKeys: @unchecked Sendable {
         thread.name = "wireddisplay.brightness-keys"
         thread.qualityOfService = .userInteractive
         thread.start()
+    }
+
+    /// Removes an unplugged iPad's controller so it can be deallocated.
+    func remove(_ controller: HostController) {
+        lock.withLock { controllers.removeAll { $0 === controller } }
     }
 
     /// The iPad the keys act on now: the first whose screen has the pointer
@@ -124,7 +127,7 @@ final class BrightnessKeys: @unchecked Sendable {
                   let controller = target else { return Unmanaged.passUnretained(event) }
             if type == .keyDown {
                 let fine = event.flags.contains([.maskAlternate, .maskShift])
-                controller.stepBrightness(up: code == Self.brightnessUpKeyCode, fine: fine)
+                _ = controller.stepBrightness(up: code == Self.brightnessUpKeyCode, fine: fine)
                 Log.info("brightness key \(code == Self.brightnessUpKeyCode ? "up" : "down") (key code) -> iPad " +
                          (controller.brightness.map { String(format: "%.2f", $0) } ?? "-"))
             }
@@ -140,7 +143,7 @@ final class BrightnessKeys: @unchecked Sendable {
         guard let controller = target else { return Unmanaged.passUnretained(event) }
         if isDown {
             let fine = ns.modifierFlags.contains([.option, .shift])
-            controller.stepBrightness(up: key == Self.brightnessUp, fine: fine)
+            _ = controller.stepBrightness(up: key == Self.brightnessUp, fine: fine)
             Log.info("brightness key \(key == Self.brightnessUp ? "up" : "down") -> iPad \(controller.brightness.map { String(format: "%.2f", $0) } ?? "-")")
         }
         return nil // swallow both down and up while an iPad is connected

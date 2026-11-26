@@ -11,12 +11,23 @@ public struct ShortcutRemapper: Sendable {
     static let commands: Set<UInt16> = [0xE3, 0xE7]
     static let command: UInt16 = 0xE3
 
-    /// Key usage -> whether Shift must be held (nil: either way).
-    static let remapped: [UInt16: Bool?] = [
-        0x2B: nil,    // Tab: app switcher (Shift: backwards)
-        0x35: nil,    // `: windows of the current app
-        0x2C: false,  // Space: Spotlight
-        0x20: true, 0x21: true, 0x22: true, // Shift-3/4/5: screenshots
+    struct Rule: Sendable {
+        /// nil = either way, true = must be held, false = must not be held.
+        let shift: Bool?
+        let option: Bool?
+    }
+
+    /// Key usage -> modifier requirements for Control -> Command remapping.
+    static let remapped: [UInt16: Rule] = [
+        0x2B: Rule(shift: nil, option: false),   // ⌃Tab / ⌃⇧Tab -> ⌘Tab / ⌘⇧Tab (app switcher)
+        0x35: Rule(shift: nil, option: false),   // ⌃` / ⌃⇧` -> ⌘` / ⌘⇧` (windows of current app)
+        0x2C: Rule(shift: false, option: nil),   // ⌃Space / ⌃⌥Space -> ⌘Space / ⌘⌥Space (Spotlight / Finder Search)
+        0x20: Rule(shift: true, option: false),  // ⌃⇧3 -> ⌘⇧3 (screenshot)
+        0x21: Rule(shift: true, option: false),  // ⌃⇧4 -> ⌘⇧4 (screenshot)
+        0x22: Rule(shift: true, option: false),  // ⌃⇧5 -> ⌘⇧5 (screenshot)
+        0x0B: Rule(shift: false, option: nil),   // ⌃H / ⌃⌥H -> ⌘H / ⌘⌥H (Hide app / Hide others; iPadOS steals ⌘H)
+        0x07: Rule(shift: false, option: true),  // ⌃⌥D -> ⌘⌥D (Show/Hide Dock; iPadOS steals ⌘⌥D)
+        0x29: Rule(shift: false, option: true),  // ⌃⌥Esc -> ⌘⌥Esc (Force Quit)
     ]
 
     private var held = Set<UInt16>()
@@ -46,11 +57,13 @@ public struct ShortcutRemapper: Sendable {
     private mutating func press(_ usage: UInt16) -> [InputEvent] {
         held.insert(usage)
         if controlAsCommand, Self.controls.contains(usage) { return [] }
-        guard !controlAsCommand, KeyMap.modifier(forUsage: usage) == nil, let needsShift = Self.remapped[usage],
-              !held.isDisjoint(with: Self.controls), held.isDisjoint(with: Self.commands), held.isDisjoint(with: Self.options)
+        guard !controlAsCommand, KeyMap.modifier(forUsage: usage) == nil, let rule = Self.remapped[usage],
+              !held.isDisjoint(with: Self.controls), held.isDisjoint(with: Self.commands)
         else { return [.key(usage: usage, down: true)] }
         let shiftHeld = !held.isDisjoint(with: Self.shifts)
-        if let needsShift, needsShift != shiftHeld { return [.key(usage: usage, down: true)] }
+        let optionHeld = !held.isDisjoint(with: Self.options)
+        if let needsShift = rule.shift, needsShift != shiftHeld { return [.key(usage: usage, down: true)] }
+        if let needsOption = rule.option, needsOption != optionHeld { return [.key(usage: usage, down: true)] }
         controlAsCommand = true
         let releaseControl = held.intersection(Self.controls).sorted().map { InputEvent.key(usage: $0, down: false) }
         return releaseControl + [.key(usage: Self.command, down: true), .key(usage: usage, down: true)]

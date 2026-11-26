@@ -365,8 +365,10 @@ final class InputInjector {
         guard wholeX != 0 || wholeY != 0 else { return }
         scrollRemainder.x -= wholeX
         scrollRemainder.y -= wholeY
-        CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 2,
-                wheel1: Int32(wholeY), wheel2: Int32(wholeX), wheel3: 0)?.post(tap: .cghidEventTap)
+        guard let event = CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 2,
+                                  wheel1: Int32(wholeY), wheel2: Int32(wholeX), wheel3: 0) else { return }
+        if !flags.isEmpty { event.flags = flags }
+        event.post(tap: .cghidEventTap)
     }
 
     /// Continuous ("trackpad") scroll: phase fields make AppKit treat it like a
@@ -408,6 +410,7 @@ final class InputInjector {
         }
         event.setIntegerValueField(.scrollWheelEventScrollPhase, value: scrollPhase)
         event.setIntegerValueField(.scrollWheelEventMomentumPhase, value: momentumPhase)
+        if !flags.isEmpty { event.flags = flags }
         event.post(tap: .cghidEventTap)
         gestures.note(.scroll, phase: phase)
         gestures.note(momentum: momentum)
@@ -421,6 +424,7 @@ final class InputInjector {
             return
         }
         if clickState > 0 { event.setIntegerValueField(.mouseEventClickState, value: clickState) }
+        if !flags.isEmpty { event.flags = flags }
         event.post(tap: .cghidEventTap)
     }
 
@@ -464,6 +468,11 @@ final class InputInjector {
 
     private func postKey(_ virtualKey: UInt16, down: Bool, usage: UInt16, autorepeat: Bool = false) {
         guard let event = CGEvent(keyboardEventSource: source, virtualKey: virtualKey, keyDown: down) else { return }
+        if KeyMap.modifier(forUsage: usage) != nil || usage == KeyMap.capsLockUsage {
+            // macOS global hotkeys and App Switcher release listen for .flagsChanged
+            // on modifier transitions rather than .keyDown/.keyUp.
+            event.type = .flagsChanged
+        }
         var flags = self.flags
         if KeyMap.isFunctionCluster(usage) { flags.insert(.maskSecondaryFn) }
         if KeyMap.isNumericPad(usage) { flags.insert(.maskNumericPad) }

@@ -16,11 +16,13 @@ final class HostFleet: @unchecked Sendable {
     let audioRouter = AudioRouter()
     private let confirmPairing: @Sendable (SecureChannel.Peer) -> Bool
     private let lock = OSAllocatedUnfairLock(initialState: (controllers: [HostController](), states: [ObjectIdentifier: HostController.State]()))
-    private var stopping = false
+    private let stopping = OSAllocatedUnfairLock(initialState: false)
     /// Main queue: a controller was added or changed state.
     var onChange: (@Sendable () -> Void)?
     /// Main queue: a controller was created (for per-iPad brightness keys).
     var onControllerAdded: (@Sendable (HostController) -> Void)?
+    /// Main queue: an unplugged idle controller was removed.
+    var onControllerRemoved: (@Sendable (HostController) -> Void)?
 
     init(options: HostController.Options, confirmPairing: @escaping @Sendable (SecureChannel.Peer) -> Bool) {
         currentOptions = OSAllocatedUnfairLock(initialState: options)
@@ -45,17 +47,35 @@ final class HostFleet: @unchecked Sendable {
     }
 
     func stop() {
-        stopping = true
+        stopping.withLock { $0 = true }
         for controller in controllers { controller.stop() }
     }
 
-    /// Every 2 s: a controller for each cabled device that has none yet.
+    /// Every 2 s: add a controller for each new cabled device, and remove idle
+    /// controllers whose USB device has been absent for at least 10 s.
     private func watchDevices() {
-        while !stopping {
+        var lastSeen: [String: TimeInterval] = [:]
+        while !stopping.withLock({ $0 }) {
+            let now = ProcessInfo.processInfo.systemUptime
             if let devices = try? UsbmuxConnection().listDevices() {
+                let wired = UsbmuxDevice.wiredOnly(devices)
+                let present = Set(wired.map(\.serialNumber))
+                for serial in present { lastSeen[serial] = now }
                 let known = Set(controllers.compactMap(\.deviceSerial))
-                for device in UsbmuxDevice.wiredOnly(devices) where !known.contains(device.serialNumber) {
+                for device in wired where !known.contains(device.serialNumber) {
                     add(serial: device.serialNumber)
+                }
+                let stale = controllers.filter { controller in
+                    guard let serial = controller.deviceSerial, !present.contains(serial) else { return false }
+                    guard now - (lastSeen[serial] ?? 0) >= 10 else { return false }
+                    switch state(of: controller) {
+                    case .waitingForDevice, .backingOff, .stopped: return true
+                    case .connecting, .streaming, .paused, .audioOnly, .pairing: return false
+                    }
+                }
+                for controller in stale {
+                    if let serial = controller.deviceSerial { lastSeen.removeValue(forKey: serial) }
+                    remove(controller)
                 }
             }
             Thread.sleep(forTimeInterval: 2)
@@ -64,8 +84,8 @@ final class HostFleet: @unchecked Sendable {
 
     private func add(serial: String) {
         let controller = HostController(options: options, deviceSerial: serial, audioRouter: audioRouter,
-                                        confirmPairing: confirmPairing) { [weak self] _ in self?.changed() }
-        // The state closure above cannot see the controller; record states here.
+                                        confirmPairing: confirmPairing) { _ in }
+        // The state closure above cannot see the controller; record states and notify here.
         controller.onStateRecorded = { [weak self, weak controller] state in
             guard let self, let controller else { return }
             self.lock.withLock { $0.states[ObjectIdentifier(controller)] = state }
@@ -79,6 +99,21 @@ final class HostFleet: @unchecked Sendable {
         changed()
     }
 
+    private func remove(_ controller: HostController) {
+        let removed: Bool = lock.withLock {
+            guard let index = $0.controllers.firstIndex(where: { $0 === controller }) else { return false }
+            $0.controllers.remove(at: index)
+            $0.states.removeValue(forKey: ObjectIdentifier(controller))
+            return true
+        }
+        guard removed else { return }
+        controller.stop()
+        Log.info("fleet: stopped idle controller for unplugged device \(controller.deviceSerial?.prefix(8) ?? "?")… (\(controllers.count) remaining)")
+        let notify = onControllerRemoved
+        DispatchQueue.main.async { notify?(controller) }
+        changed()
+    }
+
     private func changed() {
         let notify = onChange
         DispatchQueue.main.async { notify?() }
@@ -87,20 +122,41 @@ final class HostFleet: @unchecked Sendable {
     // MARK: settings for every iPad
 
     func setQuality(_ preset: QualityPreset) {
+        UserDefaults.standard.set(preset.rawValue, forKey: QualityPreset.defaultsKey)
         currentOptions.withLock { $0.chroma = preset.chroma; $0.tenBit = preset.tenBit }
         controllers.forEach { $0.setQuality(preset) }
     }
     func setInputEnabled(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: HostController.allowInputKey)
         currentOptions.withLock { $0.allowInput = enabled }
         controllers.forEach { $0.setInputEnabled(enabled) }
     }
-    func setRefreshFollowsIPad(_ follow: Bool) { controllers.forEach { $0.setRefreshFollowsIPad(follow) } }
-    func setLocalCursor(_ enabled: Bool) { controllers.forEach { $0.setLocalCursor(enabled) } }
-    func forgetDecodeLimits() { controllers.forEach { $0.forgetDecodeLimits() } }
+    func setRefreshFollowsIPad(_ follow: Bool) {
+        UserDefaults.standard.set(follow, forKey: HostController.refreshKey)
+        controllers.forEach { $0.setRefreshFollowsIPad(follow) }
+    }
+    func setLocalCursor(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: HostController.localCursorKey)
+        controllers.forEach { $0.setLocalCursor(enabled) }
+    }
+    func forgetDecodeLimits() {
+        UserDefaults.standard.removeObject(forKey: HostController.decodeLimitsKey)
+        controllers.forEach { $0.forgetDecodeLimits() }
+    }
     /// "Keep the display on" / "Keep the Mac awake" (General tab).
     func setKeepAwake(display: Bool? = nil, mac: Bool? = nil) {
         if let display { UserDefaults.standard.set(display, forKey: HostController.keepDisplayAwakeKey) }
         if let mac { UserDefaults.standard.set(mac, forKey: HostController.keepMacAwakeKey) }
         controllers.forEach { $0.updateAwakeAssertions() }
+    }
+    /// "Play on Mac speakers too" + sync delay (Audio tab).
+    func setBothSpeakers(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: HostController.bothSpeakersKey)
+        controllers.forEach { $0.updateBothSpeakers() }
+    }
+    func setBothSpeakersDelayMs(_ delayMs: Double) {
+        let clamped = min(max(delayMs, 0), HostController.maxBothSpeakersDelayMs)
+        UserDefaults.standard.set(clamped, forKey: HostController.bothSpeakersDelayMsKey)
+        controllers.forEach { $0.updateBothSpeakers() }
     }
 }

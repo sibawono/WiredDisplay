@@ -3,81 +3,10 @@ import SwiftUI
 
 // The panel's interactive controls are AppKit's own (user request): on
 // macOS 26 they carry the system Liquid Glass behaviour themselves (the
-// switch knob and slider thumb turn into a glass lens while held, the
-// segmented control's selection slides as glass between segments), which a
-// SwiftUI restyle does not reproduce. Each wrapper is a thin
-// NSViewRepresentable with target-action into a binding.
-
-/// NSSwitch bound to a Bool. While pressed or dragged, the macOS 27 knob
-/// becomes a glass lens larger than the switch itself; SwiftUI's host clips
-/// a representable to its frame, which cut the lens off (user report: not
-/// every toggle showed the glass). So the switch sits in an unclipped
-/// container with `overflow` points of room on every side, and the SwiftUI
-/// layout takes that room back with negative padding.
-struct NativeSwitch: NSViewRepresentable {
-    @Binding var isOn: Bool
-    static let overflow: CGFloat = 14
-    /// The switch's own size (what the layout reserves).
-    @MainActor static let switchSize = NSSwitch().intrinsicContentSize
-
-    final class Container: NSView {
-        let control = NSSwitch()
-        override init(frame: NSRect) {
-            super.init(frame: frame)
-            wantsLayer = true
-            layer?.masksToBounds = false
-            clipsToBounds = false
-            control.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(control)
-            NSLayoutConstraint.activate([
-                control.centerXAnchor.constraint(equalTo: centerXAnchor),
-                control.centerYAnchor.constraint(equalTo: centerYAnchor),
-            ])
-        }
-        required init?(coder: NSCoder) { fatalError("not used") }
-        override var intrinsicContentSize: NSSize {
-            let size = control.intrinsicContentSize
-            return NSSize(width: size.width + 2 * NativeSwitch.overflow, height: size.height + 2 * NativeSwitch.overflow)
-        }
-        /// The extra room is only for drawing: clicks there fall through.
-        override func hitTest(_ point: NSPoint) -> NSView? {
-            let hit = super.hitTest(point)
-            return hit === self ? nil : hit
-        }
-
-        override func viewDidMoveToSuperview() {
-            super.viewDidMoveToSuperview()
-            // The hosting wrapper too, so the lens is not cut at its edge.
-            superview?.clipsToBounds = false
-            superview?.layer?.masksToBounds = false
-        }
-    }
-
-    func makeNSView(context: Context) -> Container {
-        let container = Container()
-        container.control.target = context.coordinator
-        container.control.action = #selector(Coordinator.changed(_:))
-        return container
-    }
-
-    func updateNSView(_ container: Container, context: Context) {
-        context.coordinator.binding = $isOn
-        let state: NSControl.StateValue = isOn ? .on : .off
-        if container.control.state != state { container.control.state = state }
-    }
-
-    func sizeThatFits(_ proposal: ProposedViewSize, nsView: Container, context: Context) -> CGSize? {
-        nsView.intrinsicContentSize
-    }
-
-    func makeCoordinator() -> Coordinator { Coordinator(binding: $isOn) }
-
-    @MainActor final class Coordinator: NSObject {
-        var binding: Binding<Bool>
-        init(binding: Binding<Bool>) { self.binding = binding }
-        @objc func changed(_ sender: NSSwitch) { binding.wrappedValue = sender.state == .on }
-    }
-}
+// slider thumb turns into a glass lens while held, the segmented control's
+// selection slides as glass between segments), which a SwiftUI restyle does
+// not reproduce. Each wrapper is a thin NSViewRepresentable with target-action
+// into a binding.
 
 /// NSSegmentedControl (select one) bound to an index. Segments are SF
 /// Symbols or titles; they fill the available width equally.

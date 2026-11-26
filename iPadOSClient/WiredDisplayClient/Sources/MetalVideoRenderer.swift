@@ -83,15 +83,16 @@ final class SwitchableSink: VideoSink, @unchecked Sendable {
         self.metal = metal
     }
 
-    var hasMetal: Bool { metal != nil }
-
     func select(metal wanted: Bool) {
-        lock.withLock {
+        let previous: VideoSink? = lock.withLock {
             let next = wanted && metal != nil
-            guard next != useMetal else { return }
+            guard next != useMetal else { return nil }
+            let old = useMetal ? (metal ?? standard) : standard
             useMetal = next
             switched = true
+            return old
         }
+        previous?.flush(removingImage: true)
     }
 
     /// True once after a switch: the session restarts decoding at a keyframe.
@@ -259,6 +260,9 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
             keyframeWanted = false
         }
         presentQueue.async { [self] in if let textureCache { CVMetalTextureCacheFlush(textureCache, 0) } }
+        if removingImage {
+            DispatchQueue.main.async { [weak self] in self?.layer.contents = nil }
+        }
         decodeQueue.async { [self] in
             if let session { VTDecompressionSessionInvalidate(session) }
             session = nil

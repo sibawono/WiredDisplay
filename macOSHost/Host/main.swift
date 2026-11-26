@@ -61,6 +61,9 @@ final class StatusMenu: NSObject {
                 BrightnessKeys.shared.add(controller)
             }
         }
+        fleet.onControllerRemoved = { controller in
+            BrightnessKeys.shared.remove(controller)
+        }
         refresh()
     }
 
@@ -184,8 +187,16 @@ final class StatusMenu: NSObject {
 
     private func refresh() {
         guard let controller else {
-            // No cabled device yet: the panel still shows status and settings.
+            // No cabled device yet: the panel still shows status, saved settings and paired iPads.
+            let defaults = UserDefaults.standard
+            let opts = fleet?.options
             var waiting = PanelSnapshot()
+            waiting.quality = opts.flatMap { QualityPreset(chroma: $0.chroma, tenBit: $0.tenBit) } ?? QualityPreset.saved
+            waiting.inputEnabled = opts?.allowInput ?? defaults.bool(forKey: HostController.allowInputKey)
+            waiting.matchRefresh = defaults.object(forKey: HostController.refreshKey) as? Bool ?? true
+            waiting.localCursor = defaults.object(forKey: HostController.localCursorKey) as? Bool ?? true
+            waiting.paired = TrustStore(keychainService: "dev.wireddisplay.host").peers
+                .map { .init(name: $0.name, model: $0.model, key: String($0.fingerprint.prefix(8))) }
             waiting.accessibility = AXIsProcessTrusted()
             waiting.screenRecording = CGPreflightScreenCaptureAccess()
             waiting.openAtLogin = LoginItem.isEnabled
@@ -193,6 +204,8 @@ final class StatusMenu: NSObject {
             waiting.keepMacAwake = HostController.keepMacAwake
             waiting.autoSwitchAudio = fleet?.audioRouter.isEnabled ?? true
             waiting.autoSwitchMicrophone = fleet?.audioRouter.usesHeadsetMicrophone ?? true
+            waiting.bothSpeakers = HostController.bothSpeakers
+            waiting.bothSpeakersDelayMs = HostController.bothSpeakersDelayMs
             waiting.version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
             model.snapshot = waiting
             return
@@ -239,6 +252,8 @@ final class StatusMenu: NSObject {
         s.matchRefresh = controller.refreshFollowsIPad
         s.localCursor = controller.localCursor
         s.autoSwitchMicrophone = controller.audioRouter.usesHeadsetMicrophone
+        s.bothSpeakers = HostController.bothSpeakers
+        s.bothSpeakersDelayMs = HostController.bothSpeakersDelayMs
         s.paired = controller.trust.peers.map { .init(name: $0.name, model: $0.model, key: String($0.fingerprint.prefix(8))) }
         if status.iPadName != nil { s.connectionCode = controller.connectionCode.withLock { $0 } }
         s.openAtLogin = LoginItem.isEnabled
@@ -276,6 +291,8 @@ final class StatusMenu: NSObject {
         a.setKeepMacAwake = { fleet.setKeepAwake(mac: $0) }
         a.setLocalCursor = { fleet.setLocalCursor($0) }
         a.setAutoSwitchMicrophone = { fleet.audioRouter.usesHeadsetMicrophone = $0 }
+        a.setBothSpeakers = { fleet.setBothSpeakers($0) }
+        a.setBothSpeakersDelayMs = { fleet.setBothSpeakersDelayMs($0) }
         a.openDisplaySettings = { Self.open("x-apple.systempreferences:com.apple.Displays-Settings.extension") }
         a.openSoundSettings = { Self.open("x-apple.systempreferences:com.apple.Sound-Settings.extension") }
         a.openAccessibility = { Self.open("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") }
@@ -303,7 +320,7 @@ final class StatusMenu: NSObject {
         alert.addButton(withTitle: "Cancel")
         NSApp.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        controller?.trust.forgetAllPeers()
+        (controller?.trust ?? TrustStore(keychainService: "dev.wireddisplay.host")).forgetAllPeers()
         fleet?.forgetDecodeLimits()
         Log.info("paired iPads forgotten by the user")
         refresh()
@@ -320,7 +337,9 @@ final class StatusMenu: NSObject {
             alert.addButton(withTitle: "Pair")
             alert.addButton(withTitle: "Don't Pair")
             NSApp.activate(ignoringOtherApps: true)
-            let timer = Timer(timeInterval: 120, repeats: false) { _ in NSApp.abortModal() }
+            let timer = Timer(timeInterval: 120, repeats: false) { _ in
+                MainActor.assumeIsolated { NSApp.abortModal() }
+            }
             RunLoop.main.add(timer, forMode: .modalPanel)
             defer { timer.invalidate() }
             return alert.runModal() == .alertFirstButtonReturn

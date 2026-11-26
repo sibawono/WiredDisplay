@@ -74,7 +74,6 @@ final class VideoEncoder: @unchecked Sendable {
 
     let codec: VideoCodec
     let chroma: ChromaMode
-    /// True when the capture must deliver BGRA (any 4:4:4 use).
     /// True when the capture must deliver BGRA (4:4:4 or 10-bit lanes convert it).
     var wantsBGRA: Bool { chroma != .c420 || tenBit }
     /// HEVC Main10 / RExt 10-bit: keeps the precision of dithered gradients
@@ -436,7 +435,7 @@ final class VideoEncoder: @unchecked Sendable {
         let convertStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         let prepared = lane.prepare(job.source)
         let converted = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-        if lane.transfer != nil { stats.converted(nanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) &- convertStart) }
+        if lane.transfer != nil { stats.converted(nanos: converted &- convertStart) }
         guard let pixelBuffer = prepared else {
             Log.warn("\(lane.label) conversion failed; frame dropped")
             if job.force { stateLock.withLock { pendingKeyframe = true } }
