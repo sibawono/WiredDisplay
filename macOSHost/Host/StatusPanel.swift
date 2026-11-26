@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import WDHostCore
+import WDTransport
 
 // The menu bar panel (popover): an icon tab bar over cards, in the style of
 // modern menu bar utilities. Pure views over a snapshot, so it can be
@@ -48,6 +49,7 @@ struct PanelSnapshot {
     var openAtLogin = false
     var keepDisplayAwake = true
     var keepMacAwake = false
+    var transportMode: TransportMode = .usbOnly
     var loginNeedsApproval = false
     var version = "0.0"
 }
@@ -62,6 +64,7 @@ struct PanelActions {
     var setMatchRefresh: (Bool) -> Void = { _ in }
     var setKeepDisplayAwake: (Bool) -> Void = { _ in }
     var setKeepMacAwake: (Bool) -> Void = { _ in }
+    var setTransportMode: (TransportMode) -> Void = { _ in }
     var setLocalCursor: (Bool) -> Void = { _ in }
     var setAutoSwitchMicrophone: (Bool) -> Void = { _ in }
     var setBothSpeakers: (Bool) -> Void = { _ in }
@@ -443,6 +446,22 @@ struct StatusPanelView: View {
     private var generalTab: some View {
         VStack(spacing: 8) {
             Card {
+                Text("Connection").font(.system(size: 11, weight: .semibold))
+                Picker("Connection", selection: Binding(
+                    get: { s.transportMode },
+                    set: { model.snapshot.transportMode = $0; model.actions.setTransportMode($0) }
+                )) {
+                    Text("USB-C").tag(TransportMode.usbOnly)
+                    Text("Auto").tag(TransportMode.automatic)
+                    Text("Wi-Fi").tag(TransportMode.wifiOnly)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                Text(transportDetail(s.transportMode))
+                    .font(.system(size: 11)).foregroundStyle(Color.caption)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Card {
                 Text("Permissions").font(.system(size: 11, weight: .semibold))
                 PermissionLine(name: "Screen Recording", purpose: "Shows the Mac screen on the iPad",
                                granted: s.screenRecording, action: model.actions.openScreenRecording)
@@ -471,6 +490,14 @@ struct StatusPanelView: View {
                 CardDivider()
                 Text("WiredDisplay \(s.version)").font(.system(size: 11)).foregroundStyle(Color.caption)
             }
+        }
+    }
+
+    private func transportDetail(_ mode: TransportMode) -> String {
+        switch mode {
+        case .usbOnly: return "Streams strictly over a USB-C cable."
+        case .automatic: return "Prefers USB-C when plugged in; falls back to encrypted local Wi-Fi."
+        case .wifiOnly: return "Streams over encrypted local Wi-Fi (Bonjour)."
         }
     }
 }

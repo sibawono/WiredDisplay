@@ -1,9 +1,9 @@
-WiredDisplay 0.5.3: Panduan Instalasi
-iPad jadi layar Mac lewat kabel USB-C (dengan suara dan input sentuh)
+WiredDisplay 0.5.4: Panduan Instalasi
+iPad jadi layar Mac lewat kabel USB-C atau Wi-Fi lokal terenkripsi (dengan suara dan input sentuh)
 
 Isi paket
-- WiredDisplay-0.5.3.dmg   → app untuk Mac (host)
-- WiredDisplay-0.5.3.ipa   → app untuk iPad (dipasang lewat AltStore atau SideStore)
+- WiredDisplay-0.5.4.dmg   → app untuk Mac (host)
+- WiredDisplay-0.5.4.ipa   → app untuk iPad (dipasang lewat AltStore atau SideStore)
 - PANDUAN-INSTALASI.txt    → file ini
 
 Yang dibutuhkan

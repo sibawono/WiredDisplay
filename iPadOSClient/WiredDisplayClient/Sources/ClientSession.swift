@@ -21,6 +21,7 @@ final class ConnectionModel {
 
     var phase: Phase = .starting
     var macName = ""
+    var activeTransport = "USB-C"
     var streamConfig: StreamConfig?
     var lastError: String?
     var framesShown = 0
@@ -59,6 +60,8 @@ final class ClientSession: @unchecked Sendable {
     private var hello: Hello
 
     private var listener: NWListener?
+    private var wifiListener: NWListener?
+    private var activeIsUSB = true
     private var connection: NWConnection?
     private var parser = FrameParser()
     private var validator: SequenceValidator?
@@ -213,6 +216,7 @@ final class ClientSession: @unchecked Sendable {
             guard !running else { return }
             running = true
             startListener()
+            startWiFiListener()
         }
     }
 
@@ -224,6 +228,8 @@ final class ClientSession: @unchecked Sendable {
             endConnection(reason: reason, sendBye: true)
             listener?.cancel()
             listener = nil
+            wifiListener?.cancel()
+            wifiListener = nil
             ui { $0.phase = .starting }
         }
     }
@@ -257,12 +263,53 @@ final class ClientSession: @unchecked Sendable {
             }
             created.newConnectionHandler = { [weak self, weak created] connection in
                 guard let self, let created, self.listener === created else { return connection.cancel() }
-                self.accept(connection)
+                self.accept(connection, isUSB: true)
             }
             listener = created
             created.start(queue: queue)
         } catch {
             ui { $0.phase = .failed("listener: \(error)") }
+        }
+    }
+
+    private func startWiFiListener() {
+        guard wifiListener == nil, let port = NWEndpoint.Port(rawValue: 9101) else { return }
+        let tcp = NWProtocolTCP.Options()
+        tcp.noDelay = true
+        tcp.enableFastOpen = false
+        let parameters = NWParameters(tls: nil, tcp: tcp)
+        parameters.allowLocalEndpointReuse = true
+        parameters.serviceClass = .interactiveVideo
+        do {
+            let created = try NWListener(using: parameters, on: port)
+            var txt = NWTXTRecord()
+            txt["v"] = "1"
+            if let identity = try? trust.identity() {
+                let fp = SecureChannel.fingerprint(Array(identity.publicKey.rawRepresentation))
+                txt["id"] = String(fp.prefix(16))
+            }
+            created.service = NWListener.Service(name: hello.deviceName.isEmpty ? "iPad" : hello.deviceName,
+                                                 type: "_wireddisplay._tcp", domain: nil, txtRecord: txt)
+            created.stateUpdateHandler = { [weak self, weak created] state in
+                guard let self, let created, self.wifiListener === created else { return }
+                ClientLog.write("wifi listener \(state)")
+                if case .failed = state {
+                    self.wifiListener = nil
+                    created.cancel()
+                    self.queue.asyncAfter(deadline: .now() + 5) { [weak self] in
+                        guard let self, self.running, self.wifiListener == nil else { return }
+                        self.startWiFiListener()
+                    }
+                }
+            }
+            created.newConnectionHandler = { [weak self, weak created] connection in
+                guard let self, let created, self.wifiListener === created else { return connection.cancel() }
+                self.accept(connection, isUSB: false)
+            }
+            wifiListener = created
+            created.start(queue: queue)
+        } catch {
+            ClientLog.write("wifi listener failed to start: \(error)")
         }
     }
 
@@ -286,12 +333,20 @@ final class ClientSession: @unchecked Sendable {
         }
     }
 
-    private func accept(_ incoming: NWConnection) {
-        guard connection == nil else {
-            ClientLog.write("incoming connection refused: a session is still open (one Mac at a time)")
-            return incoming.cancel()
+    private func accept(_ incoming: NWConnection, isUSB: Bool) {
+        if connection != nil {
+            if isUSB && !activeIsUSB {
+                ClientLog.write("USB-C connection arrived while on Wi-Fi; upgrading session to USB-C")
+                endConnection(reason: "upgrading to USB-C", sendBye: true)
+            } else {
+                ClientLog.write("incoming \(isUSB ? "USB-C" : "Wi-Fi") connection refused: a session is still open")
+                return incoming.cancel()
+            }
         }
-        ClientLog.write("incoming connection from the Mac")
+        activeIsUSB = isUSB
+        let label = isUSB ? "USB-C" : "Wi-Fi"
+        ClientLog.write("incoming \(label) connection from the Mac")
+        ui { $0.activeTransport = label }
         let channel: SecureChannel
         do {
             channel = SecureChannel(role: .client, identity: try trust.identity())

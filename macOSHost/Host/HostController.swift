@@ -97,6 +97,8 @@ final class HostController: @unchecked Sendable {
         /// `--space native|more|most`. All three stay selectable
         /// in System Settings › Displays.
         var space: VirtualDisplayController.Space = .native
+        /// Transport selection: USB-C only (default), Automatic (USB-C preferred + Wi-Fi), or Wi-Fi only.
+        var transportMode: TransportMode = .usbOnly
     }
 
     enum State: Equatable, Sendable {
@@ -112,7 +114,32 @@ final class HostController: @unchecked Sendable {
         case stopped
     }
 
+    static let transportModeKey = "transportMode"
+    static var savedTransportMode: TransportMode {
+        UserDefaults.standard.string(forKey: transportModeKey).flatMap(TransportMode.init(rawValue:)) ?? .usbOnly
+    }
+
     private let options: Options
+    private let transportModeLock: OSAllocatedUnfairLock<TransportMode>
+    var transportMode: TransportMode { transportModeLock.withLock { $0 } }
+
+    func setTransportMode(_ mode: TransportMode) {
+        let previous = transportModeLock.withLock { current -> TransportMode in
+            defer { current = mode }
+            return current
+        }
+        guard previous != mode else { return }
+        Log.info("transport mode changed: \(previous.rawValue) -> \(mode.rawValue)")
+        queue.async { [self] in
+            if let active = socket {
+                if (active.transportKind == .wifi && !mode.allowsWiFi) ||
+                   (active.transportKind == .usb && !mode.allowsUSB) {
+                    resetBackoff.withLock { $0 = true }
+                    active.close("transport mode changed to \(mode.rawValue)")
+                }
+            }
+        }
+    }
     private let queue = DispatchQueue(label: "wireddisplay.host.session")
     private let videoQueue = DispatchQueue(label: "wireddisplay.host.video")
     /// Audio engines start/stop here: starting one can block on a TCC prompt,
@@ -141,7 +168,9 @@ final class HostController: @unchecked Sendable {
     // Owned by `queue`.
     private var injector: InputInjector?
     private var encoder: VideoEncoder?
-    private var socket: FramedSocket?
+    private var socket: (any FramedTransport)?
+    private var abrController: AdaptiveBitrateController?
+    private var lastObservedVideoDrops = 0
     private var peerHello: Hello?
     private var lastHeard = Date()
     private var audio: HostAudioBridge?
@@ -162,6 +191,7 @@ final class HostController: @unchecked Sendable {
          confirmPairing: @escaping @Sendable (SecureChannel.Peer) -> Bool,
          onState: @escaping @Sendable (State) -> Void) {
         self.options = options
+        self.transportModeLock = OSAllocatedUnfairLock(initialState: options.transportMode)
         self.deviceSerial = deviceSerial
         self.audioRouter = audioRouter
         self.confirmPairing = confirmPairing
@@ -192,6 +222,7 @@ final class HostController: @unchecked Sendable {
         var encoding: String?
         var speaker = false
         var microphone = false
+        var activeTransport: ActiveTransportKind?
         var streamingSince: Date?
     }
 
@@ -387,7 +418,7 @@ final class HostController: @unchecked Sendable {
 
     /// The iPad says it cannot decode the stream: drop 4:4:4, then 10-bit,
     /// remember it for this iPad, and restart the encoder. On `queue`.
-    private func handleDecodeFailure(socket: FramedSocket) {
+    private func handleDecodeFailure(socket: any FramedTransport) {
         guard Date().timeIntervalSince(lastDecodeStepDown) > 3 else { return } // a switch is under way
         let current = effectiveQuality()
         let (fingerprint, limits) = peerLimits.withLock { $0 }
@@ -636,7 +667,7 @@ final class HostController: @unchecked Sendable {
     /// locked), then the capture is restarted: now, with bounded backoff, or
     /// when the displays wake. Only a capture that cannot be restarted while
     /// the displays are on ends the session, as before.
-    private func captureLost(_ reason: String, socket: FramedSocket) {
+    private func captureLost(_ reason: String, socket: any FramedTransport) {
         guard let pipeline = video, pipeline.socket === socket, !socket.isClosed else { return }
         // A capture that stops again right after each restart (it never
         // runs) must not restart without end: back off, then give up.
@@ -668,7 +699,7 @@ final class HostController: @unchecked Sendable {
 
     /// `socket` is the session the recovery belongs to: a delayed retry must
     /// not restart the capture of a later session.
-    private func recoverCapture(attempt: Int, socket expected: FramedSocket) {
+    private func recoverCapture(attempt: Int, socket expected: any FramedTransport) {
         guard let pipeline = video, let socket = pipeline.socket, socket === expected, !socket.isClosed else { return }
         let state = currentPowerState.withLock { $0 }
         if state.displaysAsleep || state.systemAsleep {
@@ -710,40 +741,83 @@ final class HostController: @unchecked Sendable {
 
     private func runLoop() {
         var backoff: TimeInterval = 1
+        var bonjour: BonjourBrowser?
+        defer { bonjour?.stop() }
+
         while !isStopping {
             waitWhileAsleep()
             if resetBackoff.withLock({ value -> Bool in defer { value = false }; return value }) { backoff = 1 }
-            guard let wired = waitForWiredDevices() else { break }
-            // Several cabled devices can be present (another iPad on Sidecar,
-            // an iPhone): try each, the one that worked last time first, and
-            // use the one where the WiredDisplay app answers.
-            let mine = deviceSerial.map { serial in wired.filter { $0.serialNumber == serial } } ?? wired
-            guard !mine.isEmpty else {
-                noteWait("waiting for device \(deviceSerial ?? "?") on USB")
-                Thread.sleep(forTimeInterval: 1)
-                continue
+
+            let mode = transportMode
+            if mode.allowsWiFi && bonjour == nil {
+                let browser = BonjourBrowser()
+                browser.start()
+                bonjour = browser
+            } else if !mode.allowsWiFi, let existing = bonjour {
+                existing.stop()
+                bonjour = nil
             }
-            let devices = UsbmuxDevice.preferring(serial: lastGoodSerial, in: mine)
-            onState(.connecting)
+
             let started = Date()
             var sessionRan = false
-            for device in devices where !isStopping && !systemAsleep.withLock({ $0 }) {
-                do {
-                    try runSession(device)
-                    sessionRan = true
-                    onState(.backingOff("session ended"))
-                } catch SessionError.notListening {
-                    continue // not this device: WiredDisplay is not running there
-                } catch {
-                    sessionRan = true
-                    Log.warn("session ended with error: \(error)")
-                    onState(.backingOff("\(error)"))
+
+            // Always prefer USB-C whenever allowed and available.
+            if mode.allowsUSB {
+                let wired = pollWiredDevicesOnce()
+                let mine = deviceSerial.map { serial in wired.filter { $0.serialNumber == serial } } ?? wired
+                if !mine.isEmpty {
+                    let devices = UsbmuxDevice.preferring(serial: lastGoodSerial, in: mine)
+                    onState(.connecting)
+                    for device in devices where !isStopping && !systemAsleep.withLock({ $0 }) {
+                        do {
+                            try runSession(device)
+                            sessionRan = true
+                            onState(.backingOff("session ended"))
+                        } catch SessionError.notListening {
+                            continue
+                        } catch {
+                            sessionRan = true
+                            Log.warn("USB session ended with error: \(error)")
+                            onState(.backingOff("\(error)"))
+                        }
+                        break
+                    }
+                    if !sessionRan && mode == .usbOnly {
+                        let which = devices.count == 1 ? "the iPad" : "any of the \(devices.count) cabled devices"
+                        noteWait("nothing listens on port \(SessionConstants.clientPort) on \(which) (WiredDisplay app not open or not in front?)")
+                        onState(.waitingForDevice)
+                        Thread.sleep(forTimeInterval: 1)
+                        continue
+                    }
+                } else if mode == .usbOnly {
+                    if isStopping { break }
+                    noteWait("waiting for device \(deviceSerial ?? "iPad") on USB")
+                    onState(.waitingForDevice)
+                    Thread.sleep(forTimeInterval: 1)
+                    continue
                 }
-                break
             }
+
+            // Local Wi-Fi fallback or Wi-Fi-only mode.
+            if !sessionRan, mode.allowsWiFi, let peers = bonjour?.peers, !peers.isEmpty {
+                onState(.connecting)
+                for peer in peers where !isStopping && !systemAsleep.withLock({ $0 }) {
+                    do {
+                        try runWiFiSession(peer)
+                        sessionRan = true
+                        onState(.backingOff("Wi-Fi session ended"))
+                        break
+                    } catch {
+                        Log.warn("Wi-Fi session to \(peer.name) ended: \(error)")
+                        // Try remaining discovered peers if this one failed before streaming.
+                    }
+                }
+            }
+
             if !sessionRan {
-                let which = devices.count == 1 ? "the iPad" : "any of the \(devices.count) cabled devices"
-                noteWait("nothing listens on port \(SessionConstants.clientPort) on \(which) (WiredDisplay app not open or not in front?)")
+                noteWait(mode == .wifiOnly
+                         ? "waiting for WiredDisplay iPad on local Wi-Fi (_wireddisplay._tcp)"
+                         : "waiting for iPad on USB-C or local Wi-Fi")
                 onState(.waitingForDevice)
                 Thread.sleep(forTimeInterval: 1)
                 continue
@@ -754,6 +828,27 @@ final class HostController: @unchecked Sendable {
             backoff = min(backoff * 2, 8)
         }
         onState(.stopped)
+    }
+
+    private func pollWiredDevicesOnce() -> [UsbmuxDevice] {
+        guard let connection = try? UsbmuxConnection(),
+              let devices = try? connection.listDevices() else { return [] }
+        let wired = UsbmuxDevice.wiredOnly(devices)
+        if let serial = deviceSerial {
+            return wired.filter { $0.serialNumber == serial }
+        }
+        return wired
+    }
+
+    /// Returns true only when a wired USB-C device actually has WiredDisplay listening on clientPort.
+    private func hasListeningWiredDevice() -> Bool {
+        for device in pollWiredDevicesOnce() {
+            guard let probe = try? UsbmuxConnection() else { continue }
+            if (try? probe.connect(to: device, port: SessionConstants.clientPort)) != nil {
+                return true
+            }
+        }
+        return false
     }
 
     private enum SessionError: Swift.Error, CustomStringConvertible {
@@ -884,6 +979,55 @@ final class HostController: @unchecked Sendable {
                 verified.signal()
                 self?.helloArrived.signal()
             })
+        try runTransportSession(socket: socket, ended: ended, endReason: endReason, verified: verified,
+                                identityResult: identityResult, identityRead: identityRead)
+    }
+
+    private func runWiFiSession(_ bonjourPeer: BonjourPeer) throws {
+        Log.info("connecting to \(bonjourPeer.name) over local Wi-Fi (\(bonjourPeer.id))")
+        sessionDeviceSerial = "wifi-\(bonjourPeer.id)"
+
+        let identityResult = OSAllocatedUnfairLock<DeviceIdentity?>(initialState: nil)
+        let identityRead = DispatchSemaphore(value: 0)
+        identityRead.signal() // Wi-Fi has no usbmuxd lockdownd lookup
+
+        var generator = SystemRandomNumberGenerator()
+        let ended = DispatchSemaphore(value: 0)
+        let endReason = OSAllocatedUnfairLock(initialState: "")
+        let verified = DispatchSemaphore(value: 0)
+        let channel = SecureChannel(role: .host, identity: try trust.identity())
+        let socket = NWFramedConnection(
+            endpoint: bonjourPeer.endpoint, sessionID: generator.next(), maxVideoFrames: 4,
+            channel: channel, transportKind: .wifi,
+            onVerified: { [weak self] peer, origin in
+                guard let self else { return }
+                self.queue.async {
+                    guard self.socket === origin else { return }
+                    self.verifiedPeer = peer
+                    verified.signal()
+                }
+            },
+            onFrame: { [weak self] frame, origin in
+                guard let self else { return }
+                self.queue.async { self.handle(frame, from: origin) }
+            },
+            onClose: { [weak self] reason in
+                endReason.withLock { $0 = reason }
+                ended.signal()
+                verified.signal()
+                self?.helloArrived.signal()
+            }
+        )
+        try runTransportSession(socket: socket, ended: ended, endReason: endReason, verified: verified,
+                                identityResult: identityResult, identityRead: identityRead)
+    }
+
+    private func runTransportSession(socket: any FramedTransport,
+                                     ended: DispatchSemaphore,
+                                     endReason: OSAllocatedUnfairLock<String>,
+                                     verified: DispatchSemaphore,
+                                     identityResult: OSAllocatedUnfairLock<DeviceIdentity?>,
+                                     identityRead: DispatchSemaphore) throws {
         let audio = HostAudioBridge(
             macSpeaker: { [weak audioRouter] in audioRouter?.preferredMacSpeaker() },
             localMirrorEnabled: Self.bothSpeakers,
@@ -892,16 +1036,24 @@ final class HostController: @unchecked Sendable {
         ) { [weak socket] packet in
             socket?.send(.speaker, payload: packet.encoded())
         }
+        let abr: AdaptiveBitrateController? = socket.transportKind == .wifi
+            ? AdaptiveBitrateController(config: .wifi(ceilingMbps: options.bitrateMbps))
+            : nil
         queue.sync {
             self.socket = socket
             self.audio = audio
+            self.abrController = abr
+            self.lastObservedVideoDrops = 0
             peerHello = nil
             verifiedPeer = nil
             trusted = false
             pendingControl = []
             lastHeard = Date()
             iPadBrightness.withLock { $0 = nil }
-            sessionStatus.withLock { $0 = SessionStatus() }
+            sessionStatus.withLock {
+                $0 = SessionStatus()
+                $0.activeTransport = socket.transportKind
+            }
             sessionIdentity.withLock { $0 = nil }
             if ownsAudio { audioRouter.iPadRoute(speaker: false, microphone: false) }
             releaseAudio()
@@ -909,17 +1061,10 @@ final class HostController: @unchecked Sendable {
         while helloArrived.wait(timeout: .now()) == .success {} // drain stale signals
         socket.start()
 
-        // Activated immediately: releasing a never-resumed dispatch source traps
-        // (review finding 1).
         let keepalive = DispatchSource.makeTimerSource(queue: queue)
         keepalive.schedule(deadline: .distantFuture)
         keepalive.resume()
         defer {
-            // Closed first (audit AUD-01): once closed, `handle` drops every
-            // frame from it, so no late audio route can start the speaker or
-            // microphone again after `stopAll` below (a session that ended
-            // during setup left the bridge running, holding the audio device).
-            // Then a fixed order: input, video, audio.
             socket.close("session teardown")
             keepalive.cancel()
             videoQueue.sync { stopVideo() }
@@ -927,16 +1072,15 @@ final class HostController: @unchecked Sendable {
             queue.sync {
                 self.audio = nil
                 self.socket = nil
+                self.abrController = nil
+                self.lastObservedVideoDrops = 0
                 self.trusted = false
                 self.pendingControl = []
-                // Give the audio back (BUG: Mac sound stayed on a silent
-                // "iPad Speaker" after unplugging, and another iPad could
-                // never take audio over).
                 if ownsAudio { audioRouter.iPadRoute(speaker: false, microphone: false) }
                 releaseAudio()
                 sessionStatus.withLock { $0.speaker = false; $0.microphone = false }
             }
-            Log.info("session cleaned up: \(endReason.withLock { $0 })")
+            Log.info("session cleaned up (\(socket.transportKind.rawValue)): \(endReason.withLock { $0 })")
             connectionCode.withLock { $0 = nil }
         }
 
@@ -944,24 +1088,32 @@ final class HostController: @unchecked Sendable {
         _ = verified.wait(timeout: .now() + 5)
         if isStopping || socket.isClosed { throw SessionError.closedDuringSetup }
         guard let peer = queue.sync(execute: { verifiedPeer }) else { throw SessionError.notAuthenticated }
-        Log.info("iPad authenticated: key \(peer.fingerprint), pairing code \(peer.pairingCode)")
+        Log.info("iPad authenticated over \(socket.transportKind.rawValue): key \(peer.fingerprint), pairing code \(peer.pairingCode)")
         let known = DecodeLimits(rawValue: Self.savedLimits()[peer.fingerprint] ?? 0)
         peerLimits.withLock { $0 = (peer.fingerprint, known) }
         if !known.isEmpty { Log.info("this iPad's decode limits: \(known.summary)") }
         connectionCode.withLock { $0 = peer.pairingCode }
 
-        // Pings from here on keep both watchdogs fed while someone confirms
-        // pairing (the iPad asks its user on first contact).
         keepalive.setEventHandler { [weak self, weak socket] in
             guard let self, let socket else { return }
             if Date().timeIntervalSince(self.lastHeard) > 6 { return socket.close("no traffic from client for 6 s") }
             self.send(.ping(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)), on: socket)
             self.videoQueue.async { self.followDisplayMode() }
+            // In Automatic mode, probe for a listening USB-C WiredDisplay device off-queue
+            // so unrelated USB devices (e.g. an iPhone) never disrupt an active Wi-Fi session.
+            if socket.transportKind == .wifi, self.transportMode == .automatic {
+                DispatchQueue.global(qos: .utility).async { [weak self, weak socket] in
+                    guard let self, let socket, !socket.isClosed, self.hasListeningWiredDevice() else { return }
+                    Log.info("listening USB-C WiredDisplay device detected during Wi-Fi session; switching to USB-C")
+                    self.resetBackoff.withLock { $0 = true }
+                    socket.close("upgrading to USB-C")
+                }
+            }
         }
         keepalive.schedule(deadline: .now() + 2, repeating: 2)
 
         // 2. Do WE trust it? Nothing from the iPad is acted on before this.
-        try authorize(peer)
+        try authorize(peer, over: socket.transportKind)
         if socket.isClosed { throw SessionError.closedDuringSetup }
         queue.sync {
             trusted = true
@@ -1004,17 +1156,17 @@ final class HostController: @unchecked Sendable {
         ended.wait()
     }
 
-    /// Pinned iPads pass. With no iPad paired yet, the first one is paired
-    /// without asking: a headless Mac has no screen to ask on (trust on first
-    /// use, D-023). Any other unknown iPad needs the user's confirmation.
-    private func authorize(_ peer: SecureChannel.Peer) throws {
+    /// Pinned iPads pass. Over USB-C with no iPad paired yet, the first one is paired
+    /// without asking so a headless Mac works without a screen (D-023). Over Wi-Fi,
+    /// unknown devices ALWAYS require explicit 6-digit SAS confirmation.
+    private func authorize(_ peer: SecureChannel.Peer, over transport: ActiveTransportKind) throws {
         if trust.isTrusted(peer.identityKey) { return }
-        if trust.peers.isEmpty {
+        if transport == .usb && trust.peers.isEmpty {
             try trust.trust(peer.identityKey, name: "iPad")
-            Log.info("no iPad paired yet: paired this one on first use (key \(peer.fingerprint), code \(peer.pairingCode))")
+            Log.info("no iPad paired yet: paired this USB-C iPad on first use (key \(peer.fingerprint), code \(peer.pairingCode))")
             return
         }
-        Log.info("unknown iPad (key \(peer.fingerprint)); asking the user to confirm code \(peer.pairingCode)")
+        Log.info("unknown iPad over \(transport.rawValue) (key \(peer.fingerprint)); asking the user to confirm code \(peer.pairingCode)")
         onState(.pairing(peer.pairingCode))
         guard confirmPairing(peer) else {
             Log.warn("pairing with iPad \(peer.fingerprint) rejected or timed out")
@@ -1026,7 +1178,7 @@ final class HostController: @unchecked Sendable {
 
     // MARK: video pipeline (on `videoQueue`)
 
-    private func startVideo(hello: Hello, socket: FramedSocket) throws {
+    private func startVideo(hello: Hello, socket: any FramedTransport) throws {
         guard video == nil, !socket.isClosed else { return }
         let pipeline = VideoPipeline()
         // ProMotion (D-036): follow the iPad (120 Hz on iPad Pro) unless the
@@ -1119,11 +1271,14 @@ final class HostController: @unchecked Sendable {
         let current = effectiveQuality()
         // Diagnostics for stutter: capture cadence vs encoded output.
         let captureMeter = FrameRateMeter(), encodeMeter = FrameRateMeter()
-        let onUnit: @Sendable (AccessUnit, UInt64) -> Void = { [weak self, weak socket] unit, sent in
+        let onUnit: @Sendable (SampleBuffers.EncodedFrame, UInt64) -> Void = { [weak self, weak socket] unit, sent in
             guard let self, let socket else { return }
             if let report = encodeMeter.tick(bytes: unit.annexB.count) { Log.info("video encoded: \(report)") }
             if socket.sendVideo(unit.annexB, isKeyframe: unit.isKeyframe, timestampNanos: sent) == .needKeyframe {
-                self.queue.async { self.encoder?.requestKeyframe() }
+                self.queue.async {
+                    self.encoder?.requestKeyframe()
+                    self.encoder?.requestDropReplay()
+                }
             }
         }
         var codec: VideoCodec = (options.codec == .hevc && hello.codecs.contains(VideoCodec.hevc)) ? .hevc : .h264
@@ -1264,6 +1419,51 @@ final class HostController: @unchecked Sendable {
         try startEncoding(pipeline)
     }
 
+    /// Rotates the virtual display in place when supported (preserving window placement),
+    /// falling back to a full display rebuild if macOS rejects the mode update. On `videoQueue`.
+    private func rotateVideo(hello: Hello) throws {
+        guard let pipeline = video, let socket = pipeline.socket, !socket.isClosed,
+              let displayID = pipeline.display.displayID,
+              VirtualDisplayController.canChangeSpace(on: displayID) else {
+            try restartVideo(hello: hello)
+            return
+        }
+        let space = Self.rememberedSpace(for: sessionDeviceSerial) ?? options.space
+        let serial = Self.displaySerial(for: sessionDeviceSerial)
+        guard var newConfig = pipeline.display.resizeInPlace(for: hello, refreshHz: Double(pipeline.fps),
+                                                             wideColor: options.displayP3, space: space,
+                                                             serialNumber: serial) else {
+            try restartVideo(hello: hello)
+            return
+        }
+        pipeline.capture.stop()
+        queue.sync {
+            encoder?.invalidate()
+            encoder = nil
+        }
+        pipeline.encoder = nil
+        Thread.sleep(forTimeInterval: 0.15)
+        let source = CGDisplayBounds(pipeline.captureID)
+        if source.width > 0, source.height > 0 {
+            newConfig.pointWidth = UInt32(source.width.rounded())
+            newConfig.pointHeight = UInt32(source.height.rounded())
+        }
+        pipeline.config = newConfig
+        pipeline.hello = hello
+        try startEncoding(pipeline)
+        let streamed = pipeline.config
+        let matchedSpace = Self.displaySpace(for: streamed, hiDPI: hello.scale >= 2)
+        sessionStatus.withLock {
+            $0.pixelSize = "\(streamed.pixelWidth) × \(streamed.pixelHeight)"
+            $0.pointSize = "\(streamed.pointWidth) × \(streamed.pointHeight)"
+            $0.displaySpace = matchedSpace
+            $0.displaySpaceError = false
+        }
+        let streaming = State.streaming("\(hello.deviceName) · \(streamed.pixelWidth)×\(streamed.pixelHeight) \(streamed.codec)")
+        streamingState = streaming
+        onState(streaming)
+    }
+
     /// Releases input first, then capture, encoder and display. Idempotent.
     private func stopVideo() {
         guard let pipeline = video else { return }
@@ -1304,12 +1504,12 @@ final class HostController: @unchecked Sendable {
         var captureSize = CGSize.zero
         var fps = 60
         var hello: Hello?
-        weak var socket: FramedSocket?
+        weak var socket: (any FramedTransport)?
     }
 
     // MARK: frames (on `queue`)
 
-    private func handle(_ frame: Frame, from origin: FramedSocket) {
+    private func handle(_ frame: Frame, from origin: any FramedTransport) {
         // Frames from a connection that is no longer current are ignored.
         guard let socket, socket === origin, !socket.isClosed else { return }
         lastHeard = Date()
@@ -1345,7 +1545,7 @@ final class HostController: @unchecked Sendable {
         }
     }
 
-    private func handleControl(_ message: ControlMessage, socket: FramedSocket) throws {
+    private func handleControl(_ message: ControlMessage, socket: any FramedTransport) throws {
         switch message {
         case .hello(let hello):
             guard peerHello == nil else { return socket.close("duplicate hello") }
@@ -1357,8 +1557,19 @@ final class HostController: @unchecked Sendable {
             send(.pong(value), on: socket)
         case .pong(let sent):
             let rtt = Double(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) &- sent) / 1_000_000
+            let totalDrops = socket.droppedVideoFrames
+            let deltaDrops = max(0, totalDrops - lastObservedVideoDrops)
+            lastObservedVideoDrops = totalDrops
+            if var abr = abrController {
+                if let nextMbps = abr.observe(rttMs: rtt, droppedFrames: deltaDrops,
+                                              queueDepth: deltaDrops > 0 ? 3 : 0,
+                                              now: ProcessInfo.processInfo.systemUptime) {
+                    encoder?.updateBitrate(nextMbps)
+                }
+                abrController = abr
+            }
             if Int.random(in: 0..<15) == 0 {
-                Log.info(String(format: "control RTT %.2f ms, video dropped %d", rtt, socket.droppedVideoFrames))
+                Log.info(String(format: "control RTT %.2f ms, video dropped %d", rtt, totalDrops))
             }
         case .bye(let reason):
             socket.close("client said bye: \(reason)")
@@ -1370,9 +1581,10 @@ final class HostController: @unchecked Sendable {
             hello.pixelWidth = width
             hello.pixelHeight = height
             peerHello = hello
+            let updatedHello = hello
             Log.info("iPad rotated: panel now \(width)x\(height) (\(height > width ? "portrait" : "landscape"))")
             videoQueue.async { [self] in
-                do { try restartVideo(hello: hello) } catch {
+                do { try rotateVideo(hello: updatedHello) } catch {
                     Log.warn("rotation rebuild failed: \(error)")
                     queue.async { socket.close("rotation rebuild failed: \(error)") }
                 }
@@ -1453,7 +1665,7 @@ final class HostController: @unchecked Sendable {
         }
     }
 
-    private func send(_ message: ControlMessage, on socket: FramedSocket) {
+    private func send(_ message: ControlMessage, on socket: any FramedTransport) {
         if !socket.send(.control, payload: SessionCodec.encode(message)) && !socket.isClosed {
             Log.warn("control message not sent: \(message)")
         }

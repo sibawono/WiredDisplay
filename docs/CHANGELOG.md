@@ -1277,6 +1277,43 @@ During scrolling, sampled medians were 0.05 ms capture-delivery-to-conversion, 4
 - `scripts/build-host-app.sh`, `scripts/build-ipa.sh` (`dist/WiredDisplay-0.5.3.ipa`, 724,642 bytes), and `SIGN_IDENTITY=- scripts/build-dmg.sh` (`dist/WiredDisplay-0.5.3.dmg`, 1,155,395 bytes) all succeeded.
 - Identifier scan on `dist/WiredDisplay-0.5.3.{dmg,ipa}` returned clean.
 
+## CHANGE ID: P1-079 — Hybrid USB-C + Encrypted Local Wi-Fi, Pipeline & Display Hardening (V3 Comparative Engineering)
+
+**OBJECTIVE:** Conduct dual-source reverse engineering of SideScreen (`6ec6e317`, MIT) and OpenDisplay (`7f61aeb6`, GPL-3.0), retain WiredDisplay's superior security/4:4:4-10bit/audio/input architecture, and integrate verified improvements for hybrid connectivity, virtual display stability, encoder/renderer latency, and color accuracy.
+
+**FILES CHANGED:**
+- `Shared/Transport/`: `TransportMode.swift`, `NWFramedConnection.swift`, `BonjourDiscovery.swift`, `FramedSocket.swift` (`FramedTransport` protocol, Bonjour `_wireddisplay._tcp`, `noDelay`, TFO off, `preferNoProxies`, `.interactiveVideo`, `SecureChannel` AES-256-GCM).
+- `Shared/HostCore/`: `DisplaySpace.swift` (`safePhysicalSizeMillimeters` for macOS 26.1/27 HiDPI floors), `AdaptiveBitrateController.swift`, `PipelineMetrics.swift`.
+- `Shared/Video/SampleBuffers.swift`: single-pass `annexBPayload(from:codec:)` avoiding intermediate per-NAL array copies.
+- `macOSHost/Display/CVirtualDisplay/`: square descriptor headroom + `applyConfig:error:` for in-place rotation.
+- `macOSHost/Host/`: `VirtualDisplayController.swift` (in-place rotation + 3-offset poisoned serial retry), `VideoEncoder.swift` (`Int32.max` clamp, low-latency RC fallback, live `updateBitrate`, `requestDropReplay`, `OSSignposter`), `CaptureEngine.swift` (`queueDepth = 6`, `screenRect` guard), `HostController.swift` & `HostFleet.swift` (unified USB-C + Wi-Fi, strict Wi-Fi SAS auth with no TOFU, ABR hook, off-queue USB-C upgrade probe, headless Wi-Fi fleet), `StatusPanel.swift` & `main.swift` (persisted `Connection` picker `USB-C` / `Auto` / `Wi-Fi` and live transport status), `InputInjector.swift` (Swift 6 Sendable fix).
+- `iPadOSClient/WiredDisplayClient/`: `MetalVideoRenderer.swift` (dynamic Display P3 `CAMetalLayer` colorspace fixing BUG-033, 200 ms IDR throttle, `clearToBlack()` render pass fixing blank screen on reconnect), `ClientSession.swift` & `Info.plist` (dual USB-C + Bonjour Wi-Fi listener, USB-C preemption, Local Network Privacy), `ClientUI.swift` & `ClientApp.swift` (live transport badge).
+- `Tests/Unit/`: `NWFramedConnectionTests.swift`, `HostCoreTests.swift`, `VideoTests.swift`.
+- `docs/research/v3/`: 10 persistent comparative engineering and provenance documents.
+
+**VERIFIED:**
+- `swift build --product WiredDisplayHost`: 0 errors, 0 warnings.
+- `swift test`: all 8 test suites passed (0 failures).
+- `xcodebuild` (`WiredDisplayClient`, arm64 iOS) & `scripts/install-ipad-app.sh`: BUILD SUCCEEDED, installed on physical iPad Air 13-inch (M2).
+- Live hardware verification on macOS 27.2 + iPad Air 13-inch (M2): USB-C <-> Wi-Fi switching, live transport status, no blank screen on reconnect, `capture->wire` 8.1-11.9 ms in 4:4:4 10-bit.
+- Independent adversarial audit: all 7 findings resolved and re-verified.
+
+## CHANGE ID: P1-080 — Release 0.5.4 (build 13)
+
+**CONTENTS:** P1-079.
+- Hybrid USB-C + encrypted local Wi-Fi (`NWFramedConnection` + Bonjour `_wireddisplay._tcp` + `SecureChannel` AES-256-GCM + mandatory 6-digit SAS on Wi-Fi) with persisted `Connection` picker (`USB-C` / `Auto` / `Wi-Fi`) in the macOS menu bar General tab and live transport status on both Mac and iPad.
+- `AdaptiveBitrateController` live bitrate tuning over Wi-Fi without changing logical desktop resolution.
+- Virtual display hardening: macOS 26.1/27 physical size floor for portrait/small HiDPI, in-place rotation preserving window placement, and 3-offset poisoned display serial retry.
+- Video pipeline hardening: single-pass Annex-B encoding, `Int32.max` bitrate clamp, low-latency RC fallback, drop-replay timer, `screenRect` capture guard, and `PipelineMetrics`.
+- iPad Metal renderer: dynamic Display P3 `CAMetalLayer` colorspace (BUG-033), 200 ms forced-IDR throttle, and `clearToBlack()` render pass fixing blank screens on reconnect/transport switches.
+
+**FILES CHANGED:**
+- `scripts/build-host-app.sh` and `iPadOSClient/WiredDisplayClient/WiredDisplayClient.xcodeproj/project.pbxproj`: 0.5.4, build 13.
+- `docs/share/PANDUAN-INSTALASI.txt`: updated to 0.5.4.
+- `AGENTS.md`: updated release state.
+
+
+
 
 
 

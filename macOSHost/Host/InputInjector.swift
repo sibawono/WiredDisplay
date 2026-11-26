@@ -28,7 +28,8 @@ import WDSession
 /// every held key and modifier too.
 ///
 /// Concurrency: used only from the session's serial queue (`queue`).
-final class InputInjector {
+// All mutable state is accessed exclusively on `queue`.
+final class InputInjector: @unchecked Sendable {
     private let displayID: CGDirectDisplayID
     private let isEnabled: @Sendable () -> Bool
     private let source = CGEventSource(stateID: .hidSystemState)

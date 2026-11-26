@@ -543,6 +543,7 @@ struct ControlsPanel: View {
         return SessionSummary(
             macName: connection.macName,
             streaming: connection.phase == .streaming,
+            activeTransport: connection.activeTransport,
             logicalSize: config.map { "\($0.pointWidth) × \($0.pointHeight)" },
             detail: config.map { "\($0.pixelWidth) × \($0.pixelHeight) px · \($0.refreshHz) Hz · \($0.codec == .hevc ? "HEVC" : "H.264")" },
             framesShown: connection.framesShown,

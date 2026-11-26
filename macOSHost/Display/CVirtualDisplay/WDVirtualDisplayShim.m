@@ -124,8 +124,11 @@ static id<WDPrivateDisplayDescriptor> WDMakeDescriptor(WDVirtualDisplayConfig *c
         maxWide = MAX(maxWide, (uint32_t)size.width * factor);
         maxHigh = MAX(maxHigh, (uint32_t)size.height * factor);
     }
-    [descriptor setMaxPixelsWide:maxWide];
-    [descriptor setMaxPixelsHigh:maxHigh];
+    // Square headroom lets landscape/portrait rotations resize in place without
+    // exceeding the immutable descriptor bounds.
+    uint32_t maxAxis = MIN(MAX(maxWide, maxHigh), 8192);
+    [descriptor setMaxPixelsWide:maxAxis];
+    [descriptor setMaxPixelsHigh:maxAxis];
     [descriptor setSizeInMillimeters:config.sizeInMillimeters];
     // Non-zero vendor ID is required since macOS 14 (per Chromium's
     // ui/display/mac/test/virtual_display_util_mac.mm). 0x5744 = "WD".
@@ -284,6 +287,37 @@ BOOL WDVirtualDisplayDebugSupportObjectsAreReleased(void) {
 - (CGDirectDisplayID)displayID {
     @synchronized(self) {
         return _displayID;
+    }
+}
+
+- (BOOL)applyConfig:(WDVirtualDisplayConfig *)config error:(NSError **)error {
+    if (!WDConfigIsValid(config)) {
+        if (error) *error = WDError(WDVirtualDisplayErrorInvalidArgument, @"invalid virtual display config");
+        return NO;
+    }
+    @synchronized(self) {
+        if (_display == nil || _displayID == kCGNullDirectDisplay) {
+            if (error) *error = WDError(WDVirtualDisplayErrorApplySettingsFailed, @"virtual display already invalidated");
+            return NO;
+        }
+        @try {
+            id<WDPrivateDisplaySettings> settings = WDMakeSettings(config);
+            if (settings == nil) {
+                if (error) *error = WDError(WDVirtualDisplayErrorApplySettingsFailed, @"settings init returned nil");
+                return NO;
+            }
+            if (![_display applySettings:settings]) {
+                if (error) *error = WDError(WDVirtualDisplayErrorApplySettingsFailed, @"applySettings: returned NO");
+                return NO;
+            }
+            return YES;
+        } @catch (NSException *exception) {
+            if (error) {
+                *error = WDError(WDVirtualDisplayErrorApplySettingsFailed,
+                                 [NSString stringWithFormat:@"exception %@: %@", exception.name, exception.reason]);
+            }
+            return NO;
+        }
     }
 }
 

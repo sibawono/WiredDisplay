@@ -38,6 +38,35 @@ public enum DisplaySpace: String, CaseIterable, Sendable {
         let sizes = modeSizes(panelWidth: panelWidth, panelHeight: panelHeight, hiDPI: hiDPI)
         return allCases.first { sizes[$0] == points }
     }
+
+    /// Physical display dimensions in millimeters that macOS 26.1/27 will bring online at HiDPI.
+    /// macOS 26.1 refuses virtual displays under ~160 cm^2 with >2000 px descriptors, and
+    /// macOS 27 falls back to 1x when width < 166 mm (common in portrait).
+    public static func safePhysicalSizeMillimeters(pixelWidth: UInt32, pixelHeight: UInt32,
+                                                   pixelsPerInch: UInt16, hiDPI: Bool) -> CGSize {
+        let w = Double(max(pixelWidth, 1))
+        let h = Double(max(pixelHeight, 1))
+        let ppi = Double(pixelsPerInch == 0 ? 264 : pixelsPerInch)
+        var mmW = w / ppi * 25.4
+        var mmH = h / ppi * 25.4
+
+        guard hiDPI else { return CGSize(width: mmW, height: mmH) }
+
+        let minWidthMm = 175.0
+        let minAreaMm2 = 16_500.0
+        if mmW < minWidthMm {
+            let scale = minWidthMm / mmW
+            mmW *= scale
+            mmH *= scale
+        }
+        let area = mmW * mmH
+        if area < minAreaMm2 {
+            let scale = (minAreaMm2 / area).squareRoot()
+            mmW *= scale
+            mmH *= scale
+        }
+        return CGSize(width: mmW, height: mmH)
+    }
 }
 
 /// What ScreenCaptureKit should deliver.

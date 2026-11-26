@@ -1,5 +1,6 @@
 import CoreMedia
 import CoreVideo
+import os
 import VideoToolbox
 import XCTest
 @testable import WDVideo
@@ -171,7 +172,13 @@ final class CodecRoundTripTests: XCTestCase {
             XCTAssertEqual(result, noErr)
             VTCompressionSessionCompleteFrames(encoder, untilPresentationTimeStamp: .invalid)
         }
-        return try box.samples.map { try SampleBuffers.accessUnit(from: $0, codec: codec) }
+        return try box.samples.map { sample in
+            let unit = try SampleBuffers.accessUnit(from: sample, codec: codec)
+            let fast = try SampleBuffers.annexBPayload(from: sample, codec: codec)
+            XCTAssertEqual(fast.isKeyframe, unit.isKeyframe)
+            XCTAssertEqual(fast.annexB, unit.annexB)
+            return unit
+        }
     }
 }
 
@@ -191,27 +198,30 @@ final class HEVCSPSTests: XCTestCase {
         defer { VTCompressionSessionInvalidate(session) }
         var buffer: CVPixelBuffer?
         CVPixelBufferCreate(nil, width, height, format, [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary, &buffer)
-        var result: [UInt8]?
-        var reportedBits: Int?
+        let captured = OSAllocatedUnfairLock<(sps: [UInt8]?, bits: Int?)>(initialState: (nil, nil))
         let done = DispatchSemaphore(value: 0)
         VTCompressionSessionEncodeFrame(session, imageBuffer: buffer!, presentationTimeStamp: .zero, duration: .invalid,
                                         frameProperties: nil, infoFlagsOut: nil) { _, _, sample in
             if let sample, let description = CMSampleBufferGetFormatDescription(sample) {
-                reportedBits = (CMFormatDescriptionGetExtension(description, extensionKey: kCMFormatDescriptionExtension_BitsPerComponent)
+                let bits = (CMFormatDescriptionGetExtension(description, extensionKey: kCMFormatDescriptionExtension_BitsPerComponent)
                     as? NSNumber)?.intValue
                 var pointer: UnsafePointer<UInt8>?
                 var size = 0
+                var spsBytes: [UInt8]?
                 if CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(description, parameterSetIndex: 1,
                                                                        parameterSetPointerOut: &pointer,
                                                                        parameterSetSizeOut: &size, parameterSetCountOut: nil,
                                                                        nalUnitHeaderLengthOut: nil) == noErr, let pointer {
-                    result = Array(UnsafeBufferPointer(start: pointer, count: size))
+                    spsBytes = Array(UnsafeBufferPointer(start: pointer, count: size))
                 }
+                let finalSPS = spsBytes
+                captured.withLock { $0 = (finalSPS, bits) }
             }
             done.signal()
         }
         VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
         _ = done.wait(timeout: .now() + 5)
+        let (result, reportedBits) = captured.withLock { $0 }
         guard let result else { throw XCTSkip("encoder produced no SPS") }
         return (result, reportedBits)
     }

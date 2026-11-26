@@ -74,6 +74,10 @@ NSError *_Nullable WDVirtualDisplayCheckAvailability(void);
 + (nullable instancetype)createWithConfig:(WDVirtualDisplayConfig *)config
                                     error:(NSError *_Nullable *_Nullable)error;
 - (instancetype)init NS_UNAVAILABLE;
+/// Updates modes and HiDPI settings in place without destroying the display,
+/// preserving window placement across rotations.
+- (BOOL)applyConfig:(WDVirtualDisplayConfig *)config
+              error:(NSError *_Nullable *_Nullable)error;
 /// Releases the underlying private object now, which removes the display.
 /// Idempotent and thread-safe.
 - (void)invalidate;

@@ -7,6 +7,7 @@ import ServiceManagement
 import SwiftUI
 import WDHostCore
 import WDSession
+import WDTransport
 
 // WiredDisplay host: a menu-bar app (no Dock icon). Run it as an app bundle
 // (scripts/build-host-app.sh, then `open`) so Screen Recording and
@@ -202,6 +203,7 @@ final class StatusMenu: NSObject {
             waiting.openAtLogin = LoginItem.isEnabled
             waiting.keepDisplayAwake = HostController.keepDisplayAwake
             waiting.keepMacAwake = HostController.keepMacAwake
+            waiting.transportMode = opts?.transportMode ?? HostController.savedTransportMode
             waiting.autoSwitchAudio = fleet?.audioRouter.isEnabled ?? true
             waiting.autoSwitchMicrophone = fleet?.audioRouter.usesHeadsetMicrophone ?? true
             waiting.bothSpeakers = HostController.bothSpeakers
@@ -220,9 +222,11 @@ final class StatusMenu: NSObject {
         let status = controller.status
         var s = PanelSnapshot()
         switch state {
-        case .streaming: (s.stateText, s.stateColor) = ("Streaming to \(status.iPadName ?? "iPad")", .green)
+        case .streaming:
+            let transport = status.activeTransport.map { " (\($0.rawValue))" } ?? ""
+            (s.stateText, s.stateColor) = ("Streaming to \(status.iPadName ?? "iPad")\(transport)", .green)
         case .paused(let why): (s.stateText, s.stateColor) = ("Paused: \(why)", .orange)
-        case .waitingForDevice: (s.stateText, s.stateColor) = ("Waiting for the iPad on USB", .orange)
+        case .waitingForDevice: (s.stateText, s.stateColor) = ("Waiting for the iPad", .orange)
         case .connecting: (s.stateText, s.stateColor) = ("Connecting…", .orange)
         case .pairing(let code): (s.stateText, s.stateColor) = ("Pairing: confirm code \(code)", .blue)
         case .audioOnly(let device): (s.stateText, s.stateColor) = ("Audio only: \(device)", .teal)
@@ -261,6 +265,7 @@ final class StatusMenu: NSObject {
         s.openAtLogin = LoginItem.isEnabled
         s.keepDisplayAwake = HostController.keepDisplayAwake
         s.keepMacAwake = HostController.keepMacAwake
+        s.transportMode = controller.transportMode
         s.loginNeedsApproval = LoginItem.needsApproval
         s.version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
         return s
@@ -291,6 +296,10 @@ final class StatusMenu: NSObject {
         a.setMatchRefresh = { fleet.setRefreshFollowsIPad($0) }
         a.setKeepDisplayAwake = { fleet.setKeepAwake(display: $0) }
         a.setKeepMacAwake = { fleet.setKeepAwake(mac: $0) }
+        a.setTransportMode = { [weak self] mode in
+            fleet.setTransportMode(mode)
+            self?.refresh()
+        }
         a.setLocalCursor = { fleet.setLocalCursor($0) }
         a.setAutoSwitchMicrophone = { fleet.audioRouter.usesHeadsetMicrophone = $0 }
         a.setBothSpeakers = { fleet.setBothSpeakers($0) }
@@ -481,6 +490,7 @@ func renderPanelLive(to directory: String) async {
 
 func parseOptions() -> HostController.Options {
     var options = HostController.Options()
+    options.transportMode = HostController.savedTransportMode
     // The last preset chosen in the menu; --chroma / --depth still override.
     // The user's last menu choice (D-006: off until they turn it on once).
     options.allowInput = UserDefaults.standard.bool(forKey: HostController.allowInputKey)
@@ -548,6 +558,10 @@ func parseOptions() -> HostController.Options {
             let raw = value()
             guard let space = VirtualDisplayController.Space(rawValue: raw) else { fail("unknown space \(raw) (native, more, most)") }
             options.space = space
+        case "--transport":
+            let raw = value()
+            guard let mode = TransportMode(rawValue: raw) else { fail("unknown transport \(raw) (usb, auto, wifi)") }
+            options.transportMode = mode
         case "--bitrate-mbps":
             guard let mbps = Int(value()), (5...150).contains(mbps) else { fail("--bitrate-mbps expects 5...150") }
             options.bitrateMbps = mbps

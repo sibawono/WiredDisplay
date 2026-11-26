@@ -10,7 +10,112 @@ public enum SampleBuffers {
         case missingParameterSets
     }
 
+    public struct EncodedFrame: Sendable, Equatable {
+        public let annexB: [UInt8]
+        public let isKeyframe: Bool
+
+        public init(annexB: [UInt8], isKeyframe: Bool) {
+            self.annexB = annexB
+            self.isKeyframe = isKeyframe
+        }
+    }
+
     // MARK: encoder output -> wire
+
+    /// Single-pass conversion from VideoToolbox length-prefixed output directly
+    /// into Annex-B wire bytes, avoiding intermediate per-NAL array allocations.
+    public static func annexBPayload(from sample: CMSampleBuffer, codec: VideoCodecKind) throws -> EncodedFrame {
+        guard let block = CMSampleBufferGetDataBuffer(sample) else { throw Error.noDataBuffer }
+        let totalLength = CMBlockBufferGetDataLength(block)
+        guard totalLength > 0 else { return EncodedFrame(annexB: [], isKeyframe: false) }
+
+        var lengthSize: Int32 = 4
+        let format = CMSampleBufferGetFormatDescription(sample)
+        var paramSets: [[UInt8]]?
+        if let format {
+            paramSets = try? parameterSets(of: format, codec: codec, lengthSize: &lengthSize)
+        }
+        let lenBytes = Int(lengthSize)
+        guard lenBytes == 1 || lenBytes == 2 || lenBytes == 4 else {
+            throw AnnexB.Error.unsupportedLengthSize(lenBytes)
+        }
+
+        // Fast path: read directly from contiguous CMBlockBuffer without an extra copy.
+        var contiguousPtr: UnsafeMutablePointer<CChar>?
+        var contiguousLen = 0
+        let ptrStatus = CMBlockBufferGetDataPointer(
+            block, atOffset: 0, lengthAtOffsetOut: &contiguousLen,
+            totalLengthOut: nil, dataPointerOut: &contiguousPtr
+        )
+        if ptrStatus == kCMBlockBufferNoErr, let contiguousPtr, contiguousLen >= totalLength {
+            let srcBase = UnsafeRawPointer(contiguousPtr).assumingMemoryBound(to: UInt8.self)
+            return try buildAnnexB(from: UnsafeBufferPointer(start: srcBase, count: totalLength),
+                                   codec: codec, lengthSize: lenBytes, format: format, paramSets: paramSets)
+        }
+        var fallbackStorage = [UInt8](repeating: 0, count: totalLength)
+        let copyStatus = fallbackStorage.withUnsafeMutableBytes { raw in
+            CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: totalLength, destination: raw.baseAddress!)
+        }
+        guard copyStatus == kCMBlockBufferNoErr else {
+            throw Error.coreMedia("CMBlockBufferCopyDataBytes", copyStatus)
+        }
+        return try fallbackStorage.withUnsafeBufferPointer { buf in
+            try buildAnnexB(from: buf, codec: codec, lengthSize: lenBytes, format: format, paramSets: paramSets)
+        }
+    }
+
+    private static func buildAnnexB(from bytes: UnsafeBufferPointer<UInt8>, codec: VideoCodecKind,
+                                    lengthSize: Int, format: CMFormatDescription?,
+                                    paramSets cachedSets: [[UInt8]]?) throws -> EncodedFrame {
+        let count = bytes.count
+        var detectedKeyframe = false
+        var scan = 0
+        while scan < count {
+            guard count - scan >= lengthSize else { throw AnnexB.Error.invalidLengthPrefix(offset: scan) }
+            var nalLen = 0
+            for j in 0..<lengthSize { nalLen = (nalLen << 8) | Int(bytes[scan + j]) }
+            let lengthStart = scan
+            scan += lengthSize
+            guard nalLen > 0 else { throw AnnexB.Error.emptyNAL }
+            guard nalLen <= count - scan else { throw AnnexB.Error.invalidLengthPrefix(offset: lengthStart) }
+            if codec.kind(of: Array(bytes[scan..<min(scan + 2, scan + nalLen)])) == .keyframeSlice {
+                detectedKeyframe = true
+            }
+            scan += nalLen
+        }
+
+        var resolvedSets: [[UInt8]] = []
+        if detectedKeyframe, let format {
+            var ignoredLengthSize: Int32 = Int32(lengthSize)
+            resolvedSets = try cachedSets ?? parameterSets(of: format, codec: codec, lengthSize: &ignoredLengthSize)
+        }
+
+        var extraCapacity = 0
+        for set in resolvedSets { extraCapacity += 4 + set.count }
+        var out: [UInt8] = []
+        out.reserveCapacity(count + extraCapacity + 16)
+
+        for set in resolvedSets {
+            out.append(contentsOf: [0, 0, 0, 1])
+            out.append(contentsOf: set)
+        }
+
+        let stripInBandParams = !resolvedSets.isEmpty
+        var offset = 0
+        while offset < count {
+            var nalLen = 0
+            for j in 0..<lengthSize { nalLen = (nalLen << 8) | Int(bytes[offset + j]) }
+            offset += lengthSize
+            let isParam = stripInBandParams &&
+                codec.kind(of: Array(bytes[offset..<min(offset + 2, offset + nalLen)])) == .parameterSet
+            if !isParam {
+                out.append(contentsOf: [0, 0, 0, 1])
+                out.append(contentsOf: bytes[offset..<(offset + nalLen)])
+            }
+            offset += nalLen
+        }
+        return EncodedFrame(annexB: out, isKeyframe: detectedKeyframe)
+    }
 
     /// Converts one VideoToolbox output sample (length-prefixed NAL units) into
     /// an access unit. Keyframes get the stream's parameter sets prepended so

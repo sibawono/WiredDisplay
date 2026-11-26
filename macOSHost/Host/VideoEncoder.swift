@@ -81,8 +81,10 @@ final class VideoEncoder: @unchecked Sendable {
     let tenBit: Bool
     private let motion: Lane
     private let still: Lane?
-    private let onUnit: @Sendable (AccessUnit, UInt64) -> Void
+    private let fps: Int
+    private let onUnit: @Sendable (SampleBuffers.EncodedFrame, UInt64) -> Void
     private let invalidated = OSAllocatedUnfairLock(initialState: false)
+    private let signposter = OSSignposter(subsystem: "com.wireddisplay.host", category: "encoder")
 
     /// Frame state. Last captured frame (unconverted), re-encoded for keyframe
     /// requests and refinement because ScreenCaptureKit only delivers changed
@@ -130,8 +132,9 @@ final class VideoEncoder: @unchecked Sendable {
 
     init(codec: VideoCodec, width: Int, height: Int, fps: Int, bitrateMbps: Int, displayP3: Bool,
          chroma requested: ChromaMode = .c420, tenBit requestedTenBit: Bool = false, cursorInVideo: Bool = true,
-         onUnit: @escaping @Sendable (AccessUnit, UInt64) -> Void) throws {
+         onUnit: @escaping @Sendable (SampleBuffers.EncodedFrame, UInt64) -> Void) throws {
         self.codec = codec
+        self.fps = max(fps, 1)
         self.cursorInVideo = cursorInVideo
         self.onUnit = onUnit
         let chroma: ChromaMode = codec == .hevc ? requested : .c420 // 4:4:4 needs HEVC RExt
@@ -169,20 +172,31 @@ final class VideoEncoder: @unchecked Sendable {
         let lowLatency = !full444 && c.fps <= 60
         if lowLatency { specification[kVTVideoEncoderSpecification_EnableLowLatencyRateControl] = true }
         var created: VTCompressionSession?
-        let status = VTCompressionSessionCreate(
+        var status = VTCompressionSessionCreate(
             allocator: nil, width: Int32(c.width), height: Int32(c.height),
             codecType: c.codec == .hevc ? kCMVideoCodecType_HEVC : kCMVideoCodecType_H264,
             encoderSpecification: specification as CFDictionary, imageBufferAttributes: nil, compressedDataAllocator: nil,
             outputCallback: nil, refcon: nil, compressionSessionOut: &created)
+        // Fallback when low-latency rate control is rejected by the hardware encoder (e.g. AMD Macs).
+        if (status != noErr || created == nil) && lowLatency {
+            Log.warn("low-latency encoder creation failed (\(status)); retrying standard hardware rate control")
+            specification.removeValue(forKey: kVTVideoEncoderSpecification_EnableLowLatencyRateControl)
+            status = VTCompressionSessionCreate(
+                allocator: nil, width: Int32(c.width), height: Int32(c.height),
+                codecType: c.codec == .hevc ? kCMVideoCodecType_HEVC : kCMVideoCodecType_H264,
+                encoderSpecification: specification as CFDictionary, imageBufferAttributes: nil, compressedDataAllocator: nil,
+                outputCallback: nil, refcon: nil, compressionSessionOut: &created)
+        }
         guard status == noErr, let session = created else { throw Error.create(status) }
 
-        let bitsPerSecond = c.bitrateMbps * 1_000_000
+        // kVTCompressionPropertyKey_AverageBitRate is signed 32-bit; clamp to Int32.max to prevent wrap/-12900.
+        let bitsPerSecond = Self.clampedBitsPerSecond(mbps: c.bitrateMbps)
         var properties: [CFString: Any] = [
             kVTCompressionPropertyKey_RealTime: true,
             kVTCompressionPropertyKey_AllowFrameReordering: false,          // no B-frames: lowest latency
             kVTCompressionPropertyKey_AverageBitRate: bitsPerSecond,
             // Cap bursts at 1.5x the average over one second.
-            kVTCompressionPropertyKey_DataRateLimits: [bitsPerSecond * 3 / 2 / 8, 1] as CFArray,
+            kVTCompressionPropertyKey_DataRateLimits: [min(bitsPerSecond / 8 * 3 / 2, Int(Int32.max)), 1] as CFArray,
             kVTCompressionPropertyKey_ExpectedFrameRate: c.fps,
             // Latency over battery: do not let the media engine slow down to
             // just meet the frame rate (D-037).
@@ -200,6 +214,9 @@ final class VideoEncoder: @unchecked Sendable {
             kVTCompressionPropertyKey_TransferFunction: kCVImageBufferTransferFunction_ITU_R_709_2,
             kVTCompressionPropertyKey_YCbCrMatrix: kCVImageBufferYCbCrMatrix_ITU_R_709_2,
         ]
+        if !full444 {
+            properties[kVTCompressionPropertyKey_MaxFrameDelayCount] = 0
+        }
         if !full444 { // 4:4:4: the encoder picks HEVC RExt from the source format
             properties[kVTCompressionPropertyKey_ProfileLevel] = c.codec == .hevc
                 ? (c.tenBit ? kVTProfileLevel_HEVC_Main10_AutoLevel : kVTProfileLevel_HEVC_Main_AutoLevel)
@@ -255,6 +272,43 @@ final class VideoEncoder: @unchecked Sendable {
 
     deinit { invalidate() }
 
+    private static func clampedBitsPerSecond(mbps: Int) -> Int {
+        let clampedMbps = max(1, min(mbps, 2000))
+        return min(clampedMbps * 1_000_000, Int(Int32.max))
+    }
+
+    /// Updates target bitrate live on active VTCompressionSessions without rebuilding them.
+    func updateBitrate(_ mbps: Int) {
+        submitLock.lock()
+        defer { submitLock.unlock() }
+        guard !invalidated.withLock({ $0 }) else { return }
+        let bps = Self.clampedBitsPerSecond(mbps: mbps)
+        let burstBytesPerSec = min(bps / 8 * 3 / 2, Int(Int32.max))
+        let lanes: [Lane] = [motion] + (still.map { [$0] } ?? [])
+        for lane in lanes {
+            VTSessionSetProperty(lane.session, key: kVTCompressionPropertyKey_AverageBitRate, value: bps as CFNumber)
+            VTSessionSetProperty(lane.session, key: kVTCompressionPropertyKey_DataRateLimits, value: [burstBytesPerSec, 1] as CFArray)
+        }
+        Log.info("encoder bitrate updated live to \(mbps) Mbit/s")
+    }
+
+    /// Re-encodes the last captured frame after one frame interval so a dropped
+    /// final frame of a burst never leaves the Mac and iPad displays diverged.
+    func requestDropReplay() {
+        let generation = stateLock.withLock { frameGeneration }
+        let delay = max(1.0 / Double(fps), 0.016)
+        repeatQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, !self.invalidated.withLock({ $0 }) else { return }
+            let job: Job? = self.stateLock.withLock {
+                guard self.frameGeneration == generation, !self.submitting, self.inFlightGPU == 0 else { return nil }
+                return self.takeJob()
+            }
+            if let job {
+                self.schedule(job, presentationTime: CMClockGetTime(CMClockGetHostTimeClock()))
+            }
+        }
+    }
+
     func requestKeyframe() {
         let generation = stateLock.withLock { () -> UInt64 in
             pendingKeyframe = true
@@ -291,16 +345,17 @@ final class VideoEncoder: @unchecked Sendable {
     /// Hands a job to the submit queue; a job already waiting there is
     /// replaced by this newer one (its keyframe request carries over).
     private func schedule(_ job: Job, presentationTime: CMTime) {
-        let start: Bool = stateLock.withLock {
+        let (start, coalesced): (Bool, Bool) = stateLock.withLock {
             if submitting || inFlightGPU >= 2 {
                 let replaced = waitingSubmit
                 waitingSubmit = (job.forcing(replaced?.job.force ?? false), presentationTime)
                 if replaced != nil { stats.coalesced() }
-                return false
+                return (false, replaced != nil)
             }
             submitting = true
-            return true
+            return (true, false)
         }
+        if coalesced { requestDropReplay() }
         guard start else { return }
         submitQueue.async { [weak self] in self?.drainSubmits(job, presentationTime) }
     }
@@ -506,17 +561,21 @@ final class VideoEncoder: @unchecked Sendable {
         let stats = stats
         let submitted = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         let label = lane.label
+        let signposter = signposter
+        let signpostID = signposter.makeSignpostID()
+        let signpostState = signposter.beginInterval("encodeFrame", id: signpostID)
         let status = VTCompressionSessionEncodeFrame(
             lane.session, imageBuffer: pixelBuffer, presentationTimeStamp: presentationTime, duration: .invalid,
             frameProperties: frameProperties, infoFlagsOut: nil) { [weak self] status, _, sample in
+                signposter.endInterval("encodeFrame", signpostState)
                 guard status == noErr, let sample else {
                     if status != noErr { Log.warn("encode failed: \(status)") }
                     return
                 }
                 do {
-                    let unit = try SampleBuffers.accessUnit(from: sample, codec: kind)
+                    let frame = try SampleBuffers.annexBPayload(from: sample, codec: kind)
                     stats.encoded(label: label, nanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) &- submitted,
-                                  bytes: unit.annexB.count)
+                                  bytes: frame.annexB.count)
                     outputLock.lock()
                     defer { outputLock.unlock() }
                     guard self?.epoch == frameEpoch else { return } // superseded lane
@@ -527,7 +586,7 @@ final class VideoEncoder: @unchecked Sendable {
                                         sent, sourceAgeAtSubmit * 1000 + beforeWire, sourceAgeAtSubmit * 1000,
                                         Double(converted &- convertStart) / 1e6, Double(sent &- converted) / 1e6))
                     }
-                    onUnit(unit, sent)
+                    onUnit(frame, sent)
                 } catch {
                     Log.warn("encoded sample not convertible: \(error)")
                 }

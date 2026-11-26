@@ -8,5 +8,11 @@
 	<array>
 		<string>audio</string>
 	</array>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>WiredDisplay uses the local network to discover and stream securely from your trusted Mac over Wi-Fi.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_wireddisplay._tcp</string>
+	</array>
 </dict>
 </plist>

@@ -44,7 +44,7 @@ final class CaptureEngine: @unchecked Sendable {
         // (step 4; was sRGB, which clipped wide-gamut colour).
         configuration.colorSpaceName = displayP3 ? CGColorSpace.displayP3 : CGColorSpace.sRGB
         configuration.colorMatrix = CGDisplayStream.yCbCrMatrix_ITU_R_709_2
-        configuration.queueDepth = 4
+        configuration.queueDepth = 6
         // Off with the local cursor (D-038): the iPad draws it.
         configuration.showsCursor = showsCursor
         // The display's framebuffer can be larger than the panel ("more space"
@@ -52,7 +52,7 @@ final class CaptureEngine: @unchecked Sendable {
         configuration.scalesToFit = true
 
         let filter = SCContentFilter(display: display, excludingWindows: [])
-        let output = Output(onFrame: onFrame, onStop: onStop)
+        let output = Output(displayID: displayID, onFrame: onFrame, onStop: onStop)
         let stream = SCStream(filter: filter, configuration: configuration, delegate: output)
         do {
             try stream.addStreamOutput(output, type: .screen, sampleHandlerQueue: sampleQueue)
@@ -119,12 +119,17 @@ final class CaptureEngine: @unchecked Sendable {
     }
 
     private final class Output: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
+        let displayID: CGDirectDisplayID
         let onFrame: @Sendable (CVPixelBuffer, CMTime, Double, CMTime) -> Void
         let onStop: @Sendable (String) -> Void
         private var callbackTimes: [Double] = []
         private var reportStart = ProcessInfo.processInfo.systemUptime
+        private var mismatchSince: TimeInterval?
 
-        init(onFrame: @escaping @Sendable (CVPixelBuffer, CMTime, Double, CMTime) -> Void, onStop: @escaping @Sendable (String) -> Void) {
+        init(displayID: CGDirectDisplayID,
+             onFrame: @escaping @Sendable (CVPixelBuffer, CMTime, Double, CMTime) -> Void,
+             onStop: @escaping @Sendable (String) -> Void) {
+            self.displayID = displayID
             self.onFrame = onFrame
             self.onStop = onStop
         }
@@ -132,20 +137,44 @@ final class CaptureEngine: @unchecked Sendable {
         func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
             let deliveredAt = CMClockGetTime(CMClockGetHostTimeClock())
             guard type == .screen, sampleBuffer.isValid, let pixelBuffer = sampleBuffer.imageBuffer else { return }
+            let info = (CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false)
+                as? [[SCStreamFrameInfo: Any]])?.first
             // Only complete frames carry new pixels; idle/blank/suspended do not.
-            if let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false)
-                as? [[SCStreamFrameInfo: Any]],
-               let rawStatus = attachments.first?[.status] as? Int,
-               SCFrameStatus(rawValue: rawStatus) != .complete {
+            if let rawStatus = info?[.status] as? Int, SCFrameStatus(rawValue: rawStatus) != .complete {
                 return
+            }
+            // Guard against ScreenCaptureKit silently binding to the wrong display after wake/reconfig.
+            if let rectDict = info?[.screenRect] as? NSDictionary,
+               let capturedRect = CGRect(dictionaryRepresentation: rectDict) {
+                let expected = CGDisplayBounds(displayID)
+                if capturedRect.isEmpty || expected.isEmpty {
+                    mismatchSince = nil
+                } else {
+                    let matches =
+                        abs(capturedRect.origin.x - expected.origin.x) <= 2 &&
+                        abs(capturedRect.origin.y - expected.origin.y) <= 2 &&
+                        abs(capturedRect.width - expected.width) <= 2 &&
+                        abs(capturedRect.height - expected.height) <= 2
+                    if matches {
+                        mismatchSince = nil
+                    } else {
+                        let now = ProcessInfo.processInfo.systemUptime
+                        if let since = mismatchSince {
+                            if now - since >= 1.5 {
+                                mismatchSince = nil
+                                onStop("capture screenRect \(capturedRect) != display \(expected)")
+                                return
+                            }
+                        } else {
+                            mismatchSince = now
+                        }
+                    }
+                }
             }
             // Share of the frame that changed (dirty rects are in pixels of the
             // output buffer); 1 when unknown, which counts as motion.
             var dirty = 1.0
-
-            if let info = (CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false)
-                            as? [[SCStreamFrameInfo: Any]])?.first,
-               let rects = info[.dirtyRects] as? [NSDictionary] {
+            if let rects = info?[.dirtyRects] as? [NSDictionary] {
                 let total = Double(CVPixelBufferGetWidth(pixelBuffer) * CVPixelBufferGetHeight(pixelBuffer))
                 let changed = rects.compactMap { CGRect(dictionaryRepresentation: $0) }
                     .reduce(0.0) { $0 + Double($1.width * $1.height) }

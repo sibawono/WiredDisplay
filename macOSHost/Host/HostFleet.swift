@@ -1,6 +1,7 @@
 import Foundation
 import os
 import WDSession
+import WDTransport
 import WDUsbmux
 
 /// Several iPads at once (D-041): one HostController per cabled device, each
@@ -43,6 +44,9 @@ final class HostFleet: @unchecked Sendable {
 
     func start() {
         audioRouter.start()
+        if options.transportMode.allowsWiFi && controllers.isEmpty {
+            add(serial: nil)
+        }
         Thread.detachNewThread { [self] in watchDevices() }
     }
 
@@ -62,8 +66,21 @@ final class HostFleet: @unchecked Sendable {
                 let present = Set(wired.map(\.serialNumber))
                 for serial in present { lastSeen[serial] = now }
                 let known = Set(controllers.compactMap(\.deviceSerial))
+                let unbound = controllers.first { $0.deviceSerial == nil }
                 for device in wired where !known.contains(device.serialNumber) {
+                    if let unbound {
+                        switch state(of: unbound) {
+                        case .waitingForDevice, .backingOff, .stopped:
+                            remove(unbound)
+                        case .connecting, .streaming, .paused, .audioOnly, .pairing:
+                            // Unbound controller already owns the active session; avoid colliding dials.
+                            continue
+                        }
+                    }
                     add(serial: device.serialNumber)
+                }
+                if options.transportMode.allowsWiFi && controllers.isEmpty {
+                    add(serial: nil)
                 }
                 let stale = controllers.filter { controller in
                     guard let serial = controller.deviceSerial, !present.contains(serial) else { return false }
@@ -82,7 +99,7 @@ final class HostFleet: @unchecked Sendable {
         }
     }
 
-    private func add(serial: String) {
+    private func add(serial: String?) {
         let controller = HostController(options: options, deviceSerial: serial, audioRouter: audioRouter,
                                         confirmPairing: confirmPairing) { _ in }
         // The state closure above cannot see the controller; record states and notify here.
@@ -92,7 +109,11 @@ final class HostFleet: @unchecked Sendable {
             self.changed()
         }
         lock.withLock { $0.controllers.append(controller) }
-        Log.info("fleet: serving cabled device \(serial.prefix(8))… (\(controllers.count) total)")
+        if let serial {
+            Log.info("fleet: serving cabled device \(serial.prefix(8))… (\(controllers.count) total)")
+        } else {
+            Log.info("fleet: serving wireless/auto controller (\(controllers.count) total)")
+        }
         let added = onControllerAdded
         DispatchQueue.main.async { added?(controller) }
         controller.start()
@@ -125,6 +146,15 @@ final class HostFleet: @unchecked Sendable {
         UserDefaults.standard.set(preset.rawValue, forKey: QualityPreset.defaultsKey)
         currentOptions.withLock { $0.chroma = preset.chroma; $0.tenBit = preset.tenBit }
         controllers.forEach { $0.setQuality(preset) }
+    }
+    func setTransportMode(_ mode: TransportMode) {
+        UserDefaults.standard.set(mode.rawValue, forKey: HostController.transportModeKey)
+        currentOptions.withLock { $0.transportMode = mode }
+        if mode.allowsWiFi && controllers.isEmpty {
+            add(serial: nil)
+        }
+        controllers.forEach { $0.setTransportMode(mode) }
+        changed()
     }
     func setInputEnabled(_ enabled: Bool) {
         UserDefaults.standard.set(enabled, forKey: HostController.allowInputKey)

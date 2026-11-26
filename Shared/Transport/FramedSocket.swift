@@ -15,7 +15,8 @@ import WDSession
 /// - `close` is idempotent; `onClose` fires exactly once; frames are not
 ///   delivered once closed. The descriptor is closed in deinit, after both
 ///   threads (which retain self) have exited.
-public final class FramedSocket: @unchecked Sendable {
+public final class FramedSocket: FramedTransport, @unchecked Sendable {
+    public let transportKind: ActiveTransportKind = .usb
     private let fd: Int32
     private let condition = NSCondition() // guards scheduler, framer, closed
     private var scheduler: SendScheduler

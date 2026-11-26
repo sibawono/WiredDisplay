@@ -152,7 +152,9 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
     private var nextToken = 0
     private var skipBelow = 0
     private var keyframeWanted = false
+    private var lastKeyframeRequestTime: CFTimeInterval = 0
     private var backlogStalls = 0
+    private var activeDisplayP3 = false
     private var scaledTextStrength: Float = 0
     private let scaledTextEnabled = !ProcessInfo.processInfo.arguments.contains("--disable-scaled-text-detail")
 
@@ -259,9 +261,9 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
             backlog.reset()
             keyframeWanted = false
         }
-        presentQueue.async { [self] in if let textureCache { CVMetalTextureCacheFlush(textureCache, 0) } }
-        if removingImage {
-            DispatchQueue.main.async { [weak self] in self?.layer.contents = nil }
+        presentQueue.async { [self] in
+            if let textureCache { CVMetalTextureCacheFlush(textureCache, 0) }
+            if removingImage { clearToBlack() }
         }
         decodeQueue.async { [self] in
             if let session { VTDecompressionSessionInvalidate(session) }
@@ -278,7 +280,12 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
         let admitted: (generation: Int, token: Int)? = lock.withLock {
             let decision = backlog.admit(isKeyframe: isKeyframe)
             if case .drop(let overflow) = decision {
-                keyframeWanted = true
+                // Throttle forced keyframe requests to 200 ms so Wi-Fi jitter recovers
+                // quickly without storming the encoder with redundant IDRs.
+                if overflow || (enqueued - lastKeyframeRequestTime) >= 0.2 {
+                    keyframeWanted = true
+                    lastKeyframeRequestTime = enqueued
+                }
                 if overflow { backlogStalls += 1 }
                 return nil
             }
@@ -393,6 +400,23 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
 
     // MARK: draw (presentQueue)
 
+    /// Clears the Metal layer to black without touching `layer.contents`
+    /// (setting `CAMetalLayer.contents = nil` detaches its drawable swapchain on iPadOS).
+    private func clearToBlack() {
+        guard let drawable = layer.nextDrawable(),
+              let commands = queue.makeCommandBuffer() else { return }
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = drawable.texture
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+        pass.colorAttachments[0].storeAction = .store
+        if let encoder = commands.makeRenderCommandEncoder(descriptor: pass) {
+            encoder.endEncoding()
+        }
+        commands.present(drawable)
+        commands.commit()
+    }
+
     private func drawPending(retry: Int = 0) {
         guard lock.withLock({ pending != nil }) else { return }
         // Drawable acquisition can block. Pick the freshest decoded frame after that wait.
@@ -422,6 +446,19 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
             return pending
         }), let cache = textureCache else { return }
         let buffer = frame.buffer
+        // Match CAMetalLayer colorspace to the decoded frame's primaries so Display P3
+        // streams render with full wide-gamut saturation instead of sRGB desaturation.
+        let isP3 = Self.isDisplayP3(buffer)
+        let shouldSwitchColorSpace = lock.withLock { () -> Bool in
+            guard isP3 != activeDisplayP3 else { return false }
+            activeDisplayP3 = isP3
+            return true
+        }
+        if shouldSwitchColorSpace {
+            let cs = CGColorSpace(name: isP3 ? CGColorSpace.displayP3 : CGColorSpace.sRGB)
+            DispatchQueue.main.async { [weak self] in self?.layer.colorspace = cs }
+            ClientLog.write("metal: switched layer colorspace to \(isP3 ? "Display P3" : "sRGB")")
+        }
         let type = CVPixelBufferGetPixelFormatType(buffer)
         let tenBit = type == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange || type == kCVPixelFormatType_444YpCbCr10BiPlanarVideoRange
         guard let luma = texture(buffer, plane: 0, format: tenBit ? .r16Unorm : .r8Unorm, cache: cache),
@@ -495,6 +532,13 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
     }
 
     private var framesSinceFlush = 0 // presentQueue only
+
+    private static func isDisplayP3(_ buffer: CVPixelBuffer) -> Bool {
+        guard let primaries = CVBufferCopyAttachment(buffer, kCVImageBufferColorPrimariesKey, nil) as? String else {
+            return false
+        }
+        return primaries == (kCVImageBufferColorPrimaries_P3_D65 as String)
+    }
 
     /// Texture-coordinate offset for the chroma plane, from the decoder's
     /// chroma location (HEVC default when unsignalled: left, type 0). Zero

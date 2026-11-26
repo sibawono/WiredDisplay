@@ -291,6 +291,7 @@ private struct CodeView: View {
 struct SessionSummary: Equatable {
     var macName: String
     var streaming: Bool
+    var activeTransport: String = "USB-C"
     var logicalSize: String?   // "1788 × 1340"
     var detail: String?        // "3180 × 2384 px · 60 Hz · HEVC"
     var framesShown: Int
@@ -448,7 +449,7 @@ struct ControlsContent: View {
                 Text(summary.macName.isEmpty ? "WiredDisplay" : summary.macName)
                     .font(.headline)
                     .lineLimit(1)
-                StatusPill(streaming: summary.streaming)
+                StatusPill(streaming: summary.streaming, transport: summary.activeTransport)
             }
             Spacer(minLength: 0)
             Button(action: close) {
@@ -792,10 +793,11 @@ struct ControlsContent: View {
 
 private struct StatusPill: View {
     let streaming: Bool
+    let transport: String
     var body: some View {
         HStack(spacing: 5) {
             Circle().fill(streaming ? Color.green : Color.secondary).frame(width: 6, height: 6)
-            Text(streaming ? "Streaming over USB‑C" : "Not connected")
+            Text(streaming ? "Streaming over \(transport)" : "Not connected")
                 .font(.caption2.weight(.medium))
         }
         .padding(.horizontal, 8).padding(.vertical, 3)
