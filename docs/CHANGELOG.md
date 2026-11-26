@@ -1204,3 +1204,45 @@ During scrolling, sampled medians were 0.05 ms capture-delivery-to-conversion, 4
 
 **VERIFIED:**
 - Pending `macos-26` CI verification on PR #2.
+
+## CHANGE ID: P1-074 — iPad Controls UI redesign, Display Space & Quality from iPad, Mac speaker balance, Apple Pencil pressure + double-tap/squeeze, Live Stats HUD
+
+**WHAT:**
+- `Shared/Session/Messages.swift` & `Tests/Unit/WDSessionTests/SecureChannelTests.swift`: added backward-compatible `ControlMessage.displaySpace(UInt8)`, `ControlMessage.qualityPreset(UInt8)`, and `InputEvent.stylus(phase:x:y:pressure:)` with round-trip and bounds tests.
+- `macOSHost/Host/{HostAudioBridge,HostController,HostFleet,StatusPanel,main}.swift`: added Mac speaker level balance (0–150%, default 100%) for Both Speakers, bidirectional Display Space & Quality preset sync with the iPad, and `InputInjector` tablet-point pressure injection (`CGEventMouseSubtype.tabletPoint` + `tabletEventPointPressure`).
+- `iPadOSClient/WiredDisplayClient/Sources/{VideoView,ClientSession,ClientApp,ClientUI}.swift`:
+  - Redesigned the iPad Controls panel into a compact 360×540 frosted-glass 4-tab layout (`Display`, `Audio`, `Input`, `More`) with fixed header, close button, and fixed Reconnect footer.
+  - Added Display Space (`Default / More / Most`) and Quality (`Balanced / Pro / Ultra / High`) pickers on the iPad, synced with the Mac.
+  - Added optional `StatsHUD` overlay (live FPS, median transit latency ms, codec) in the top-left corner.
+  - Added Apple Pencil pressure sensitivity (`.stylus` events) and `UIPencilInteraction` double-tap / Apple Pencil Pro squeeze action (`Off / Right Click / Undo ⌘Z`).
+
+**VERIFIED:**
+- `macos-26` CI passed on Draft PR #3; Mac + iPad verified on hardware.
+
+## CHANGE ID: P1-075 — GPU/encode pipeline overlap, audio dropout smoothing, PLW-06 idle sleep fix, iPad brightness slider & Quick Actions
+
+**WHAT:**
+- `macOSHost/Host/{ChromaConverter,VideoEncoder}.swift`: added `ChromaConverter.convertAsync` and pipelined GPU chroma conversion into a dedicated `encodeQueue` (bounded to 2 in-flight GPU conversions with waiting-frame coalescing), allowing frame N+1's GPU conversion to overlap with frame N's hardware HEVC encode instead of blocking synchronously.
+- `Shared/Session/AudioJitterBuffer.swift` & `Tests/Unit/WDSessionTests/SessionTests.swift`: added RT-safe 32-frame (~0.67 ms) anti-click fade-out on underrun (including smooth decay from `lastSample` when empty) and fade-in on recovery for real-time audio buffers (`targetFrames >= 64`), plus unit test coverage.
+- `macOSHost/Host/HostController.swift`: fixed `PLW-06` by pausing the speaker tap IOProc when Mac displays sleep (releasing `coreaudiod`'s idle-sleep assertion) and resuming it automatically on display wake.
+- `iPadOSClient/WiredDisplayClient/Sources/{ClientSession,ClientApp,ClientUI}.swift`:
+  - Added a Brightness slider card in the iPad Display tab, synced bidirectionally with Mac brightness keys and menu bar slider.
+  - Added a 3×2 Quick Actions grid in the iPad Input tab (`Spotlight`, `Mission Ctrl`, `Switch App`, `Screenshot`, `Show Dock`, `Lock Mac`) for one-tap control without a hardware keyboard.
+
+**VERIFIED:**
+- `macos-26` CI passed on Draft PR #3.
+
+## CHANGE ID: P1-076 — Mac Volume + Mute slider in iPad Audio tab and confirmed Sleep Mac action
+
+**WHAT:**
+- `Shared/Session/Messages.swift` & `Tests/Unit/WDSessionTests/SecureChannelTests.swift`: added backward-compatible `ControlMessage.volume(level:muted:)` and `ControlMessage.sleepMac` with round-trip and bounds tests.
+- `Shared/MacAudio/AudioDevices.swift`: added CoreAudio `outputVolume`, `setOutputVolume`, `outputMuted`, and `setOutputMuted` helpers (using `VirtualMainVolume` with per-channel fallback).
+- `macOSHost/Host/HostController.swift`: synced Mac default output volume & mute state to the iPad on video start, applied `.volume` updates live, and handled `.sleepMac` (gated on `isInputEnabled` and `allowsInput`) via `IOPMSleepSystem`.
+- `iPadOSClient/WiredDisplayClient/Sources/{ClientSession,ClientApp,ClientUI}.swift`:
+  - Added Mac Volume slider + Mute toggle button at the top of the iPad Audio tab.
+  - Added "Sleep Mac…" button with a confirmation dialog in the iPad Input tab.
+
+**VERIFIED:**
+- Pending `macos-26` CI verification on Draft PR #3.
+
+

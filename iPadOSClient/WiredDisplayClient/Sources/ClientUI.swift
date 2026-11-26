@@ -295,6 +295,8 @@ struct SessionSummary: Equatable {
     var detail: String?        // "3180 × 2384 px · 60 Hz · HEVC"
     var framesShown: Int
     var framesDropped: Int
+    var liveFPS: Int = 0
+    var liveLatencyMs: Double? = nil
 }
 
 struct PairedMacRow: Identifiable, Equatable {
@@ -312,162 +314,460 @@ struct DeviceInfo: Equatable {
     var hevcHardware: Bool
 }
 
+/// One-tap macOS shortcuts sent from the iPad Input tab (works without a hardware keyboard).
+enum QuickAction: String, CaseIterable, Identifiable {
+    case spotlight, missionControl, appSwitch, screenshot, dock, lockMac
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .spotlight: return "Spotlight"
+        case .missionControl: return "Mission Ctrl"
+        case .appSwitch: return "Switch App"
+        case .screenshot: return "Screenshot"
+        case .dock: return "Show Dock"
+        case .lockMac: return "Lock Mac"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .spotlight: return "magnifyingglass"
+        case .missionControl: return "rectangle.3.group"
+        case .appSwitch: return "square.on.square"
+        case .screenshot: return "camera.viewfinder"
+        case .dock: return "dock.rectangle"
+        case .lockMac: return "lock.fill"
+        }
+    }
+
+    /// USB HID keyboard usages (page 0x07), pressed in order and released in reverse.
+    var usages: [UInt16] {
+        switch self {
+        case .spotlight: return [0xE3, 0x2C]         // ⌘ Space
+        case .missionControl: return [0xE0, 0x52]    // ⌃ ↑
+        case .appSwitch: return [0xE3, 0x2B]         // ⌘ Tab
+        case .screenshot: return [0xE3, 0xE1, 0x22]  // ⌘ ⇧ 5
+        case .dock: return [0xE3, 0xE2, 0x07]        // ⌘ ⌥ D
+        case .lockMac: return [0xE0, 0xE3, 0x14]     // ⌃ ⌘ Q
+        }
+    }
+}
+
 struct ControlsContent: View {
+    enum Tab: String, CaseIterable, Identifiable {
+        case display, audio, input, more
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .display: return "Display"
+            case .audio: return "Audio"
+            case .input: return "Input"
+            case .more: return "More"
+            }
+        }
+        var symbol: String {
+            switch self {
+            case .display: return "display"
+            case .audio: return "speaker.wave.2"
+            case .input: return "pencil.and.scribble"
+            case .more: return "gearshape"
+            }
+        }
+    }
+
     let summary: SessionSummary
+    @Binding var displaySpace: Int
+    @Binding var qualityPreset: Int
+    @Binding var brightness: Double
+    @Binding var showStatsHUD: Bool
     @Binding var speaker: Bool
     @Binding var microphone: Bool
+    @Binding var macVolume: Double
+    @Binding var macMuted: Bool
     @Binding var smoothGradients: Bool
     var metalRenderer: Binding<Bool>? = nil
+    @Binding var pencilAction: PencilAction
+    var quickAction: (QuickAction) -> Void = { _ in }
+    var sleepMac: () -> Void = {}
     let pairedMacs: [PairedMacRow]
     let forgetPaired: () -> Void
     let reconnect: () -> Void
+    var close: () -> Void = {}
     var device: DeviceInfo? = nil
+
+    @State private var tab: Tab = .display
     @State private var confirmForget = false
+    @State private var confirmSleep = false
     @State private var showGestures = false
     @State private var showShortcuts = false
 
+    private static let qualityTitles = ["Balanced", "Pro", "Ultra", "High"]
+    private static let qualityDetails = [
+        "4:2:0 while moving, 4:4:4 when still · 10-bit",
+        "Lowest latency 4:2:0 · 10-bit",
+        "Sharpest 4:4:4 colour · 10-bit",
+        "Full 4:4:4 colour · 8-bit",
+    ]
+
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                header
-                section("Display") {
-                    if let size = summary.logicalSize {
-                        InfoRow(symbol: "rectangle.on.rectangle", title: "Looks like \(size)", value: nil)
-                    }
-                    if let detail = summary.detail {
-                        InfoRow(symbol: "dial.medium", title: detail, value: nil, secondary: true)
-                    }
-                    if summary.streaming {
-                        InfoRow(symbol: "film.stack", title: "Frames",
-                                value: "\(summary.framesShown.formatted()) shown · \(summary.framesDropped.formatted()) dropped",
-                                secondary: true)
-                    }
-                    ToggleRow(symbol: "circle.lefthalf.filled", title: "Smooth gradients",
-                              detail: "GPU dithering against banding.", isOn: $smoothGradients)
-                    if let metalRenderer {
-                        ToggleRow(symbol: "bolt.horizontal", title: "Metal renderer",
-                                  detail: "Draws each frame as soon as it is decoded (lower latency). Off: the system video layer.", isOn: metalRenderer)
+        VStack(spacing: 0) {
+            header
+                .padding(.horizontal, 16)
+                .padding(.top, 16)
+                .padding(.bottom, 12)
+            tabBar
+                .padding(.horizontal, 16)
+                .padding(.bottom, 10)
+            Divider().overlay(.white.opacity(0.08))
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    switch tab {
+                    case .display: displayTab
+                    case .audio: audioTab
+                    case .input: inputTab
+                    case .more: moreTab
                     }
                 }
-                section("Audio") {
-                    ToggleRow(symbol: "speaker.wave.2.fill", title: "Mac audio on this iPad", detail: nil, isOn: $speaker)
-                    ToggleRow(symbol: "mic.fill", title: "iPad microphone to Mac", detail: nil, isOn: $microphone)
-                    if microphone {
-                        Label("Live: choose “iPad Microphone” on the Mac", systemImage: "waveform")
-                            .font(.footnote.weight(.medium))
-                            .foregroundStyle(.orange)
-                            .padding(.leading, 38)
-                    }
-                }
-                section("Touch") {
-                    DisclosureGroup(isExpanded: $showGestures) {
-                        VStack(alignment: .leading, spacing: 10) {
-                            GestureRow(symbol: "hand.tap", gesture: "Tap", action: "Click")
-                            GestureRow(symbol: "hand.draw", gesture: "Drag", action: "Scroll")
-                            GestureRow(symbol: "hand.point.up.left", gesture: "Hold, then drag", action: "Select · move")
-                            GestureRow(symbol: "hand.tap", gesture: "Two-finger tap", action: "Right click")
-                            GestureRow(symbol: "arrow.up.left.and.arrow.down.right", gesture: "Pinch", action: "Zoom")
-                            GestureRow(symbol: "arrow.clockwise", gesture: "Two-finger rotate", action: "Rotate")
-                            GestureRow(symbol: "hand.pinch", gesture: "Three-finger pinch / spread", action: "Copy · paste")
-                            GestureRow(symbol: "arrow.uturn.backward", gesture: "Three-finger swipe", action: "Undo · redo")
-                        }
-                        .padding(.top, 10)
-                    } label: {
-                        Label("Gestures", systemImage: "hand.raised.fingers.spread")
-                            .font(.body)
-                    }
-                    .tint(.primary)
-                    Text("Touch, keyboard and trackpad need “Allow input” in the Mac’s WiredDisplay menu.")
-                        .font(.footnote).foregroundStyle(Brand.secondaryText)
-                }
-                section("Keyboard & trackpad") {
-                    DisclosureGroup(isExpanded: $showShortcuts) {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Text("iPadOS keeps these for itself, so use Control instead of Command:")
-                                .font(.footnote).foregroundStyle(Brand.secondaryText)
-                            ShortcutRow(keys: "⌃ Tab", mac: "⌘ Tab", action: "Switch apps")
-                            ShortcutRow(keys: "⌃ ⇧ Tab", mac: "⌘ ⇧ Tab", action: "Switch back")
-                            ShortcutRow(keys: "⌃ `", mac: "⌘ `", action: "App windows")
-                            ShortcutRow(keys: "⌃ Space", mac: "⌘ Space", action: "Spotlight")
-                            ShortcutRow(keys: "⌃ ⇧ 3 · 4 · 5", mac: "⌘ ⇧ 3 · 4 · 5", action: "Screenshot")
-                            Text("Hold ⌃ and press Tab again to move through apps, like ⌘ Tab on a Mac. All other shortcuts (⌘ C, ⌘ V, ⌘ W …) go to the Mac as they are.")
-                                .font(.footnote).foregroundStyle(Brand.secondaryText)
-                            Divider().padding(.vertical, 2)
-                            GestureRow(symbol: "rectangle.and.hand.point.up.left", gesture: "Two-finger scroll", action: "Scroll")
-                            GestureRow(symbol: "cursorarrow.click.2", gesture: "Two-finger click", action: "Right click")
-                            GestureRow(symbol: "arrow.up.left.and.arrow.down.right", gesture: "Pinch", action: "Zoom")
-                            GestureRow(symbol: "arrow.clockwise", gesture: "Rotate", action: "Rotate")
-                            Text("Three- and four-finger swipes stay with iPadOS. Use ⌃ ↑ for Mission Control and ⌃ ← / → for Spaces.")
-                                .font(.footnote).foregroundStyle(Brand.secondaryText)
-                        }
-                        .padding(.top, 10)
-                    } label: {
-                        Label("Shortcuts", systemImage: "keyboard")
-                            .font(.body)
-                    }
-                    .tint(.primary)
-                }
-                if let device {
-                    section("This iPad") {
-                        InfoRow(symbol: "ipad.landscape", title: "Model", value: device.model)
-                        InfoRow(symbol: "square.resize", title: "Panel", value: device.panel)
-                        InfoRow(symbol: "circle.grid.3x3", title: "Density", value: "\(device.pixelsPerInch) ppi")
-                        InfoRow(symbol: "gauge.with.dots.needle.67percent", title: "Refresh", value: "up to \(device.maxRefreshHz) Hz")
-                        InfoRow(symbol: "film", title: "HEVC hardware decode", value: device.hevcHardware ? "Yes" : "No (H.264)")
-                    }
-                }
-                section("Security") {
-                    if pairedMacs.isEmpty {
-                        InfoRow(symbol: "lock.open", title: "No paired Mac", value: nil, secondary: true)
-                    } else {
-                        ForEach(pairedMacs) { mac in
-                            InfoRow(symbol: "lock.shield.fill", title: mac.name, value: String(mac.fingerprint.prefix(8)))
-                        }
-                        Button("Forget Paired Macs…", role: .destructive) { confirmForget = true }
-                            .font(.body)
-                            .confirmationDialog("Forget all paired Macs?", isPresented: $confirmForget) {
-                                Button("Forget", role: .destructive, action: forgetPaired)
-                            } message: {
-                                Text("The next Mac that connects must be paired again with a code.")
-                            }
-                    }
-                }
-                Button(action: reconnect) {
-                    Label("Reconnect", systemImage: "arrow.clockwise")
-                        .fontWeight(.semibold)
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(FilledButtonStyle(fill: Brand.action))
+                .padding(16)
             }
-            .padding(20)
+            Divider().overlay(.white.opacity(0.08))
+            footer
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
         }
-        .frame(width: 400)
-        .frame(maxHeight: 700)
     }
 
+    // MARK: header, tabs, footer
+
     private var header: some View {
-        HStack(spacing: 14) {
-            IconTile(size: 48)
-            VStack(alignment: .leading, spacing: 4) {
+        HStack(spacing: 12) {
+            IconTile(size: 38)
+            VStack(alignment: .leading, spacing: 3) {
                 Text(summary.macName.isEmpty ? "WiredDisplay" : summary.macName)
-                    .font(.title3.weight(.semibold))
+                    .font(.headline)
                     .lineLimit(1)
                 StatusPill(streaming: summary.streaming)
             }
             Spacer(minLength: 0)
+            Button(action: close) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.75))
+                    .frame(width: 28, height: 28)
+                    .background(.white.opacity(0.1), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Close controls")
         }
     }
 
-    private func section<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title)
-                .font(.footnote.weight(.semibold))
-                .foregroundStyle(Brand.secondaryText)
-                .padding(.leading, 4)
-            VStack(alignment: .leading, spacing: 12) { content() }
-                .padding(14)
+    private var tabBar: some View {
+        HStack(spacing: 6) {
+            ForEach(Tab.allCases) { item in
+                let selected = tab == item
+                Button { tab = item } label: {
+                    VStack(spacing: 4) {
+                        Image(systemName: item.symbol)
+                            .font(.system(size: 14, weight: selected ? .semibold : .regular))
+                        Text(item.title)
+                            .font(.system(size: 10.5, weight: selected ? .semibold : .medium))
+                    }
+                    .foregroundStyle(selected ? .white : .white.opacity(0.6))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .background(selected ? Brand.blue.opacity(0.28) : .white.opacity(0.04),
+                                in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        .strokeBorder(selected ? Brand.blue.opacity(0.6) : .white.opacity(0.06)))
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(selected ? .isSelected : [])
+            }
+        }
+    }
+
+    private var footer: some View {
+        Button(action: reconnect) {
+            Label("Reconnect", systemImage: "arrow.clockwise")
+                .font(.subheadline.weight(.semibold))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+                .background(Brand.action, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .foregroundStyle(.white)
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: tabs
+
+    private var displayTab: some View {
+        Group {
+            if let size = summary.logicalSize {
+                card {
+                    InfoRow(symbol: "rectangle.on.rectangle", title: "Looks like \(size)", value: nil)
+                    if let detail = summary.detail {
+                        InfoRow(symbol: "dial.medium", title: detail, value: nil, secondary: true)
+                    }
+                    if summary.streaming {
+                        let fpsText = summary.liveFPS > 0 ? "\(summary.liveFPS) fps" : "—"
+                        let latText = summary.liveLatencyMs.map { String(format: " · %.1f ms", $0) } ?? ""
+                        InfoRow(symbol: "speedometer", title: "Live stream",
+                                value: "\(fpsText)\(latText)", secondary: true)
+                    }
+                }
+            }
+            card("Display Space") {
+                Picker("Display Space", selection: $displaySpace) {
+                    Text("Default").tag(0)
+                    Text("More").tag(1)
+                    Text("Most").tag(2)
+                }
+                .pickerStyle(.segmented)
+                .disabled(!summary.streaming)
+                Text("Adjusts macOS UI scaling on this iPad.")
+                    .font(.caption).foregroundStyle(Brand.secondaryText)
+            }
+            card("Quality") {
+                Picker("Quality", selection: $qualityPreset) {
+                    ForEach(0..<Self.qualityTitles.count, id: \.self) { idx in
+                        Text(Self.qualityTitles[idx]).tag(idx)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .disabled(!summary.streaming)
+                if Self.qualityDetails.indices.contains(qualityPreset) {
+                    Text(Self.qualityDetails[qualityPreset])
+                        .font(.caption).foregroundStyle(Brand.secondaryText)
+                }
+            }
+            card("Brightness") {
+                HStack(spacing: 10) {
+                    Image(systemName: "sun.min.fill")
+                        .font(.caption)
+                        .foregroundStyle(Brand.secondaryText)
+                    Slider(value: $brightness, in: 0...1)
+                        .tint(Brand.blue)
+                    Image(systemName: "sun.max.fill")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.85))
+                    Text("\(Int((brightness * 100).rounded()))%")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(Brand.secondaryText)
+                        .frame(width: 34, alignment: .trailing)
+                }
+            }
+            card("Renderer & HUD") {
+                ToggleRow(symbol: "gauge.with.dots.needle.67percent", title: "Live stats HUD",
+                          detail: "Show FPS and latency in the corner.", isOn: $showStatsHUD)
+                if let metalRenderer {
+                    Divider().overlay(.white.opacity(0.08))
+                    ToggleRow(symbol: "bolt.horizontal", title: "Metal renderer",
+                              detail: "Lower latency GPU path.", isOn: metalRenderer)
+                    if !metalRenderer.wrappedValue {
+                        Divider().overlay(.white.opacity(0.08))
+                        ToggleRow(symbol: "circle.lefthalf.filled", title: "Smooth gradients",
+                                  detail: "GPU dithering for the system video layer.", isOn: $smoothGradients)
+                    }
+                } else {
+                    Divider().overlay(.white.opacity(0.08))
+                    ToggleRow(symbol: "circle.lefthalf.filled", title: "Smooth gradients",
+                              detail: "GPU dithering against banding.", isOn: $smoothGradients)
+                }
+            }
+        }
+    }
+
+    private var audioTab: some View {
+        Group {
+            card("Mac Volume") {
+                HStack(spacing: 10) {
+                    Button { macMuted.toggle() } label: {
+                        Image(systemName: macMuted || macVolume < 0.01 ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(macMuted ? .orange : .white)
+                            .frame(width: 30, height: 30)
+                            .background((macMuted ? Color.orange.opacity(0.2) : .white.opacity(0.1)), in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!summary.streaming)
+                    .accessibilityLabel(macMuted ? "Unmute Mac" : "Mute Mac")
+                    Slider(value: $macVolume, in: 0...1)
+                        .tint(macMuted ? .secondary : Brand.blue)
+                        .disabled(!summary.streaming)
+                    Text(macMuted ? "Mute" : "\(Int((macVolume * 100).rounded()))%")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(macMuted ? .orange : Brand.secondaryText)
+                        .frame(width: 36, alignment: .trailing)
+                }
+            }
+            card("iPad Audio") {
+                ToggleRow(symbol: "speaker.wave.2.fill", title: "Mac audio on iPad",
+                          detail: "Plays Mac sound through this iPad.", isOn: $speaker)
+                Divider().overlay(.white.opacity(0.08))
+                ToggleRow(symbol: "mic.fill", title: "iPad microphone to Mac",
+                          detail: "Uses echo cancellation while active.", isOn: $microphone)
+                if microphone {
+                    Label("Live: choose “iPad Microphone” on the Mac", systemImage: "waveform")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.orange)
+                        .padding(.leading, 34)
+                }
+            }
+            card {
+                Label("Tip: turn on “Play on Mac speakers too” in the Mac menu bar to use both speakers together with sync & balance.",
+                      systemImage: "hifispeaker.2")
+                    .font(.caption)
+                    .foregroundStyle(Brand.secondaryText)
+            }
+        }
+    }
+
+    private var inputTab: some View {
+        Group {
+            card("Quick Actions") {
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 8),
+                                    GridItem(.flexible(), spacing: 8),
+                                    GridItem(.flexible(), spacing: 8)], spacing: 8) {
+                    ForEach(QuickAction.allCases) { action in
+                        Button { quickAction(action) } label: {
+                            VStack(spacing: 5) {
+                                Image(systemName: action.symbol)
+                                    .font(.system(size: 15, weight: .medium))
+                                Text(action.title)
+                                    .font(.system(size: 10.5, weight: .medium))
+                                    .lineLimit(1)
+                            }
+                            .foregroundStyle(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(.white.opacity(0.08)))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(!summary.streaming)
+                        .opacity(summary.streaming ? 1 : 0.45)
+                    }
+                }
+                Divider().overlay(.white.opacity(0.08))
+                Button { confirmSleep = true } label: {
+                    Label("Sleep Mac", systemImage: "moon.zzz.fill")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .background(Color.indigo.opacity(0.32), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous)
+                            .strokeBorder(Color.indigo.opacity(0.65)))
+                }
+                .buttonStyle(.plain)
+                .disabled(!summary.streaming)
+                .opacity(summary.streaming ? 1 : 0.45)
+                .confirmationDialog("Put Mac to sleep?", isPresented: $confirmSleep) {
+                    Button("Sleep Mac", role: .destructive, action: sleepMac)
+                } message: {
+                    Text("USB display will disconnect until the Mac is woken from a keyboard, power button, or Wake-on-LAN.")
+                }
+            }
+            card("Apple Pencil") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Double-tap / Squeeze")
+                        .font(.subheadline.weight(.medium))
+                    Picker("Apple Pencil action", selection: $pencilAction) {
+                        ForEach(PencilAction.allCases, id: \.self) { action in
+                            Text(action.title).tag(action)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    Text("Direct click, drag, hover, pressure sensitivity, and palm rejection are always active.")
+                        .font(.caption).foregroundStyle(Brand.secondaryText)
+                }
+            }
+            card {
+                DisclosureGroup(isExpanded: $showShortcuts) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Use Control instead of Command for shortcuts iPadOS reserves:")
+                            .font(.caption).foregroundStyle(Brand.secondaryText)
+                        ShortcutRow(keys: "⌃ Tab", mac: "⌘ Tab", action: "Switch apps")
+                        ShortcutRow(keys: "⌃ `", mac: "⌘ `", action: "App windows")
+                        ShortcutRow(keys: "⌃ Space", mac: "⌘ Space", action: "Spotlight")
+                        ShortcutRow(keys: "⌃ H", mac: "⌘ H", action: "Hide app")
+                        ShortcutRow(keys: "⌃ ⌥ D", mac: "⌘ ⌥ D", action: "Dock")
+                        ShortcutRow(keys: "⌃ ⌥ ⎋", mac: "⌘ ⌥ ⎋", action: "Force Quit")
+                        ShortcutRow(keys: "⌃ ⇧ 3/4/5", mac: "⌘ ⇧ 3/4/5", action: "Screenshot")
+                    }
+                    .padding(.top, 8)
+                } label: {
+                    Label("Keyboard shortcuts", systemImage: "keyboard").font(.subheadline.weight(.medium))
+                }
+                .tint(.primary)
+                Divider().overlay(.white.opacity(0.08))
+                DisclosureGroup(isExpanded: $showGestures) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        GestureRow(symbol: "hand.tap", gesture: "Tap", action: "Click")
+                        GestureRow(symbol: "hand.draw", gesture: "Drag", action: "Scroll")
+                        GestureRow(symbol: "hand.point.up.left", gesture: "Hold, then drag", action: "Select · move")
+                        GestureRow(symbol: "hand.tap", gesture: "Two-finger tap", action: "Right click")
+                        GestureRow(symbol: "arrow.up.left.and.arrow.down.right", gesture: "Pinch / Rotate", action: "Zoom · rotate")
+                        GestureRow(symbol: "hand.pinch", gesture: "Three-finger pinch", action: "Copy · paste")
+                        GestureRow(symbol: "arrow.uturn.backward", gesture: "Three-finger swipe", action: "Undo · redo")
+                    }
+                    .padding(.top, 8)
+                } label: {
+                    Label("Touch gestures", systemImage: "hand.raised.fingers.spread").font(.subheadline.weight(.medium))
+                }
+                .tint(.primary)
+            }
+            Text("Requires “Allow Input from iPad” in the Mac menu bar.")
+                .font(.caption).foregroundStyle(Brand.secondaryText)
+                .padding(.horizontal, 4)
+        }
+    }
+
+    private var moreTab: some View {
+        Group {
+            card("Paired Macs") {
+                if pairedMacs.isEmpty {
+                    InfoRow(symbol: "lock.open", title: "No paired Mac", value: nil, secondary: true)
+                } else {
+                    ForEach(pairedMacs) { mac in
+                        InfoRow(symbol: "lock.shield.fill", title: mac.name, value: String(mac.fingerprint.prefix(8)))
+                    }
+                    Divider().overlay(.white.opacity(0.08))
+                    Button("Forget Paired Macs…", role: .destructive) { confirmForget = true }
+                        .font(.subheadline)
+                        .confirmationDialog("Forget all paired Macs?", isPresented: $confirmForget) {
+                            Button("Forget", role: .destructive, action: forgetPaired)
+                        } message: {
+                            Text("The next Mac that connects must be paired again with a code.")
+                        }
+                }
+            }
+            if let device {
+                card("This iPad") {
+                    InfoRow(symbol: "ipad.landscape", title: "Model", value: device.model, secondary: true)
+                    InfoRow(symbol: "square.resize", title: "Panel", value: device.panel, secondary: true)
+                    InfoRow(symbol: "circle.grid.3x3", title: "Density", value: "\(device.pixelsPerInch) ppi", secondary: true)
+                    InfoRow(symbol: "gauge.with.dots.needle.67percent", title: "Max refresh", value: "\(device.maxRefreshHz) Hz", secondary: true)
+                    InfoRow(symbol: "film", title: "HEVC hardware", value: device.hevcHardware ? "Yes" : "No", secondary: true)
+                }
+            }
+        }
+    }
+
+    private func card<Content: View>(_ title: String? = nil, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let title {
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Brand.secondaryText)
+                    .padding(.leading, 4)
+            }
+            VStack(alignment: .leading, spacing: 10) { content() }
+                .padding(12)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(.white.opacity(0.07)))
         }
     }
 }
@@ -475,13 +775,13 @@ struct ControlsContent: View {
 private struct StatusPill: View {
     let streaming: Bool
     var body: some View {
-        HStack(spacing: 6) {
-            Circle().fill(streaming ? Color.green : Color.secondary).frame(width: 7, height: 7)
+        HStack(spacing: 5) {
+            Circle().fill(streaming ? Color.green : Color.secondary).frame(width: 6, height: 6)
             Text(streaming ? "Streaming over USB‑C" : "Not connected")
-                .font(.caption.weight(.medium))
+                .font(.caption2.weight(.medium))
         }
-        .padding(.horizontal, 9).padding(.vertical, 4)
-        .background((streaming ? Color.green : Color.secondary).opacity(0.14), in: Capsule())
+        .padding(.horizontal, 8).padding(.vertical, 3)
+        .background((streaming ? Color.green : Color.secondary).opacity(0.16), in: Capsule())
         .foregroundStyle(streaming ? .green : .secondary)
     }
 }
@@ -493,16 +793,17 @@ private struct InfoRow: View {
     var secondary = false
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 10) {
             Image(systemName: symbol)
-                .foregroundStyle(.white)
-                .frame(width: 26)
+                .font(.subheadline)
+                .foregroundStyle(secondary ? Brand.secondaryText : .white)
+                .frame(width: 22)
             Text(title)
-                .font(secondary ? .subheadline : .body)
+                .font(.subheadline)
                 .foregroundStyle(secondary ? Brand.secondaryText : Color.primary)
             Spacer(minLength: 8)
             if let value {
-                Text(value).font(.subheadline.monospacedDigit()).foregroundStyle(Brand.secondaryText)
+                Text(value).font(.caption.monospacedDigit()).foregroundStyle(Brand.secondaryText)
             }
         }
     }
@@ -516,13 +817,14 @@ private struct ToggleRow: View {
 
     var body: some View {
         Toggle(isOn: $isOn) {
-            HStack(spacing: 12) {
+            HStack(spacing: 10) {
                 Image(systemName: symbol)
+                    .font(.subheadline)
                     .foregroundStyle(.white)
-                    .frame(width: 26)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
-                    if let detail { Text(detail).font(.footnote).foregroundStyle(Brand.secondaryText) }
+                    .frame(width: 22)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title).font(.subheadline)
+                    if let detail { Text(detail).font(.caption).foregroundStyle(Brand.secondaryText) }
                 }
             }
         }
@@ -537,13 +839,14 @@ private struct GestureRow: View {
     let action: String
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 10) {
             Image(systemName: symbol)
-                .foregroundStyle(.white)
-                .frame(width: 26)
-            Text(gesture).font(.subheadline)
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.85))
+                .frame(width: 20)
+            Text(gesture).font(.caption)
             Spacer(minLength: 8)
-            Text(action).font(.subheadline.weight(.medium))
+            Text(action).font(.caption.weight(.medium)).foregroundStyle(Brand.secondaryText)
         }
     }
 }
@@ -554,15 +857,45 @@ private struct ShortcutRow: View {
     let action: String
 
     var body: some View {
-        HStack(spacing: 10) {
-            Text(keys).font(.subheadline.monospaced().weight(.semibold))
-                .padding(.horizontal, 8).padding(.vertical, 3)
-                .background(.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
-            Image(systemName: "arrow.right").font(.caption).foregroundStyle(Brand.secondaryText)
-            Text(mac).font(.subheadline.monospaced()).foregroundStyle(Brand.secondaryText)
-            Spacer(minLength: 8)
-            Text(action).font(.subheadline.weight(.medium))
+        HStack(spacing: 8) {
+            Text(keys).font(.caption.monospaced().weight(.semibold))
+                .padding(.horizontal, 6).padding(.vertical, 2)
+                .background(.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 5))
+            Image(systemName: "arrow.right").font(.caption2).foregroundStyle(Brand.secondaryText)
+            Text(mac).font(.caption.monospaced()).foregroundStyle(Brand.secondaryText)
+            Spacer(minLength: 6)
+            Text(action).font(.caption.weight(.medium))
         }
+    }
+}
+
+/// Compact optional live stream stats pill (FPS, latency, codec).
+struct StatsHUD: View {
+    let fps: Int
+    let latencyMs: Double?
+    let codec: String?
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Circle().fill(Color.green).frame(width: 6, height: 6)
+            Text("\(fps) fps")
+                .font(.caption.monospacedDigit().weight(.semibold))
+            if let latencyMs {
+                Text(String(format: "· %.1f ms", latencyMs))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.white.opacity(0.8))
+            }
+            if let codec {
+                Text("· \(codec)")
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.white.opacity(0.65))
+            }
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 12).padding(.vertical, 6)
+        .background(.ultraThinMaterial, in: Capsule())
+        .overlay(Capsule().strokeBorder(.white.opacity(0.12)))
+        .environment(\.colorScheme, .dark)
     }
 }
 

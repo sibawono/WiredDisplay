@@ -364,6 +364,24 @@ final class AudioProtocolTests: XCTestCase {
         XCTAssertEqual(pull(buffer, frames: 1, channels: 1)[0], [0], "waits for the target again")
     }
 
+    func testJitterBufferSmoothsUnderrunFadeOutAndFadeIn() {
+        let buffer = AudioJitterBuffer(channels: 1, targetFrames: 128, maxFrames: 512)
+        buffer.push(AudioPacket(channels: 1, samples: [Int16](repeating: 16384, count: 128)))
+        // Pull 200 frames -> 128 available, triggers underrun with 32-frame fade-out tail.
+        let underrun = pull(buffer, frames: 200, channels: 1)[0]
+        XCTAssertEqual(buffer.stats.underruns, 1)
+        XCTAssertEqual(underrun[0], 0.5, accuracy: 0.001)
+        XCTAssertGreaterThan(underrun[96], underrun[127], "tail fades down smoothly toward 0")
+        XCTAssertEqual(underrun[127], 0, accuracy: 0.001)
+        XCTAssertEqual(underrun[128], 0)
+        // Refill to target -> resumes with 32-frame fade-in from near 0 up to 0.5.
+        buffer.push(AudioPacket(channels: 1, samples: [Int16](repeating: 16384, count: 128)))
+        let recovered = pull(buffer, frames: 64, channels: 1)[0]
+        XCTAssertLessThan(recovered[0], 0.05, "resumes smoothly without a click")
+        XCTAssertGreaterThan(recovered[31], 0.48)
+        XCTAssertEqual(recovered[32], 0.5, accuracy: 0.001)
+    }
+
     func testJitterBufferBoundsLatencyByDroppingOldest() {
         let buffer = AudioJitterBuffer(channels: 1, targetFrames: 2, maxFrames: 4)
         buffer.push(AudioPacket(channels: 1, samples: [1, 2, 3, 4, 5, 6].map { Int16($0 * 1000) }))

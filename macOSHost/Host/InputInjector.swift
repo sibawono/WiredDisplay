@@ -80,11 +80,11 @@ final class InputInjector {
         // gesture steps are counted (at 60-120 Hz they filled the log and
         // slowed the session queue); keystrokes are never logged.
         switch event {
-        case .pointer(.move, _, _, _): movesSinceLog += 1
+        case .pointer(.move, _, _, _), .stylus(.move, _, _, _): movesSinceLog += 1
         case .key, .scroll, .gestureScroll: break
         case .magnify(_, .changed), .rotate(_, .changed): gestureSteps += 1
         case .magnify, .rotate: break // boundaries are logged when posted
-        case .pointer: break // down/up are logged when posted
+        case .pointer, .stylus: break // down/up are logged when posted
         case .releaseAll: trace("received \(event)")
         }
         guard isEnabled() else {
@@ -148,6 +148,37 @@ final class InputInjector {
             case .up:
                 release(button, at: point)
                 trace("posted \(button) up", point)
+            }
+        case .stylus(let phase, let x, let y, let pressure):
+            let point = clamp(CGPoint(x: bounds.minX + CGFloat(x) * bounds.width,
+                                      y: bounds.minY + CGFloat(y) * bounds.height), to: bounds)
+            switch phase {
+            case .move:
+                guard withinRateLimit() else { return }
+                lastPoint = point
+                post(heldButton == .left ? .leftMouseDragged : .mouseMoved, at: point,
+                     button: heldButton == .left ? .left : .none,
+                     clickState: heldButton == .left ? 1 : 0, pressure: Double(pressure))
+            case .down:
+                if heldButton != .none { releaseAll() }
+                lastPoint = point
+                let now = ProcessInfo.processInfo.systemUptime
+                var count: Int64 = 1
+                if let last = lastDown, last.button == .left, now - last.time <= NSEvent.doubleClickInterval,
+                   hypot(last.point.x - point.x, last.point.y - point.y) <= 6 {
+                    count = min(last.count + 1, 3)
+                }
+                lastDown = (now, point, .left, count)
+                heldButton = .left
+                post(.leftMouseDown, at: point, button: .left, clickState: count, pressure: Double(pressure))
+                trace("posted stylus down", point)
+            case .up:
+                guard heldButton == .left else { return }
+                lastPoint = point
+                heldButton = .none
+                let clicks = lastDown?.count ?? 1
+                post(.leftMouseUp, at: point, button: .left, clickState: clicks, pressure: 0)
+                trace("posted stylus up", point)
             }
         case .scroll(let dx, let dy):
             guard withinRateLimit() else { return }
@@ -416,7 +447,7 @@ final class InputInjector {
         gestures.note(momentum: momentum)
     }
 
-    private func post(_ type: CGEventType, at point: CGPoint, button: PointerButton, clickState: Int64) {
+    private func post(_ type: CGEventType, at point: CGPoint, button: PointerButton, clickState: Int64, pressure: Double? = nil) {
         let mouseButton: CGMouseButton = button == .right ? .right : .left
         guard let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: point,
                                   mouseButton: mouseButton) else {
@@ -424,6 +455,10 @@ final class InputInjector {
             return
         }
         if clickState > 0 { event.setIntegerValueField(.mouseEventClickState, value: clickState) }
+        if let pressure {
+            event.setIntegerValueField(.mouseEventSubtype, value: Int64(CGEventMouseSubtype.tabletPoint.rawValue))
+            event.setDoubleValueField(.tabletEventPointPressure, value: min(max(pressure, 0), 1))
+        }
         if !flags.isEmpty { event.flags = flags }
         event.post(tap: .cghidEventTap)
     }

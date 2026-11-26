@@ -140,12 +140,17 @@ final class AppModel {
     /// The last value the Mac set, so applying it is not reported back as a
     /// user change (that echo made quick key presses jump back).
     private var appliedBrightness: Float?
+    /// Suppresses lagged UIScreen.brightnessDidChangeNotification feedback while
+    /// our own slider drag or Mac brightness update is ramping the backlight.
+    private var brightnessSetAt: TimeInterval = 0
     private var hudToken = 0
 
     private func applyBrightness(_ value: Float) {
         guard let screen else { return }
         appliedBrightness = value
+        brightnessSetAt = ProcessInfo.processInfo.systemUptime
         screen.brightness = CGFloat(value)
+        connection.screenBrightness = value
         hudToken += 1
         let token = hudToken
         connection.brightnessHUD = (value, token)
@@ -155,12 +160,31 @@ final class AppModel {
         }
     }
 
+    /// Sets iPad brightness directly from the Controls panel slider and syncs it to the Mac.
+    func setScreenBrightness(_ value: Float) {
+        let clamped = min(max(value, 0), 1)
+        appliedBrightness = clamped
+        brightnessSetAt = ProcessInfo.processInfo.systemUptime
+        screen?.brightness = CGFloat(clamped)
+        connection.screenBrightness = clamped
+        session?.sendBrightness(clamped)
+    }
+
     private func reportBrightness() {
         guard let screen else { return }
-        let value = Float(screen.brightness)
+        if ProcessInfo.processInfo.systemUptime - brightnessSetAt < 0.4 { return }
+        let value = min(max(Float(screen.brightness), 0), 1)
+        connection.screenBrightness = value
         if let applied = appliedBrightness, abs(applied - value) < 0.01 { return }
         appliedBrightness = nil
-        session?.sendBrightness(min(max(value, 0), 1))
+        session?.sendBrightness(value)
+    }
+
+    /// Sends a one-tap macOS shortcut from the iPad Input tab (works without a hardware keyboard).
+    func sendQuickAction(_ action: QuickAction) {
+        guard let session else { return }
+        for usage in action.usages { session.send(.key(usage: usage, down: true)) }
+        for usage in action.usages.reversed() { session.send(.key(usage: usage, down: false)) }
     }
 
     func setAudio(speaker: Bool, microphone: Bool) {
@@ -300,6 +324,16 @@ struct RootView: View {
             .animation(.smooth(duration: 0.35), value: connection.phase)
             .animation(.easeOut(duration: 0.2), value: connection.brightnessHUD?.token)
 
+            if showStatsHUD, connection.phase == .streaming, connection.liveFPS > 0 {
+                StatsHUD(fps: connection.liveFPS,
+                         latencyMs: connection.liveLatencyMs,
+                         codec: connection.streamConfig.map { $0.codec == .hevc ? "HEVC" : "H.264" })
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .padding(.top, 16).padding(.leading, 16)
+                    .transition(.opacity)
+                    .allowsHitTesting(false)
+            }
+
             if let hud = connection.brightnessHUD {
                 BrightnessHUD(value: hud.value)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -319,6 +353,7 @@ struct RootView: View {
         .preferredColorScheme(.dark)
     }
 
+    @AppStorage("showStatsHUD") private var showStatsHUD = false
     /// Where the controls button sits: left or right edge (0 or 1) and height (0...1), remembered.
     @AppStorage("controlsEdgeX") private var controlsX = 1.0
     @AppStorage("controlsEdgeY") private var controlsY = 0.0
@@ -382,18 +417,19 @@ struct RootView: View {
     /// The panel opens beside the button, on its side, and always fits on screen with a margin.
     /// It replaces the system popover, whose glass arrow and bottom edge clipped at the screen edge.
     private func controlsPanel(in space: CGSize, buttonY: CGFloat) -> some View {
-        let width: CGFloat = 400, margin: CGFloat = 16, button = ControlsButton.footprint
-        let height = max(min(700, space.height - 2 * margin), 0)
+        let width: CGFloat = 360, margin: CGFloat = 16, button = ControlsButton.footprint
+        let height = max(min(540, space.height - 2 * margin), 0)
         let onRight = controlsX >= 0.5
         let x = min(max(onRight ? space.width - button - width : button, margin), max(space.width - width - margin, margin))
         let y = min(max(buttonY + button / 2 - height / 2, margin), max(space.height - height - margin, margin))
         let shape = RoundedRectangle(cornerRadius: 24, style: .continuous)
-        return ControlsPanel(app: app, connection: connection)
+        return ControlsPanel(app: app, connection: connection, close: { showControls = false })
             .frame(width: width, height: height)
-            .background(Color(red: 0.05, green: 0.07, blue: 0.12), in: shape)
+            .background(.ultraThinMaterial, in: shape)
+            .background(Color(red: 0.05, green: 0.07, blue: 0.12).opacity(0.65), in: shape)
             .clipShape(shape)
-            .overlay(shape.strokeBorder(.white.opacity(0.08)))
-            .shadow(color: .black.opacity(0.4), radius: 24, y: 8)
+            .overlay(shape.strokeBorder(.white.opacity(0.14)))
+            .shadow(color: .black.opacity(0.45), radius: 24, y: 10)
             .background {
                 // Escape on a hardware keyboard closes the panel.
                 Button("Close") { showControls = false }
@@ -436,24 +472,63 @@ struct VideoSurface: UIViewRepresentable {
 struct ControlsPanel: View {
     let app: AppModel
     let connection: ConnectionModel
+    var close: () -> Void = {}
     /// BUG-035: on = video composited by the GPU (dithered) instead of a
     /// hardware overlay plane, which showed rings in smooth gradients.
     @AppStorage(VideoView.smoothGradientsKey) private var smoothGradients = true
     @AppStorage(VideoView.metalRendererKey) private var metalRenderer = true
+    @AppStorage("showStatsHUD") private var showStatsHUD = false
+    @AppStorage(VideoView.pencilActionKey) private var pencilActionRaw = PencilAction.rightClick.rawValue
 
     var body: some View {
         ControlsContent(
             summary: summary,
+            displaySpace: Binding(
+                get: { connection.displaySpace ?? 0 },
+                set: { connection.displaySpace = $0; app.session?.setDisplaySpace($0) }),
+            qualityPreset: Binding(
+                get: { connection.qualityPreset ?? 0 },
+                set: { connection.qualityPreset = $0; app.session?.setQualityPreset($0) }),
+            brightness: Binding(
+                get: { Double(connection.screenBrightness) },
+                set: { app.setScreenBrightness(Float($0)) }),
+            showStatsHUD: $showStatsHUD,
             speaker: Binding(get: { connection.speakerOn },
                              set: { app.setAudio(speaker: $0, microphone: connection.microphoneOn) }),
             microphone: Binding(get: { connection.microphoneOn }, set: { app.setMicrophone($0) }),
+            macVolume: Binding(
+                get: { Double(connection.macVolume) },
+                set: {
+                    let level = Float($0)
+                    connection.macVolume = level
+                    if level > 0.01 && connection.macMuted { connection.macMuted = false }
+                    app.session?.setMacVolume(level: level, muted: connection.macMuted)
+                }),
+            macMuted: Binding(
+                get: { connection.macMuted },
+                set: {
+                    connection.macMuted = $0
+                    app.session?.setMacVolume(level: connection.macVolume, muted: $0)
+                }),
             smoothGradients: Binding(get: { smoothGradients },
                                      set: { smoothGradients = $0; app.videoView.smoothGradients = $0 }),
             metalRenderer: app.videoView.metalRenderer == nil ? nil
                 : Binding(get: { metalRenderer }, set: { metalRenderer = $0; app.setMetalRenderer($0) }),
+            pencilAction: Binding(
+                get: { PencilAction(rawValue: pencilActionRaw) ?? .rightClick },
+                set: { pencilActionRaw = $0.rawValue; app.videoView.pencilAction = $0 }),
+            quickAction: { action in
+                close()
+                app.sendQuickAction(action)
+            },
+            sleepMac: {
+                close()
+                app.session?.sleepMac()
+            },
             pairedMacs: connection.pairedMacs.map { PairedMacRow(name: $0.name, fingerprint: $0.fingerprint) },
             forgetPaired: { app.session?.forgetPairedMacs() },
             reconnect: { app.reconnect() },
+            close: close,
             device: app.deviceInfo)
     }
 
@@ -465,6 +540,8 @@ struct ControlsPanel: View {
             logicalSize: config.map { "\($0.pointWidth) × \($0.pointHeight)" },
             detail: config.map { "\($0.pixelWidth) × \($0.pixelHeight) px · \($0.refreshHz) Hz · \($0.codec == .hevc ? "HEVC" : "H.264")" },
             framesShown: connection.framesShown,
-            framesDropped: connection.framesDropped)
+            framesDropped: connection.framesDropped,
+            liveFPS: connection.liveFPS,
+            liveLatencyMs: connection.liveLatencyMs)
     }
 }

@@ -345,6 +345,17 @@ final class ShortcutRemapperTests: XCTestCase {
         XCTAssertEqual(r4.key(usage: space, down: true),
                        [.key(usage: control, down: false), .key(usage: command, down: true), .key(usage: space, down: true)])
     }
+
+    func testDisplaySpaceQualityAndStylusMessagesRoundTrip() throws {
+        XCTAssertEqual(try SessionCodec.decodeControl(SessionCodec.encode(.displaySpace(2))), .displaySpace(2))
+        XCTAssertEqual(try SessionCodec.decodeControl(SessionCodec.encode(.qualityPreset(1))), .qualityPreset(1))
+        XCTAssertThrowsError(try SessionCodec.decodeControl(SessionCodec.encode(.displaySpace(5))))
+        XCTAssertThrowsError(try SessionCodec.decodeControl(SessionCodec.encode(.qualityPreset(9))))
+
+        let stylus = InputEvent.stylus(phase: .move, x: 0.25, y: 0.75, pressure: 0.6)
+        XCTAssertEqual(try SessionCodec.decodeInput(SessionCodec.encode(stylus)), stylus)
+        XCTAssertThrowsError(try SessionCodec.decodeInput(SessionCodec.encode(.stylus(phase: .down, x: 0.5, y: 0.5, pressure: 1.5))))
+    }
 }
 
 final class DecodeLimitTests: XCTestCase {
@@ -408,5 +419,15 @@ final class CursorMessageTests: XCTestCase {
         var huge = image
         huge.png = [UInt8](repeating: 0, count: CursorImage.maxPNGBytes + 1)
         XCTAssertThrowsError(try SessionCodec.decodeControl(SessionCodec.encode(.cursorImage(huge))))
+    }
+
+    func testVolumeAndSleepMacMessagesRoundTrip() throws {
+        XCTAssertEqual(try SessionCodec.decodeControl(SessionCodec.encode(.volume(level: 0.6, muted: false))),
+                       .volume(level: 0.6, muted: false))
+        XCTAssertEqual(try SessionCodec.decodeControl(SessionCodec.encode(.volume(level: 0, muted: true))),
+                       .volume(level: 0, muted: true))
+        XCTAssertEqual(try SessionCodec.decodeControl(SessionCodec.encode(.sleepMac)), .sleepMac)
+        XCTAssertThrowsError(try SessionCodec.decodeControl(SessionCodec.encode(.volume(level: 1.5, muted: false))))
+        XCTAssertThrowsError(try SessionCodec.decodeControl(SessionCodec.encode(.volume(level: .nan, muted: false))))
     }
 }

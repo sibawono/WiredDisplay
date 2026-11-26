@@ -146,6 +146,14 @@ public enum ControlMessage: Sendable, Equatable {
     /// pixels wide and high (portrait: taller than wide). The host rebuilds
     /// the display to match.
     case panelSize(width: UInt32, height: UInt32)
+    /// Bidirectional: Display Space (0 = Default/native, 1 = More, 2 = Most).
+    case displaySpace(UInt8)
+    /// Bidirectional: Quality preset (0 = Balanced, 1 = Pro, 2 = Ultra, 3 = High Color).
+    case qualityPreset(UInt8)
+    /// Bidirectional: Mac default output volume (0...1) and mute state.
+    case volume(level: Float, muted: Bool)
+    /// Client -> host: put the Mac to system sleep (confirmed by user on iPad).
+    case sleepMac
 }
 
 public struct CursorImage: Sendable, Equatable {
@@ -249,17 +257,19 @@ public enum InputEvent: Sendable, Equatable {
     /// Two-finger rotation (D-029): degrees since the previous event,
     /// counterclockwise positive (macOS convention).
     case rotate(degrees: Float, phase: ScrollPhase)
+    /// Apple Pencil / stylus with normalized pressure (0...1).
+    case stylus(phase: PointerPhase, x: Float, y: Float, pressure: Float)
 }
 
 // MARK: - Codec
 
 public enum SessionCodec {
     private enum ControlTag: UInt8 {
-        case hello = 1, streamConfig, requestKeyframe, ping, pong, bye, audioRoute, videoActive, authHello, authProof, decodeFailed, brightness, cursor, cursorImage, panelSize
+        case hello = 1, streamConfig, requestKeyframe, ping, pong, bye, audioRoute, videoActive, authHello, authProof, decodeFailed, brightness, cursor, cursorImage, panelSize, displaySpace, qualityPreset, volume, sleepMac
     }
 
     private enum InputTag: UInt8 {
-        case pointer = 1, scroll, releaseAll, key, gestureScroll, magnify, rotate
+        case pointer = 1, scroll, releaseAll, key, gestureScroll, magnify, rotate, stylus
     }
 
     /// Largest scroll delta accepted in one event (points). Bounds what a
@@ -323,6 +333,18 @@ public enum SessionCodec {
             writer.u8(ControlTag.panelSize.rawValue)
             writer.u32(width)
             writer.u32(height)
+        case .displaySpace(let raw):
+            writer.u8(ControlTag.displaySpace.rawValue)
+            writer.u8(raw)
+        case .qualityPreset(let raw):
+            writer.u8(ControlTag.qualityPreset.rawValue)
+            writer.u8(raw)
+        case .volume(let level, let muted):
+            writer.u8(ControlTag.volume.rawValue)
+            writer.f32(level)
+            writer.u8(muted ? 1 : 0)
+        case .sleepMac:
+            writer.u8(ControlTag.sleepMac.rawValue)
         case .cursorImage(let image):
             writer.u8(ControlTag.cursorImage.rawValue)
             writer.f32(image.width)
@@ -415,6 +437,23 @@ public enum SessionCodec {
                 throw WireError.invalidValue("panel \(width)x\(height)")
             }
             message = .panelSize(width: width, height: height)
+        case .displaySpace:
+            let raw = try reader.u8()
+            guard raw <= 2 else { throw WireError.invalidValue("displaySpace \(raw)") }
+            message = .displaySpace(raw)
+        case .qualityPreset:
+            let raw = try reader.u8()
+            guard raw <= 3 else { throw WireError.invalidValue("qualityPreset \(raw)") }
+            message = .qualityPreset(raw)
+        case .volume:
+            let level = try reader.f32()
+            let mutedRaw = try reader.u8()
+            guard level.isFinite, (0...1).contains(level), mutedRaw <= 1 else {
+                throw WireError.invalidValue("volume \(level) muted \(mutedRaw)")
+            }
+            message = .volume(level: level, muted: mutedRaw != 0)
+        case .sleepMac:
+            message = .sleepMac
         case .cursorImage:
             let width = try reader.f32(), height = try reader.f32()
             let hotX = try reader.f32(), hotY = try reader.f32()
@@ -472,6 +511,12 @@ public enum SessionCodec {
             writer.u8(InputTag.rotate.rawValue)
             writer.f32(degrees)
             writer.u8(phase.rawValue)
+        case .stylus(let phase, let x, let y, let pressure):
+            writer.u8(InputTag.stylus.rawValue)
+            writer.u8(phase.rawValue)
+            writer.f32(x)
+            writer.f32(y)
+            writer.f32(pressure)
         }
         return writer.bytes
     }
@@ -531,6 +576,15 @@ public enum SessionCodec {
                 throw WireError.invalidValue("gesture phase \(rawPhase)")
             }
             event = tag == .magnify ? .magnify(delta: value, phase: phase) : .rotate(degrees: value, phase: phase)
+        case .stylus:
+            let rawPhase = try reader.u8()
+            guard let phase = PointerPhase(rawValue: rawPhase) else { throw WireError.invalidValue("stylus phase \(rawPhase)") }
+            let x = try reader.f32(), y = try reader.f32(), pressure = try reader.f32()
+            guard x.isFinite, y.isFinite, pressure.isFinite,
+                  (0...1).contains(x), (0...1).contains(y), (0...1).contains(pressure) else {
+                throw WireError.invalidValue("stylus \(x),\(y),\(pressure)")
+            }
+            event = .stylus(phase: phase, x: x, y: y, pressure: pressure)
         }
         try reader.requireEnd()
         return event

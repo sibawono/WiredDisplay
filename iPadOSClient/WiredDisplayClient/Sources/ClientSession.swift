@@ -25,6 +25,12 @@ final class ConnectionModel {
     var lastError: String?
     var framesShown = 0
     var framesDropped = 0
+    var liveFPS = 0
+    var liveLatencyMs: Double?
+    /// Current Mac Display Space (0 = Default, 1 = More, 2 = Most); nil if unknown.
+    var displaySpace: Int?
+    /// Current Mac Quality preset (0 = Balanced, 1 = Pro, 2 = Ultra, 3 = High Color); nil if unknown.
+    var qualityPreset: Int?
     var speakerOn = false
     var microphoneOn = false
     /// Set while an unknown Mac waits for the user to confirm pairing (D-023).
@@ -33,6 +39,11 @@ final class ConnectionModel {
     /// Brightness indicator (D-033): the value and a token that changes on
     /// every Mac-driven change, so the overlay can hide after a moment.
     var brightnessHUD: (value: Float, token: Int)?
+    /// Live iPad screen brightness (0...1), kept in sync with Mac brightness keys and slider.
+    var screenBrightness: Float = 0.7
+    /// Mac default output volume (0...1) and mute state.
+    var macVolume: Float = 0.7
+    var macMuted = false
 }
 
 /// Client side of a session (iPad). Listens on 127.0.0.1:9100; the Mac dials in
@@ -471,7 +482,13 @@ final class ClientSession: @unchecked Sendable {
                 if let apply = onCursor { DispatchQueue.main.async { MainActor.assumeIsolated { apply(x, y, visible) } } }
             case .cursorImage(let image):
                 if let apply = onCursorImage { DispatchQueue.main.async { MainActor.assumeIsolated { apply(image) } } }
-            case .pong, .requestKeyframe, .audioRoute, .videoActive, .decodeFailed, .panelSize:
+            case .displaySpace(let raw):
+                ui { $0.displaySpace = Int(raw) }
+            case .qualityPreset(let raw):
+                ui { $0.qualityPreset = Int(raw) }
+            case .volume(let level, let muted):
+                ui { $0.macVolume = level; $0.macMuted = muted }
+            case .pong, .requestKeyframe, .audioRoute, .videoActive, .decodeFailed, .panelSize, .sleepMac:
                 break
             case .authHello, .authProof:
                 throw WireError.invalidValue("handshake message after handshake")
@@ -498,6 +515,41 @@ final class ClientSession: @unchecked Sendable {
             }
         case .input, .microphone, .camera:
             throw WireError.invalidValue("unexpected \(frame.header.stream) stream from Mac")
+        }
+    }
+
+    /// Ask the Mac to change its Display Space (0 = Default, 1 = More, 2 = Most).
+    func setDisplaySpace(_ index: Int) {
+        guard (0...2).contains(index) else { return }
+        queue.async { [self] in
+            guard trustedPeer != nil, let connection else { return }
+            send(stream: .control, payload: SessionCodec.encode(.displaySpace(UInt8(index))), on: connection)
+        }
+    }
+
+    /// Ask the Mac to change its Quality preset (0 = Balanced, 1 = Pro, 2 = Ultra, 3 = High Color).
+    func setQualityPreset(_ index: Int) {
+        guard (0...3).contains(index) else { return }
+        queue.async { [self] in
+            guard trustedPeer != nil, let connection else { return }
+            send(stream: .control, payload: SessionCodec.encode(.qualityPreset(UInt8(index))), on: connection)
+        }
+    }
+
+    /// Ask the Mac to set its default output volume (0...1) and mute state.
+    func setMacVolume(level: Float, muted: Bool) {
+        let clamped = min(max(level, 0), 1)
+        queue.async { [self] in
+            guard trustedPeer != nil, let connection else { return }
+            send(stream: .control, payload: SessionCodec.encode(.volume(level: clamped, muted: muted)), on: connection)
+        }
+    }
+
+    /// Ask the Mac to enter system sleep.
+    func sleepMac() {
+        queue.async { [self] in
+            guard trustedPeer != nil, let connection else { return }
+            send(stream: .control, payload: SessionCodec.encode(.sleepMac), on: connection)
         }
     }
 
@@ -587,13 +639,15 @@ final class ClientSession: @unchecked Sendable {
                                 value: NSNumber(value: transit), attachmentMode: kCMAttachmentMode_ShouldNotPropagate)
             }
             renderer.enqueue(sample)
-            countFrame(shown: true)
             if let offset = clockOffset {
                 // Mac sent it -> iPad hands it to the display layer (transport,
                 // decryption, parsing); excludes encode and the final vsync.
                 let local = Int64(bitPattern: clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) &+ offset
-                transitSamples.append(Double(local &- Int64(bitPattern: timestamp)) / 1_000_000)
+                let ms = Double(local &- Int64(bitPattern: timestamp)) / 1_000_000
+                transitSamples.append(ms)
+                hudTransitSamples.append(ms)
             }
+            countFrame(shown: true)
             if let report = presentMeter.tick(bytes: wireBytes) {
                 var line = "video presented: \(report)"
                 if !transitSamples.isEmpty {
@@ -609,18 +663,29 @@ final class ClientSession: @unchecked Sendable {
         }
     }
 
-    /// Frame counters for the Controls panel, published at most once a
-    /// second instead of one main-actor hop per video frame (audit B-11).
-    private var framesShown = 0, framesDropped = 0
+    /// Frame counters & live HUD stats, published at most once a second
+    /// instead of one main-actor hop per video frame (audit B-11).
+    private var framesShown = 0, framesDropped = 0, shownInWindow = 0
+    private var hudTransitSamples: [Double] = []
     private var countersPublished: TimeInterval = 0
 
     private func countFrame(shown: Bool) {
-        if shown { framesShown += 1 } else { framesDropped += 1 }
+        if shown { framesShown += 1; shownInWindow += 1 } else { framesDropped += 1 }
         let now = ProcessInfo.processInfo.systemUptime
-        guard now - countersPublished >= 1 else { return }
+        let elapsed = now - countersPublished
+        guard elapsed >= 1 else { return }
+        let fps = countersPublished > 0 ? Int((Double(shownInWindow) / elapsed).rounded()) : shownInWindow
+        let latency: Double? = hudTransitSamples.isEmpty ? nil : hudTransitSamples.sorted()[hudTransitSamples.count / 2]
         countersPublished = now
+        shownInWindow = 0
+        hudTransitSamples.removeAll(keepingCapacity: true)
         let (shownTotal, droppedTotal) = (framesShown, framesDropped)
-        ui { $0.framesShown = shownTotal; $0.framesDropped = droppedTotal }
+        ui {
+            $0.framesShown = shownTotal
+            $0.framesDropped = droppedTotal
+            $0.liveFPS = fps
+            if let latency, latency >= 0, latency < 500 { $0.liveLatencyMs = latency }
+        }
     }
 
     private func requestKeyframe(on current: NWConnection) {
