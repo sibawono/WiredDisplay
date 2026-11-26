@@ -140,11 +140,15 @@ final class AppModel {
     /// The last value the Mac set, so applying it is not reported back as a
     /// user change (that echo made quick key presses jump back).
     private var appliedBrightness: Float?
+    /// Suppresses lagged UIScreen.brightnessDidChangeNotification feedback while
+    /// our own slider drag or Mac brightness update is ramping the backlight.
+    private var brightnessSetAt: TimeInterval = 0
     private var hudToken = 0
 
     private func applyBrightness(_ value: Float) {
         guard let screen else { return }
         appliedBrightness = value
+        brightnessSetAt = ProcessInfo.processInfo.systemUptime
         screen.brightness = CGFloat(value)
         connection.screenBrightness = value
         hudToken += 1
@@ -160,6 +164,7 @@ final class AppModel {
     func setScreenBrightness(_ value: Float) {
         let clamped = min(max(value, 0), 1)
         appliedBrightness = clamped
+        brightnessSetAt = ProcessInfo.processInfo.systemUptime
         screen?.brightness = CGFloat(clamped)
         connection.screenBrightness = clamped
         session?.sendBrightness(clamped)
@@ -167,6 +172,7 @@ final class AppModel {
 
     private func reportBrightness() {
         guard let screen else { return }
+        if ProcessInfo.processInfo.systemUptime - brightnessSetAt < 0.4 { return }
         let value = min(max(Float(screen.brightness), 0), 1)
         connection.screenBrightness = value
         if let applied = appliedBrightness, abs(applied - value) < 0.01 { return }

@@ -546,7 +546,7 @@ struct ControlsContent: View {
                     Image(systemName: "sun.min.fill")
                         .font(.caption)
                         .foregroundStyle(Brand.secondaryText)
-                    Slider(value: $brightness, in: 0.05...1)
+                    Slider(value: $brightness, in: 0...1)
                         .tint(Brand.blue)
                     Image(systemName: "sun.max.fill")
                         .font(.caption)
