@@ -4,6 +4,7 @@ import Foundation
 import IOKit.pwr_mgt
 import os
 import WDHostCore
+import WDMacAudio
 import WDProtocol
 import WDSession
 import WDTransport
