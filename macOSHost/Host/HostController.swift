@@ -119,6 +119,17 @@ final class HostController: @unchecked Sendable {
         UserDefaults.standard.string(forKey: transportModeKey).flatMap(TransportMode.init(rawValue:)) ?? .usbOnly
     }
 
+    /// USB serials of Android devices the user explicitly opted in for USB-C AOA mode.
+    static let aoaApprovedSerialsKey = "aoaApprovedSerials"
+    static func aoaApprovedSerials() -> Set<String> {
+        Set(UserDefaults.standard.stringArray(forKey: aoaApprovedSerialsKey) ?? [])
+    }
+    static func setAoaApproved(_ serial: String, approved: Bool) {
+        var current = aoaApprovedSerials()
+        if approved { current.insert(serial) } else { current.remove(serial) }
+        UserDefaults.standard.set(Array(current).sorted(), forKey: aoaApprovedSerialsKey)
+    }
+
     private let options: Options
     private let transportModeLock: OSAllocatedUnfairLock<TransportMode>
     var transportMode: TransportMode { transportModeLock.withLock { $0 } }
@@ -742,6 +753,7 @@ final class HostController: @unchecked Sendable {
     private func runLoop() {
         var backoff: TimeInterval = 1
         var bonjour: BonjourBrowser?
+        var aoaSwitchAttempted: [UInt32: Date] = [:]
         defer { bonjour?.stop() }
 
         while !isStopping {
@@ -761,10 +773,15 @@ final class HostController: @unchecked Sendable {
             let started = Date()
             var sessionRan = false
 
-            // Always prefer USB-C whenever allowed and available.
+            // Always prefer USB-C whenever allowed and available (Apple usbmuxd, Android AOA, or ADB).
             if mode.allowsUSB {
-                let wired = pollWiredDevicesOnce()
+                let isAdbBound = deviceSerial.flatMap(AdbClient.stripPrefix) != nil
+                let isAoaBound = deviceSerial.flatMap(AoaClient.stripPrefix) != nil
+                let wired = (isAdbBound || isAoaBound) ? [] : pollWiredDevicesOnce()
                 let mine = deviceSerial.map { serial in wired.filter { $0.serialNumber == serial } } ?? wired
+                let aoaDevices = isAdbBound ? [] : pollAoaDevicesOnce()
+                let adbDevices = isAoaBound ? [] : pollAdbDevicesOnce()
+
                 if !mine.isEmpty {
                     let devices = UsbmuxDevice.preferring(serial: lastGoodSerial, in: mine)
                     onState(.connecting)
@@ -782,16 +799,66 @@ final class HostController: @unchecked Sendable {
                         }
                         break
                     }
-                    if !sessionRan && mode == .usbOnly {
-                        let which = devices.count == 1 ? "the iPad" : "any of the \(devices.count) cabled devices"
-                        noteWait("nothing listens on port \(SessionConstants.clientPort) on \(which) (WiredDisplay app not open or not in front?)")
-                        onState(.waitingForDevice)
-                        Thread.sleep(forTimeInterval: 1)
-                        continue
+                }
+                if !sessionRan && !aoaDevices.isEmpty {
+                    let activeLocations = Set(aoaDevices.map(\.locationID))
+                    aoaSwitchAttempted = aoaSwitchAttempted.filter { activeLocations.contains($0.key) }
+                    onState(.connecting)
+                    for device in aoaDevices where !isStopping && !systemAsleep.withLock({ $0 }) {
+                        if !device.inAccessoryMode {
+                            // Opt-in only: never switch an Android phone out of MTP/charging unless user approved it.
+                            guard Self.aoaApprovedSerials().contains(device.serial) else { continue }
+                            if let last = aoaSwitchAttempted[device.locationID], Date().timeIntervalSince(last) < 30 {
+                                continue
+                            }
+                            aoaSwitchAttempted[device.locationID] = Date()
+                            do {
+                                try AoaClient.switchToAccessory(device)
+                                Log.info("AOA: switched approved Android device \(device.serial) to accessory mode; waiting for re-enumeration")
+                                Thread.sleep(forTimeInterval: 1.5)
+                            } catch {
+                                Log.warn("AOA: switch failed for \(device.serial): \(error)")
+                            }
+                            continue
+                        }
+                        do {
+                            try runAoaSession(device)
+                            sessionRan = true
+                            onState(.backingOff("Android USB AOA session ended"))
+                        } catch {
+                            sessionRan = true
+                            Log.warn("Android USB AOA session ended with error: \(error)")
+                            onState(.backingOff("\(error)"))
+                        }
+                        break
                     }
-                } else if mode == .usbOnly {
-                    if isStopping { break }
-                    noteWait("waiting for device \(deviceSerial ?? "iPad") on USB")
+                }
+                if !sessionRan && !adbDevices.isEmpty {
+                    onState(.connecting)
+                    for device in adbDevices where !isStopping && !systemAsleep.withLock({ $0 }) {
+                        do {
+                            try runAdbSession(device)
+                            sessionRan = true
+                            onState(.backingOff("Android USB session ended"))
+                        } catch SessionError.notListening {
+                            continue
+                        } catch {
+                            sessionRan = true
+                            Log.warn("Android USB session ended with error: \(error)")
+                            onState(.backingOff("\(error)"))
+                        }
+                        break
+                    }
+                }
+                if !sessionRan && mode == .usbOnly {
+                    if !mine.isEmpty || !aoaDevices.isEmpty || !adbDevices.isEmpty {
+                        let total = mine.count + aoaDevices.count + adbDevices.count
+                        let which = total == 1 ? "the device" : "any of the \(total) cabled devices"
+                        noteWait("nothing listens on port \(SessionConstants.clientPort) on \(which) (WiredDisplay app not open or not in front?)")
+                    } else {
+                        if isStopping { break }
+                        noteWait("waiting for device \(deviceSerial ?? "iPad or Android") on USB")
+                    }
                     onState(.waitingForDevice)
                     Thread.sleep(forTimeInterval: 1)
                     continue
@@ -840,11 +907,39 @@ final class HostController: @unchecked Sendable {
         return wired
     }
 
-    /// Returns true only when a wired USB-C device actually has WiredDisplay listening on clientPort.
+    private func pollAoaDevicesOnce() -> [AoaDevice] {
+        let all = AoaClient.listDevices()
+        if let serial = deviceSerial {
+            guard let rawSerial = AoaClient.stripPrefix(serial) else { return [] }
+            return all.filter { $0.serial == rawSerial }
+        }
+        return all
+    }
+
+    private func pollAdbDevicesOnce() -> [AdbDevice] {
+        guard let devices = try? AdbClient.listDevices() else { return [] }
+        let wired = AdbDevice.wiredOnly(devices)
+        if let serial = deviceSerial {
+            guard let rawSerial = AdbClient.stripPrefix(serial) else { return [] }
+            return wired.filter { $0.serial == rawSerial }
+        }
+        return wired
+    }
+
+    /// Returns true only when a wired USB-C device (Apple or Android) has WiredDisplay listening on clientPort.
     private func hasListeningWiredDevice() -> Bool {
         for device in pollWiredDevicesOnce() {
             guard let probe = try? UsbmuxConnection() else { continue }
             if (try? probe.connect(to: device, port: SessionConstants.clientPort)) != nil {
+                return true
+            }
+        }
+        for device in pollAoaDevicesOnce() where device.inAccessoryMode {
+            return true
+        }
+        for device in pollAdbDevicesOnce() {
+            if let fd = try? AdbClient.connect(to: device.serial, clientPort: SessionConstants.clientPort) {
+                Darwin.close(fd)
                 return true
             }
         }
@@ -960,6 +1055,101 @@ final class HostController: @unchecked Sendable {
             // At most 4 queued video frames (was 6: 100 ms at 60 Hz) when the
             // link backs up; beyond that the queue restarts at a keyframe, so a
             // stall costs less latency (audit B-6). Normally 0-1 are queued.
+            descriptor: descriptor, sessionID: generator.next(), maxVideoFrames: 4, channel: channel,
+            onVerified: { [weak self] peer, origin in
+                guard let self else { return }
+                self.queue.async {
+                    guard self.socket === origin else { return }
+                    self.verifiedPeer = peer
+                    verified.signal()
+                }
+            },
+            onFrame: { [weak self] frame, origin in
+                guard let self else { return }
+                self.queue.async { self.handle(frame, from: origin) }
+            },
+            onClose: { [weak self] reason in
+                endReason.withLock { $0 = reason }
+                ended.signal()
+                verified.signal()
+                self?.helloArrived.signal()
+            })
+        try runTransportSession(socket: socket, ended: ended, endReason: endReason, verified: verified,
+                                identityResult: identityResult, identityRead: identityRead)
+    }
+
+    private func runAoaSession(_ device: AoaDevice) throws {
+        let descriptor = try AoaClient.openBridge(device)
+        Log.info("connected to Android device \(device.serial) over USB-C (AOA)")
+        sessionDeviceSerial = device.fleetSerial
+        let identityResult = OSAllocatedUnfairLock<DeviceIdentity?>(
+            initialState: DeviceIdentity(name: nil, productType: device.product, deviceClass: "Android")
+        )
+        let identityRead = DispatchSemaphore(value: 0)
+        identityRead.signal()
+
+        var generator = SystemRandomNumberGenerator()
+        let ended = DispatchSemaphore(value: 0)
+        let endReason = OSAllocatedUnfairLock(initialState: "")
+        let verified = DispatchSemaphore(value: 0)
+        let channel: SecureChannel
+        do {
+            channel = SecureChannel(role: .host, identity: try trust.identity())
+        } catch {
+            Darwin.close(descriptor)
+            throw error
+        }
+        let socket = FramedSocket(
+            descriptor: descriptor, sessionID: generator.next(), maxVideoFrames: 4, channel: channel,
+            onVerified: { [weak self] peer, origin in
+                guard let self else { return }
+                self.queue.async {
+                    guard self.socket === origin else { return }
+                    self.verifiedPeer = peer
+                    verified.signal()
+                }
+            },
+            onFrame: { [weak self] frame, origin in
+                guard let self else { return }
+                self.queue.async { self.handle(frame, from: origin) }
+            },
+            onClose: { [weak self] reason in
+                endReason.withLock { $0 = reason }
+                ended.signal()
+                verified.signal()
+                self?.helloArrived.signal()
+            })
+        try runTransportSession(socket: socket, ended: ended, endReason: endReason, verified: verified,
+                                identityResult: identityResult, identityRead: identityRead)
+    }
+
+    private func runAdbSession(_ device: AdbDevice) throws {
+        let descriptor: Int32
+        do {
+            descriptor = try AdbClient.connect(to: device.serial, clientPort: SessionConstants.clientPort)
+        } catch AdbClient.ClientError.failed {
+            throw SessionError.notListening
+        }
+        Log.info("connected to Android device \(device.serial) over USB (ADB), port \(SessionConstants.clientPort)")
+        sessionDeviceSerial = device.fleetSerial
+        let identityResult = OSAllocatedUnfairLock<DeviceIdentity?>(
+            initialState: DeviceIdentity(name: nil, productType: device.model, deviceClass: "Android")
+        )
+        let identityRead = DispatchSemaphore(value: 0)
+        identityRead.signal()
+
+        var generator = SystemRandomNumberGenerator()
+        let ended = DispatchSemaphore(value: 0)
+        let endReason = OSAllocatedUnfairLock(initialState: "")
+        let verified = DispatchSemaphore(value: 0)
+        let channel: SecureChannel
+        do {
+            channel = SecureChannel(role: .host, identity: try trust.identity())
+        } catch {
+            Darwin.close(descriptor)
+            throw error
+        }
+        let socket = FramedSocket(
             descriptor: descriptor, sessionID: generator.next(), maxVideoFrames: 4, channel: channel,
             onVerified: { [weak self] peer, origin in
                 guard let self else { return }
@@ -1135,6 +1325,15 @@ final class HostController: @unchecked Sendable {
             throw SessionError.incompatible("protocol \(hello.protocolVersion), expected \(SessionConstants.protocolVersion)")
         }
         guard hello.codecs.contains(VideoCodec.h264) else { throw SessionError.incompatible("client lacks H.264") }
+        // Apply client-declared decode limits upfront (e.g. Android without 4:4:4 or 10-bit).
+        var declaredLimits: DecodeLimits = []
+        if hello.codecs.contains(.no444) { declaredLimits.insert(.no444) }
+        if hello.codecs.contains(.no10Bit) { declaredLimits.insert(.no10Bit) }
+        let immutableLimits = declaredLimits
+        if !immutableLimits.isEmpty {
+            peerLimits.withLock { $0.limits.formUnion(immutableLimits) }
+            Log.info("client declared decode limits: \(immutableLimits.summary)")
+        }
         // The iPad app can only send the generic "iPad" (iPadOS 16+), so the
         // name and model come from the device's lockdownd over the same USB.
         _ = identityRead.wait(timeout: .now() + 1)

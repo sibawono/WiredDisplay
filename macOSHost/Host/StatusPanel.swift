@@ -18,6 +18,14 @@ struct PanelSnapshot {
         var detail: String { [model, "Key \(key)"].compactMap { $0 }.joined(separator: " · ") }
     }
 
+    struct AndroidUSBDevice: Identifiable, Equatable {
+        var id: String { serial }
+        var serial: String
+        var name: String
+        var inAccessoryMode: Bool
+        var approved: Bool
+    }
+
     var stateText = "Waiting for the iPad on USB"
     var stateColor: Color = .orange
     var connectedFor: String?
@@ -50,6 +58,7 @@ struct PanelSnapshot {
     var keepDisplayAwake = true
     var keepMacAwake = false
     var transportMode: TransportMode = .usbOnly
+    var androidUSBDevices: [AndroidUSBDevice] = []
     var loginNeedsApproval = false
     var version = "0.0"
 }
@@ -65,6 +74,7 @@ struct PanelActions {
     var setKeepDisplayAwake: (Bool) -> Void = { _ in }
     var setKeepMacAwake: (Bool) -> Void = { _ in }
     var setTransportMode: (TransportMode) -> Void = { _ in }
+    var setAndroidAoaApproved: (String, Bool) -> Void = { _, _ in }
     var setLocalCursor: (Bool) -> Void = { _ in }
     var setAutoSwitchMicrophone: (Bool) -> Void = { _ in }
     var setBothSpeakers: (Bool) -> Void = { _ in }
@@ -460,6 +470,41 @@ struct StatusPanelView: View {
                 Text(transportDetail(s.transportMode))
                     .font(.system(size: 11)).foregroundStyle(Color.caption)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+            if !s.androidUSBDevices.isEmpty {
+                Card {
+                    Text("Android USB-C Devices").font(.system(size: 11, weight: .semibold))
+                    ForEach(s.androidUSBDevices) { device in
+                        HStack(spacing: 8) {
+                            Image(systemName: "apps.iphone")
+                                .font(.system(size: 13))
+                                .foregroundStyle(device.inAccessoryMode ? Color.green : Color.caption)
+                                .frame(width: 18)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(device.name).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                                Text(device.inAccessoryMode ? "Accessory mode" : (device.approved ? "Switching to accessory…" : "File transfer / charging"))
+                                    .font(.system(size: 10.5)).foregroundStyle(Color.caption)
+                            }
+                            Spacer(minLength: 4)
+                            if device.approved {
+                                Button("Remove") {
+                                    model.actions.setAndroidAoaApproved(device.serial, false)
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                            } else {
+                                Button("Connect") {
+                                    model.actions.setAndroidAoaApproved(device.serial, true)
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.small)
+                            }
+                        }
+                    }
+                    Text("Only approved Android devices are switched to USB accessory mode; others stay in file-transfer or charging mode.")
+                        .font(.system(size: 10.5)).foregroundStyle(Color.caption)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             Card {
                 Text("Permissions").font(.system(size: 11, weight: .semibold))

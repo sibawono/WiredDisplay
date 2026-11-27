@@ -21,7 +21,8 @@ let package = Package(
         .target(name: "WDVideo", path: "Shared/Video"),
         .target(name: "WDUsbmux", path: "Shared/Usbmux"),
         .target(name: "WDGeometry", path: "Shared/Geometry"),
-        .target(name: "WDTransport", dependencies: ["WDProtocol", "WDSession"], path: "Shared/Transport"),
+        .target(name: "CAoaUSB", path: "Shared/CAoaUSB", linkerSettings: [.linkedFramework("IOKit"), .linkedFramework("CoreFoundation")]),
+        .target(name: "WDTransport", dependencies: ["WDProtocol", "WDSession", "CAoaUSB"], path: "Shared/Transport"),
         // macOS CoreAudio helpers for the host and the audio probe.
         .target(name: "WDMacAudio", dependencies: ["WDSession"], path: "Shared/MacAudio"),
         // The host's pure decisions (power gating, display sizes, capture size), unit-tested.

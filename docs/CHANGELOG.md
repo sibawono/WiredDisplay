@@ -1317,3 +1317,20 @@ During scrolling, sampled medians were 0.05 ms capture-delivery-to-conversion, 4
 
 
 
+
+## CHANGE ID: P1-082 — Android client (1:1 with iPad) and macOS Host USB-C AOA / ADB compatibility
+
+**OBJECTIVE:** Add a native Kotlin + Jetpack Compose Android client (`minSdk 26`, `targetSdk 36`) matching the iPad v0.5.4 feature set and studio-dark UI, plus macOS host USB-C AOA (plug-and-play via IOKit with per-device opt-in), ADB fallback, and backward-compatible v6 `CodecSet` decode capability flags (`no444`, `no10Bit`).
+
+**FILES CHANGED:**
+- `Package.swift`, `Shared/CAoaUSB/{include/WDAoaUSB.h,WDAoaUSB.c}`, `Shared/Transport/{AoaClient.swift,AdbClient.swift}`, `Shared/Session/Messages.swift`: IOKit USB AOA bridge + `SetConfiguration` handling, ADB loopback client, and `CodecSet.no444`/`no10Bit` flags.
+- `macOSHost/Host/{HostFleet.swift,HostController.swift,StatusPanel.swift,main.swift}`: per-device opt-in Android USB-C AOA approval (`aoaApprovedSerials`), menu bar General tab Android USB-C Devices card, AOA switch cooldown, and upfront `DecodeLimits` from `Hello.codecs`.
+- `scripts/build-dmg.sh`: updated `README.txt` and added Indonesian `PANDUAN-INSTALASI.txt` covering Mac + Android/iPad.
+- `Tests/Unit/WDTransportTests/AdbClientTests.swift`: unit tests for ADB framing, device filtering, and `CodecSet` flags.
+- `AndroidClient/`: complete Kotlin + Compose Android app (protocol v6 + `SecureChannel` Ed25519/X25519/HKDF-SHA256/AES-256-GCM + Android Keystore `TrustStore`, USB-C AOA + ADB + `NsdManager` Wi-Fi with `MulticastLock`, async `MediaCodec` direct-feed to `SurfaceView` with `VideoCapabilities` probing and 3-tier fallback, `AudioJitterBuffer` + low-latency `AudioTrack`/`AudioRecord` + `BackgroundAudioService`, touch/stylus/mouse/keyboard input, 1:1 studio-dark Compose UI, and `ProtocolVectorTests` verified against `Tests/Vectors/protocol-v6.json`).
+
+**VERIFIED:**
+- `swift build --product WiredDisplayHost`: 0 errors.
+- `swift test`: all Swift test suites passed (0 failures).
+- `./gradlew testDebugUnitTest assembleDebug`: 0 Kotlin warnings, 7/7 `ProtocolVectorTests` passed against `Tests/Vectors/protocol-v6.json`.
+- Two-pass adversarial audit resolved 10 bugs across Android 14+ FGS type, USB AOA permission/detach, `MediaCodec` Surface producer & `HandlerThread` lifecycle, `MulticastLock`, AOA `SetConfiguration` & cooldown, and synchronous `wd-recv` backpressure.

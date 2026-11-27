@@ -204,6 +204,7 @@ final class StatusMenu: NSObject {
             waiting.keepDisplayAwake = HostController.keepDisplayAwake
             waiting.keepMacAwake = HostController.keepMacAwake
             waiting.transportMode = opts?.transportMode ?? HostController.savedTransportMode
+            waiting.androidUSBDevices = Self.androidUSBDevicesSnapshot()
             waiting.autoSwitchAudio = fleet?.audioRouter.isEnabled ?? true
             waiting.autoSwitchMicrophone = fleet?.audioRouter.usesHeadsetMicrophone ?? true
             waiting.bothSpeakers = HostController.bothSpeakers
@@ -266,9 +267,22 @@ final class StatusMenu: NSObject {
         s.keepDisplayAwake = HostController.keepDisplayAwake
         s.keepMacAwake = HostController.keepMacAwake
         s.transportMode = controller.transportMode
+        s.androidUSBDevices = Self.androidUSBDevicesSnapshot()
         s.loginNeedsApproval = LoginItem.needsApproval
         s.version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
         return s
+    }
+
+    private static func androidUSBDevicesSnapshot() -> [PanelSnapshot.AndroidUSBDevice] {
+        let approved = HostController.aoaApprovedSerials()
+        return AoaClient.listDevices().map { dev in
+            PanelSnapshot.AndroidUSBDevice(
+                serial: dev.serial,
+                name: dev.product ?? "Android Device",
+                inAccessoryMode: dev.inAccessoryMode,
+                approved: approved.contains(dev.serial)
+            )
+        }
     }
 
     private func makeActions(_ fleet: HostFleet) -> PanelActions {
@@ -298,6 +312,10 @@ final class StatusMenu: NSObject {
         a.setKeepMacAwake = { fleet.setKeepAwake(mac: $0) }
         a.setTransportMode = { [weak self] mode in
             fleet.setTransportMode(mode)
+            self?.refresh()
+        }
+        a.setAndroidAoaApproved = { [weak self] serial, approved in
+            fleet.setAndroidAoaApproved(serial: serial, approved: approved)
             self?.refresh()
         }
         a.setLocalCursor = { fleet.setLocalCursor($0) }

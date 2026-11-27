@@ -32,6 +32,10 @@ public struct CodecSet: OptionSet, Sendable, Hashable {
     public init(rawValue: UInt8) { self.rawValue = rawValue }
     public static let h264 = CodecSet(rawValue: 1 << 0)
     public static let hevc = CodecSet(rawValue: 1 << 1)
+    /// Client cannot decode HEVC 4:4:4; host skips 4:4:4 without waiting for failures.
+    public static let no444 = CodecSet(rawValue: 1 << 2)
+    /// Client cannot decode 10-bit HEVC (Main10); host uses 8-bit 4:2:0.
+    public static let no10Bit = CodecSet(rawValue: 1 << 3)
 
     public func contains(_ codec: VideoCodec) -> Bool {
         // Explicit type: a bare `.h264` resolves to VideoCodec and recursed forever.

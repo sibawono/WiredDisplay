@@ -55,45 +55,58 @@ final class HostFleet: @unchecked Sendable {
         for controller in controllers { controller.stop() }
     }
 
-    /// Every 2 s: add a controller for each new cabled device, and remove idle
-    /// controllers whose USB device has been absent for at least 10 s.
+    /// Every 2 s: add a controller for each new cabled device (Apple usbmuxd or Android ADB),
+    /// and remove idle controllers whose USB device has been absent for at least 10 s.
     private func watchDevices() {
         var lastSeen: [String: TimeInterval] = [:]
         while !stopping.withLock({ $0 }) {
             let now = ProcessInfo.processInfo.systemUptime
+            var discoveredSerials: [String] = []
             if let devices = try? UsbmuxConnection().listDevices() {
-                let wired = UsbmuxDevice.wiredOnly(devices)
-                let present = Set(wired.map(\.serialNumber))
-                for serial in present { lastSeen[serial] = now }
-                let known = Set(controllers.compactMap(\.deviceSerial))
-                let unbound = controllers.first { $0.deviceSerial == nil }
-                for device in wired where !known.contains(device.serialNumber) {
-                    if let unbound {
-                        switch state(of: unbound) {
-                        case .waitingForDevice, .backingOff, .stopped:
-                            remove(unbound)
-                        case .connecting, .streaming, .paused, .audioOnly, .pairing:
-                            // Unbound controller already owns the active session; avoid colliding dials.
-                            continue
-                        }
-                    }
-                    add(serial: device.serialNumber)
-                }
-                if options.transportMode.allowsWiFi && controllers.isEmpty {
-                    add(serial: nil)
-                }
-                let stale = controllers.filter { controller in
-                    guard let serial = controller.deviceSerial, !present.contains(serial) else { return false }
-                    guard now - (lastSeen[serial] ?? 0) >= 10 else { return false }
-                    switch state(of: controller) {
-                    case .waitingForDevice, .backingOff, .stopped: return true
-                    case .connecting, .streaming, .paused, .audioOnly, .pairing: return false
+                discoveredSerials.append(contentsOf: UsbmuxDevice.wiredOnly(devices).map(\.serialNumber))
+            }
+            let aoaDevices = AoaClient.listDevices()
+            let approvedAoa = HostController.aoaApprovedSerials()
+            for dev in aoaDevices where dev.inAccessoryMode || approvedAoa.contains(dev.serial) {
+                discoveredSerials.append(dev.fleetSerial)
+            }
+            if let adbDevices = try? AdbClient.listDevices() {
+                for dev in AdbDevice.wiredOnly(adbDevices) {
+                    if !aoaDevices.contains(where: { $0.inAccessoryMode && $0.serial == dev.serial }) {
+                        discoveredSerials.append(dev.fleetSerial)
                     }
                 }
-                for controller in stale {
-                    if let serial = controller.deviceSerial { lastSeen.removeValue(forKey: serial) }
-                    remove(controller)
+            }
+            let present = Set(discoveredSerials)
+            for serial in present { lastSeen[serial] = now }
+            let known = Set(controllers.compactMap(\.deviceSerial))
+            let unbound = controllers.first { $0.deviceSerial == nil }
+            for serial in discoveredSerials where !known.contains(serial) {
+                if let unbound {
+                    switch state(of: unbound) {
+                    case .waitingForDevice, .backingOff, .stopped:
+                        remove(unbound)
+                    case .connecting, .streaming, .paused, .audioOnly, .pairing:
+                        // Unbound controller already owns the active session; avoid colliding dials.
+                        continue
+                    }
                 }
+                add(serial: serial)
+            }
+            if options.transportMode.allowsWiFi && controllers.isEmpty {
+                add(serial: nil)
+            }
+            let stale = controllers.filter { controller in
+                guard let serial = controller.deviceSerial, !present.contains(serial) else { return false }
+                guard now - (lastSeen[serial] ?? 0) >= 10 else { return false }
+                switch state(of: controller) {
+                case .waitingForDevice, .backingOff, .stopped: return true
+                case .connecting, .streaming, .paused, .audioOnly, .pairing: return false
+                }
+            }
+            for controller in stale {
+                if let serial = controller.deviceSerial { lastSeen.removeValue(forKey: serial) }
+                remove(controller)
             }
             Thread.sleep(forTimeInterval: 2)
         }
@@ -193,5 +206,17 @@ final class HostFleet: @unchecked Sendable {
         let clamped = min(max(balance, 0), HostController.maxBothSpeakersBalance)
         UserDefaults.standard.set(clamped, forKey: HostController.bothSpeakersBalanceKey)
         controllers.forEach { $0.updateBothSpeakers() }
+    }
+
+    /// Opt-in or opt-out a specific USB-C Android device for AOA accessory mode.
+    func setAndroidAoaApproved(serial: String, approved: Bool) {
+        HostController.setAoaApproved(serial, approved: approved)
+        if approved {
+            let fleetSerial = "\(AoaClient.serialPrefix)\(serial)"
+            if !controllers.contains(where: { $0.deviceSerial == fleetSerial }) {
+                add(serial: fleetSerial)
+            }
+        }
+        changed()
     }
 }
