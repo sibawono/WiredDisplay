@@ -10,8 +10,8 @@ public final class NWFramedConnection: FramedTransport, @unchecked Sendable {
     private let connection: NWConnection
     private let ioQueue: DispatchQueue
     private let lock = NSLock()
-    private var scheduler: SendScheduler
-    private var framer: SessionFramer
+    private var scheduler: PendingSendScheduler
+    private var framer: SessionFramer // owned exclusively by ioQueue
     private var parser = FrameParser()
     private var validator: SequenceValidator?
     private var closed = false
@@ -19,6 +19,7 @@ public final class NWFramedConnection: FramedTransport, @unchecked Sendable {
     private var isReady = false
     private var sending = false
     private var dialTimer: DispatchSourceTimer?
+    private var writeTimer: DispatchSourceTimer?
 
     private let channel: SecureChannel?
     private let onVerified: @Sendable (SecureChannel.Peer, NWFramedConnection) -> Void
@@ -31,6 +32,11 @@ public final class NWFramedConnection: FramedTransport, @unchecked Sendable {
         tcp.noDelay = true
         // TCP Fast Open causes .preparing hangs on hotspots and middleboxes.
         tcp.enableFastOpen = false
+        tcp.enableKeepalive = true
+        tcp.keepaliveIdle = 2
+        tcp.keepaliveInterval = 2
+        tcp.keepaliveCount = 3
+        tcp.connectionTimeout = 5
         let params = NWParameters(tls: nil, tcp: tcp)
         params.allowLocalEndpointReuse = true
         // Bypass local proxy apps (e.g. Clash/Surge) that hijack LAN Bonjour connections.
@@ -57,7 +63,7 @@ public final class NWFramedConnection: FramedTransport, @unchecked Sendable {
                 onClose: @escaping @Sendable (String) -> Void) {
         self.connection = connection
         self.ioQueue = DispatchQueue(label: "wireddisplay.nw.transport", qos: .userInteractive)
-        self.scheduler = SendScheduler(maxVideoFrames: maxVideoFrames)
+        self.scheduler = PendingSendScheduler(maxVideoFrames: maxVideoFrames)
         self.framer = SessionFramer(sessionID: sessionID, channel: channel,
                                     clock: { clock_gettime_nsec_np(CLOCK_UPTIME_RAW) })
         self.channel = channel
@@ -69,6 +75,8 @@ public final class NWFramedConnection: FramedTransport, @unchecked Sendable {
 
     public var isClosed: Bool { lock.withLock { closed } }
     public var droppedVideoFrames: Int { lock.withLock { scheduler.stats.videoDropped } }
+    public var congestionDroppedVideoFrames: Int { lock.withLock { scheduler.stats.videoCongestionDropped } }
+    public var queuedVideoFrames: Int { lock.withLock { scheduler.queuedVideoFrames } }
 
     public func start() {
         let timer = DispatchSource.makeTimerSource(queue: ioQueue)
@@ -86,8 +94,8 @@ public final class NWFramedConnection: FramedTransport, @unchecked Sendable {
             started = true
             dialTimer = timer
             // Queue authHello first so it always takes seq 0 before any application frame.
-            if let channel, let wire = try? framer.frame(.control, payload: channel.authHelloPayload) {
-                scheduler.enqueue(urgent: wire, stream: .control)
+            if let channel {
+                scheduler.enqueue(urgent: PendingFrame(stream: .control, payload: channel.authHelloPayload))
             }
             return true
         }
@@ -114,8 +122,9 @@ public final class NWFramedConnection: FramedTransport, @unchecked Sendable {
             case .failed(let error):
                 self.close("NWConnection failed: \(error)")
             case .waiting(let error):
-                if case .posix(let code) = error, code == .ECONNREFUSED {
-                    self.close("peer refused connection")
+                if case .posix(let code) = error,
+                   code == .ECONNREFUSED || code == .EHOSTUNREACH || code == .ENETUNREACH {
+                    self.close("peer unreachable (\(code))")
                 }
             case .cancelled:
                 self.close("NWConnection cancelled")
@@ -130,9 +139,11 @@ public final class NWFramedConnection: FramedTransport, @unchecked Sendable {
 
     @discardableResult
     public func send(_ stream: StreamType, payload: [UInt8]) -> Bool {
+        let cap = Int(stream.maxPayloadLength) - (channel != nil ? SecureChannel.tagLength : 0)
+        guard payload.count <= cap else { return false }
         let (enqueued, triggerDrain): (Bool, Bool) = lock.withLock {
-            guard !closed, let wire = try? framer.frame(stream, payload: payload) else { return (false, false) }
-            scheduler.enqueue(urgent: wire, stream: stream)
+            guard !closed else { return (false, false) }
+            scheduler.enqueue(urgent: PendingFrame(stream: stream, payload: payload))
             return (true, isReady && !sending)
         }
         if triggerDrain {
@@ -142,13 +153,15 @@ public final class NWFramedConnection: FramedTransport, @unchecked Sendable {
     }
 
     public func sendVideo(_ payload: [UInt8], isKeyframe: Bool, timestampNanos: UInt64? = nil) -> FramedSocket.VideoResult {
+        let cap = Int(StreamType.video.maxPayloadLength) - (channel != nil ? SecureChannel.tagLength : 0)
         let (result, triggerDrain): (FramedSocket.VideoResult, Bool) = lock.withLock {
             guard !closed else { return (.closed, false) }
-            if scheduler.dropVideoIfWaiting(isKeyframe: isKeyframe) { return (.queued, false) }
-            guard let wire = try? framer.frame(.video, payload: payload, keyframe: isKeyframe, timestampNanos: timestampNanos) else {
+            guard payload.count <= cap else {
+                scheduler.discardVideoReference()
                 return (.needKeyframe, false)
             }
-            let needKeyframe = scheduler.enqueue(video: wire, isKeyframe: isKeyframe)
+            let needKeyframe = scheduler.enqueue(video: PendingFrame(stream: .video, payload: payload,
+                                                                     isKeyframe: isKeyframe, timestampNanos: timestampNanos))
             return (needKeyframe ? .needKeyframe : .queued, isReady && !sending)
         }
         if triggerDrain {
@@ -163,6 +176,8 @@ public final class NWFramedConnection: FramedTransport, @unchecked Sendable {
             closed = true
             dialTimer?.cancel()
             dialTimer = nil
+            writeTimer?.cancel()
+            writeTimer = nil
             return true
         }
         guard first else { return }
@@ -172,22 +187,52 @@ public final class NWFramedConnection: FramedTransport, @unchecked Sendable {
     }
 
     private func drainSendQueue() {
-        let nextWire: [UInt8]? = lock.withLock {
-            guard !closed, isReady, !sending else { return nil }
-            guard let wire = scheduler.next() else { return nil }
-            sending = true
-            return wire
-        }
-        guard let wire = nextWire else { return }
-        connection.send(content: Data(wire), completion: .contentProcessed { [weak self] error in
-            guard let self else { return }
-            if let error {
-                self.close("NWConnection write failed: \(error)")
+        while true {
+            let nextPending: PendingFrame? = lock.withLock {
+                guard !closed, isReady, !sending else { return nil }
+                guard let item = scheduler.next() else { return nil }
+                sending = true
+                return item
+            }
+            guard let pending = nextPending else { return }
+            // Encrypt on ioQueue outside `lock` so AES-GCM never stalls enqueueing threads.
+            guard let wire = try? framer.frame(pending.stream, payload: pending.payload,
+                                               keyframe: pending.isKeyframe,
+                                               timestampNanos: pending.timestampNanos) else {
+                lock.withLock { sending = false }
+                continue
+            }
+            let wt = DispatchSource.makeTimerSource(queue: ioQueue)
+            wt.schedule(deadline: .now() + FramedSocket.writeDeadline)
+            wt.setEventHandler { [weak self] in
+                self?.close("NWConnection write timed out (peer not reading)")
+            }
+            let armed = lock.withLock { () -> Bool in
+                guard !closed else { return false }
+                writeTimer?.cancel()
+                writeTimer = wt
+                return true
+            }
+            guard armed else {
+                wt.cancel()
                 return
             }
-            self.lock.withLock { self.sending = false }
-            self.drainSendQueue()
-        })
+            wt.resume()
+            connection.send(content: Data(wire), completion: .contentProcessed { [weak self] error in
+                guard let self else { return }
+                self.lock.withLock {
+                    self.writeTimer?.cancel()
+                    self.writeTimer = nil
+                    self.sending = false
+                }
+                if let error {
+                    self.close("NWConnection write failed: \(error)")
+                    return
+                }
+                self.drainSendQueue()
+            })
+            return
+        }
     }
 
     private func receiveNext() {

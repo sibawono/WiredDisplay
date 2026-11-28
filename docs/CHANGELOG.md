@@ -1317,3 +1317,169 @@ During scrolling, sampled medians were 0.05 ms capture-delivery-to-conversion, 4
 
 
 
+
+## CHANGE ID: P1-082 — Android client (1:1 with iPad) and macOS Host USB-C AOA / ADB compatibility
+
+**OBJECTIVE:** Add a native Kotlin + Jetpack Compose Android client (`minSdk 26`, `targetSdk 36`) matching the iPad v0.5.4 feature set and studio-dark UI, plus macOS host USB-C AOA (plug-and-play via IOKit with per-device opt-in), ADB fallback, and backward-compatible v6 `CodecSet` decode capability flags (`no444`, `no10Bit`).
+
+**FILES CHANGED:**
+- `Package.swift`, `Shared/CAoaUSB/{include/WDAoaUSB.h,WDAoaUSB.c}`, `Shared/Transport/{AoaClient.swift,AdbClient.swift}`, `Shared/Session/Messages.swift`: IOKit USB AOA bridge + `SetConfiguration` handling, ADB loopback client, and `CodecSet.no444`/`no10Bit` flags.
+- `macOSHost/Host/{HostFleet.swift,HostController.swift,StatusPanel.swift,main.swift}`: per-device opt-in Android USB-C AOA approval (`aoaApprovedSerials`), menu bar General tab Android USB-C Devices card, AOA switch cooldown, and upfront `DecodeLimits` from `Hello.codecs`.
+- `scripts/build-dmg.sh`: updated `README.txt` and added Indonesian `PANDUAN-INSTALASI.txt` covering Mac + Android/iPad.
+- `Tests/Unit/WDTransportTests/AdbClientTests.swift`: unit tests for ADB framing, device filtering, and `CodecSet` flags.
+- `AndroidClient/`: complete Kotlin + Compose Android app (protocol v6 + `SecureChannel` Ed25519/X25519/HKDF-SHA256/AES-256-GCM + Android Keystore `TrustStore`, USB-C AOA + ADB + `NsdManager` Wi-Fi with `MulticastLock`, async `MediaCodec` direct-feed to `SurfaceView` with `VideoCapabilities` probing and 3-tier fallback, `AudioJitterBuffer` + low-latency `AudioTrack`/`AudioRecord` + `BackgroundAudioService`, touch/stylus/mouse/keyboard input, 1:1 studio-dark Compose UI, and `ProtocolVectorTests` verified against `Tests/Vectors/protocol-v6.json`).
+
+**VERIFIED:**
+- `swift build --product WiredDisplayHost`: 0 errors.
+- `swift test`: all Swift test suites passed (0 failures).
+- `./gradlew testDebugUnitTest assembleDebug`: 0 Kotlin warnings, 7/7 `ProtocolVectorTests` passed against `Tests/Vectors/protocol-v6.json`.
+- Two-pass adversarial audit resolved 10 bugs across Android 14+ FGS type, USB AOA permission/detach, `MediaCodec` Surface producer & `HandlerThread` lifecycle, `MulticastLock`, AOA `SetConfiguration` & cooldown, and synchronous `wd-recv` backpressure.
+
+## CHANGE ID: P1-083 — Hand audio back on Mac shutdown, restart, termination, and SIGTERM/SIGINT
+
+**OBJECTIVE:** Ensure `WiredDisplayHost` always restores the Mac's real default audio devices (`AudioRouter.handBackBeforeQuit()`) when the Mac shuts down/restarts, when the app terminates via macOS lifecycle events, or when stopped via `SIGTERM`/`SIGINT` (`pkill`), rather than only when clicking Quit in the menu-bar panel.
+
+**FILES CHANGED:**
+- `macOSHost/Host/main.swift`: registered `NSWorkspace.willPowerOffNotification`, `NSApplication.willTerminateNotification`, and `SIGTERM`/`SIGINT` `DispatchSourceSignal` handlers in `StatusMenu` calling `handBackOnTermination(reason:exitAfter:)` to stop `HostFleet` and run `audioRouter.handBackBeforeQuit()`.
+
+**VERIFIED:**
+- `swift build --product WiredDisplayHost`: 0 errors.
+- `swift test`: all Swift test suites passed (0 failures).
+- `scripts/build-host-app.sh`: built, signed, and installed `~/Applications/WiredDisplayHost.app`.
+
+## CHANGE ID: P1-084 — Onboarding-style connecting/home screens with USB-C / Wi-Fi + SSID status (iPadOS & Android)
+
+**OBJECTIVE:** Align the waiting/connecting home screen in both the iPadOS and Android client apps with the onboarding page's centered hero and 3-card 1:1 square layout, and surface live transport status (USB-C vs Wi-Fi) along with the connected Wi-Fi network name (SSID) when permitted by the OS.
+
+**FILES CHANGED:**
+- `iPadOSClient/WiredDisplayClient/Sources/{ClientSession.swift,ClientApp.swift,ClientUI.swift}`: added `NWPathMonitor` Wi-Fi status + `NEHotspotNetwork.fetchCurrent` SSID lookup to `ConnectionModel`, passed transport/Wi-Fi state to `StatusInfo` and `SessionSummary`, and replaced the split carousel home screen with the onboarding-style centered hero, live USB-C/Wi-Fi (+ SSID) status pill, and 3 square step cards with active transport highlighting.
+- `AndroidClient/app/src/main/java/dev/wireddisplay/client/{session/ClientSession.kt,MainActivity.kt,ui/StatusAndPairingScreens.kt}`: added `ConnectivityManager` Wi-Fi + SSID monitor to `ConnectionUiState`, passed transport/Wi-Fi state to `WaitingHomeScreen` and `SessionSummary`, and aligned `WaitingHomeScreen` 1:1 with `OnboardingScreen`.
+
+**VERIFIED:**
+- `xcodebuild -project iPadOSClient/WiredDisplayClient/WiredDisplayClient.xcodeproj -scheme WiredDisplayClient -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO build`: BUILD SUCCEEDED.
+- `AndroidClient ./gradlew testDebugUnitTest assembleDebug`: unit tests passed and `assembleDebug` BUILD SUCCESSFUL.
+
+## CHANGE ID: P1-085 — Session-scoped decode limits, ignore transient backlog stalls, and Reset button
+
+**OBJECTIVE:** Prevent capable iPads (e.g. M-series) from becoming permanently locked to `4:2:0 8-bit only` in `UserDefaults` after transient decoder backlog stalls, and give users direct recovery when a session steps down.
+
+**FILES CHANGED:**
+- `iPadOSClient/WiredDisplayClient/Sources/ClientSession.swift`: stopped feeding transient `backlog.stalls` into `DecodeFailureDetector` / `.decodeFailed` (still requests a keyframe to recover) and gated `renderer.isFailed` step-down reporting on `videoActive`.
+- `macOSHost/Host/HostController.swift`: split `peerLimits` into immutable client-declared limits (`Hello.codecs`) and session-scoped learned limits (in-memory only, no longer persisted to `UserDefaults`; purges any legacy `decodeLimits` entry on connect), cleared learned limits on explicit `setQuality(_:)`, and added `resetDecodeLimits()` / `canResetDecodeLimits`.
+- `macOSHost/Host/{HostFleet.swift,StatusPanel.swift,main.swift}`: wired `resetDecodeLimits()` across the fleet and added a small **Reset** button next to the *"Limited for this iPad"* encoding line in the Display tab whenever learned limits are active.
+
+**VERIFIED:**
+- `swift build --product WiredDisplayHost`: 0 errors.
+- `swift test`: all Swift unit tests passed.
+- `xcodebuild -project iPadOSClient/WiredDisplayClient/WiredDisplayClient.xcodeproj -scheme WiredDisplayClient -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO build`: BUILD SUCCEEDED.
+
+## CHANGE ID: P1-086 — Host & iPadOS stability audit fixes (19 bugs)
+
+**OBJECTIVE:** Resolve 19 verified reliability, lifecycle, audio, video, transport, and input bugs across `macOSHost` and `iPadOSClient`.
+
+**FILES CHANGED:**
+- `macOSHost/Host/HostController.swift`: initialized `VideoEncoder` with `abrController?.currentMbps` instead of always resetting to `options.bitrateMbps`; restricted Bonjour/Wi-Fi dialing to the unbound controller (`deviceSerial == nil`) and exposed `activeUSBSerial`; propagated iPad-initiated Quality preset changes to `HostFleet` via `onQualityChanged`; sent `.cursor(x: 0, y: 0, visible: false)` when Local Cursor is toggled off; cleared `iPadBrightness` and notified `onBrightnessChange?(nil)` on disconnect.
+- `macOSHost/Host/HostFleet.swift`: kept an unbound wireless/auto controller whenever `transportMode.allowsWiFi`, avoided blocking multi-iPad USB discovery unless the unbound controller already owns that exact USB serial, and synced `currentOptions` on `onQualityChanged`.
+- `macOSHost/Host/HostAudioBridge.swift`: observed `.AVAudioEngineConfigurationChange` on `localMirrorEngine` under `mirrorLock` and checked `engine.isRunning` so "Play on Mac speakers too" auto-recovers after output device or sample-rate changes.
+- `macOSHost/Host/VideoEncoder.swift`: synchronized `lane.prepare` with `submitLock` against `invalidate()` and released partial `VTCompressionSession`/`VTPixelTransferSession` resources if initialization throws.
+- `iPadOSClient/WiredDisplayClient/Sources/MetalVideoRenderer.swift`: added synchronized `setBackgrounded(_:)` gate draining `presentQueue` to prevent background Metal GPU commits (`kIOGPUCommandBufferCallbackErrorBackgroundExecutionNotPermitted`), and guarded decode error callbacks with `self.generation == generation`.
+- `iPadOSClient/WiredDisplayClient/Sources/ClientAudio.swift`: added `isRunning` (`isActive && engine?.isRunning == true`) and rebuilt the audio engine on microphone input format changes (Bluetooth HFP connect/disconnect).
+- `iPadOSClient/WiredDisplayClient/Sources/ClientSession.swift`: prevented USB-C `listenerChanged` from overwriting active Wi-Fi streaming `phase`, applied `outstandingSends > 64` backpressure to `.stylus(.move, ...)`, and cleared stale `macName`, `liveFPS`, `liveLatencyMs`, and frame counters in `endConnection()`.
+- `iPadOSClient/WiredDisplayClient/Sources/{ClientApp.swift,VideoView.swift,ClientUI.swift}`: wired `setBackgrounded`, `audio.isRunning`, `videoView.resetTouches()` on deactivate/reconnect, cancellable `reconnectWork`, automatic `softKeyboard` resignation on hardware `pressesBegan`, and surfaced `lastError` inside the streaming Controls Audio tab.
+
+**VERIFIED:**
+- `swift test`: all Swift unit tests passed (0 failures).
+- `scripts/build-host-app.sh`: built, signed, and installed `~/Applications/WiredDisplayHost.app` (0 errors, 0 warnings).
+- `scripts/install-ipad-app.sh`: Release build succeeded and installed on iPad.
+
+## CHANGE ID: P1-087 — End-to-end latency, FPS, connection, Sleep Mac, and HAL audio driver optimizations
+
+**OBJECTIVE:** Fix "Sleep Mac" while locked, eliminate unbounded `encodeQueue` latency spirals, move AES-256-GCM encryption off transport queue locks, enlarge `usbmuxd`/ADB socket buffers from 8 KiB to 512 KiB, eliminate per-frame Annex-B/NAL copies on Mac & iPad, optimize GPU shaders, fix Wi-Fi↔USB-C upgrade & ABR, and resolve all remaining Power/Input/Audio/HAL driver bugs.
+
+**FILES CHANGED:**
+- `Shared/Usbmux/UsbmuxClient.swift`, `Shared/Transport/AdbClient.swift`: raised `SO_SNDBUF`/`SO_RCVBUF` to 512 KiB (from macOS 8 KiB default).
+- `Shared/Session/SendScheduler.swift`, `Shared/Transport/{FramedSocket.swift,NWFramedConnection.swift,TransportMode.swift,BonjourDiscovery.swift}`: added `PendingSendScheduler` (O(1) deque, `.cursor` coalescing, separate `videoCongestionDropped`), moved AES-256-GCM encryption onto writer threads outside queue locks, optimistic non-blocking `write()` + monotonic deadlines + `.userInteractive` QoS in `FramedSocket`, write timeout + TCP keepalive + fast-fail unreachable in `NWFramedConnection`, and `.userInitiated` QoS on `BonjourBrowser`.
+- `Shared/Protocol/FrameParser.swift`, `Shared/Session/SecureChannel.swift`, `Shared/Video/{AnnexB.swift,SampleBuffers.swift}`: amortized O(1) compaction, stack-allocated 12-byte GCM nonce, zero-alloc Mac NAL scan (skipping `parameterSets` on P-frames), and single-pass `scanAnnexB` -> `CMBlockBuffer` on iPad.
+- `Shared/HostCore/{AdaptiveBitrateController.swift,InputGate.swift}`, `Shared/Session/{AudioJitterBuffer.swift,TouchInterpreter.swift}`: proportional ABR ramp-up, `.stylus(.move)` under `.moveOnly` while locked, pre-lock `Int16 -> Float` conversion + empty-buffer/negative-frame guards + overflow drop accounting in `AudioJitterBuffer`, and bounded `PinchZoomStepper.update`.
+- `macOSHost/Host/{VideoEncoder.swift,ChromaConverter.swift,CaptureEngine.swift,VirtualDisplayController.swift}`: single-slot latest-wins `pendingEncode` (eliminates unbounded `encodeQueue` backlog), removed spurious coalescing `requestDropReplay()`, async `updateBitrate`, fixed Display P3 primaries in `ChromaConverter` & `VTPixelTransferSession`, `half3` + `MTLFunctionConstantValues` + shared Metal context in `ChromaConverter`, tightened `CaptureEngine` `minimumFrameInterval` (~1.05x FPS) + throttled `CGDisplayBounds`, saved fallback `activeSerialNumber` for `resizeInPlace()`, and unlocked `LaneStats` sorting.
+- `macOSHost/Host/{HostController.swift,PowerMonitor.swift,InputInjector.swift,CursorEcho.swift,HostAudioBridge.swift,AudioRouter.swift,UsbRegistry.swift}`: allowed `.sleepMac` while locked (and without requiring `isInputEnabled`), removed destructive `hasListeningWiredDevice()` TCP probe, added interruptible `runLoopWake` semaphore (`resetBackoff` + `BonjourBrowser.onChange`), 500 ms Wi-Fi ABR sampling with real `queuedVideoFrames`/`congestionDroppedVideoFrames` + EWMA RTT, live Mac -> iPad volume/mute sync, monotonic watchdogs, cached host name, `setBrightness` menu-bar slider sync, mirroring `captureID` for input/cursor, `PowerMonitor` `displaysAsleep` reconciliation, `InputInjector` `deinit` assertion release + Pencil `minimumClickDuration` + live Caps Lock state, off-main `CursorEcho` PNG encoding, `HostAudioBridge` mirror lock protection, `AudioRouter.start()` unconditional dead-default recovery, and `UsbRegistry` `%08x` width fix.
+- `MacVirtualDevices/AudioDriver/WiredDisplayAudio.c`: per-device `ioClients` for `DeviceIsRunning`, `clockSeed` increment on `StartIO` anchor reset, `kAudioHardwareBadPropertySizeError` on short volume buffer, and bulk `memcpy` in `ReadInput`.
+- `iPadOSClient/WiredDisplayClient/Sources/{MetalVideoRenderer.swift,ClientSession.swift,VideoView.swift}`: `half3` Metal fragment shader, `.dontCare` full-screen load action, fixed drawable/pending resource order, unlocked `notePresented` stats, single-pass Annex-B receive path, removed redundant `queue.async` in `send`, USB-C `.interactiveVideo` + Wi-Fi TCP keepalive, monotonic watchdogs, ordered key release in `resetTouches()`, and sticky modifier toggles (`⌘`, `⌃`, `⌥`, `⇧`, `⌦`) on the Soft Keyboard accessory bar.
+
+**VERIFIED:**
+- `swift test`: all Swift unit tests passed (0 failures).
+- `scripts/build-host-app.sh`: built, signed, and installed `~/Applications/WiredDisplayHost.app` (0 errors, 0 warnings).
+- `scripts/install-ipad-app.sh`: Release build succeeded and installed on iPad.
+
+## CHANGE ID: P1-088 — iPad Touch ID & Face ID authentication for macOS (`sudo` and Lock Screen via PAM)
+
+**OBJECTIVE:** Allow an enrolled iPad (Touch ID or Face ID) connected over USB-C to approve macOS `sudo` and Lock Screen unlock via a root-to-Secure-Enclave ECDSA P-256 challenge-response PAM module without storing the Mac password anywhere.
+
+**FILES CHANGED:**
+- `Shared/Session/Messages.swift`: added backward-compatible control messages `authChallenge`, `authResponse`, and `biometricPublicKey` (tags 20–22) plus `BiometricAuthMessage.canonical(service:username:nonce:)`.
+- `iPadOSClient/WiredDisplayClient/Info.plist`: added `NSFaceIDUsageDescription` for Face ID iPad Pro models.
+- `iPadOSClient/WiredDisplayClient/Sources/BiometricAuthKey.swift` (registered in `project.pbxproj`): Secure Enclave P-256 key (`kSecAttrTokenIDSecureEnclave`, `.biometryCurrentSet`), strict biometry `LAContext` signing (`localizedFallbackTitle = ""`), and dynamic `Face ID` / `Touch ID` detection.
+- `iPadOSClient/WiredDisplayClient/Sources/{ClientSession.swift,ClientApp.swift,ClientUI.swift}`: async `.authChallenge` handling off `ClientSession.queue`, automatic `.biometricPublicKey` publishing on connect/enroll, and dynamic **Mac Face ID / Touch ID Auth** card in Controls › More.
+- `macOSHost/Host/{PamBridgeServer.swift,HostController.swift,HostFleet.swift,StatusPanel.swift,main.swift}`: local Unix domain socket relay (`~/Library/Caches/dev.wireddisplay.host/pam.sock`, `0600`, `getpeereid` UID check), USB-C-only PAM challenge forwarding, `last_biometric_key.b64` cache for enrollment, and Security tab PAM status + **Copy Setup Command** button.
+- `MacVirtualDevices/PamModule/pam_wireddisplay.c`, `scripts/{install-pam.sh,uninstall-pam.sh}`: C PAM module verifying root-owned ECDSA P-256 public keys via `Security.framework` with fail-safe `PAM_IGNORE` fallback, plus one-command `sudo` install/uninstall scripts supporting `/etc/pam.d/sudo_local` and optional `--with-screensaver`.
+- `Tests/Unit/WDSessionTests/SecureChannelTests.swift`: added `testBiometricPamControlMessagesRoundTrip`.
+
+**VERIFIED:**
+- `clang -shared -fPIC -O2 -Wall -Wextra -Werror -arch arm64 ... pam_wireddisplay.c`: 0 errors, 0 warnings.
+- `swift test`: all Swift unit tests passed (0 failures).
+- `scripts/build-host-app.sh` + restart: built, signed, and installed `~/Applications/WiredDisplayHost.app`.
+- `scripts/install-ipad-app.sh`: Release build succeeded and installed on iPad.
+
+## CHANGE ID: P1-089 — Native macOS Lock Screen & Admin Dialog auth via AuthorizationPlugin (`WiredDisplayAuth.bundle`)
+
+**OBJECTIVE:** Enable seamless Touch ID / Face ID authentication on macOS 27 for both Lock Screen unlock (`system.login.screensaver`) and macOS Admin dialogs (System Settings, `.pkg` installer, `system.privilege.admin`, `authenticate-admin`) without blocking normal password fallback.
+
+**FILES CHANGED:**
+- `MacVirtualDevices/AuthPlugin/{WiredDisplayAuth.c,Info.plist}`: official macOS `AuthorizationPlugin` bundle supporting both `WiredDisplayAuth:unlock,privileged` (`service = "lockscreen"`) and `WiredDisplayAuth:admin,privileged` (`service = "admin"`, verifying `admin` group membership via `getgrouplist` and setting `kAuthorizationEnvironmentUsername`); runs in parallel (`k-of-n: 1`) with macOS password UI, verifies ECDSA P-256 signature against root-owned `/Library/Application Support/WiredDisplay/pam_keys/<user>.pub`, and cancels cleanly on `MechanismDeactivate`.
+- `macOSHost/Host/{PamBridgeServer.swift,HostController.swift,HostFleet.swift}`: zero-polling self-pipe `LockscreenSession` lifecycle in `PamBridgeServer` for both `lockscreen` and `admin` services, immediate challenge push to connected and newly connecting iPads, and instant `lockscreen-clear` dismissal when authorized via Mac password.
+- `iPadOSClient/WiredDisplayClient/Sources/{ClientSession.swift,ClientApp.swift}`: auto-pops the native iPadOS Touch ID / Face ID sheet immediately when `lockscreen` or `admin` starts (no extra button tap needed), with a top-center **Retry Touch ID / Face ID Unlock / Admin (WiredDisplay · Tap on iPad)** fallback banner + dismiss button if cancelled.
+- `scripts/{install-pam.sh,uninstall-pam.sh}`: build, ad-hoc sign, and install `/Library/Security/SecurityAgentPlugins/WiredDisplayAuth.bundle`, register `dev.wireddisplay.auth.unlock` in `system.login.screensaver` and `dev.wireddisplay.auth.admin` across 7 targeted macOS admin rights (`system.preferences`, `system.preferences.security`, `system.preferences.network`, `system.install.software`, `system.privilege.admin`, `authenticate-admin`, `authenticate-admin-nonshared`) with automatic plist backups and clean restore on uninstall.
+
+**VERIFIED:**
+- `clang -bundle -fPIC -O2 -Wall -Wextra -Werror -arch arm64 ... WiredDisplayAuth.c`: 0 errors, 0 warnings.
+- `swift test`: all Swift unit tests passed (0 failures).
+- `scripts/build-host-app.sh` + restart: built, signed, and installed `~/Applications/WiredDisplayHost.app`.
+- `scripts/install-ipad-app.sh`: Release build succeeded and installed on iPad.
+
+## CHANGE ID: P1-090 — Fix permanent Metal video freeze while cursor stays live
+
+**OBJECTIVE:** Fix a race condition in `MetalVideoRenderer.drawPending()` (introduced in P1-087) that permanently stranded `pending != nil` with no scheduled draw whenever a new frame finished decoding during texture creation, freezing video until the user minimized and reopened the iPad app.
+
+**FILES CHANGED:**
+- `iPadOSClient/WiredDisplayClient/Sources/MetalVideoRenderer.swift`: atomically take and clear `pending` under `lock` (`defer { pending = nil }`) right after `nextDrawable()` succeeds, before texture creation, so any frame decoded concurrently always sees `pending == nil` and schedules the next `drawPending()` on `presentQueue`.
+
+**VERIFIED:**
+- `scripts/install-ipad-app.sh`: Release build succeeded and installed on iPad.
+
+## CHANGE ID: P1-091 — Eliminate 1-frame lookahead delay in 4:4:4 Ultra/Pro mode
+
+**OBJECTIVE:** Fix 25-123 ms intermittent `encode+pack` latency spikes in Ultra (`4:4:4 10-bit`) during low-FPS typing/static desktop updates caused by omitting `kVTCompressionPropertyKey_MaxFrameDelayCount = 0` on 4:4:4 lanes.
+
+**FILES CHANGED:**
+- `macOSHost/Host/VideoEncoder.swift`: call `VTCompressionSessionCompleteFrames(lane.session, untilPresentationTimeStamp: presentationTime)` on `encodeQueue` for `4:4:4` lanes (which reject `MaxFrameDelayCount = 0` with `-12900`) so VideoToolbox never holds a frame in its lookahead buffer during low-FPS typing/clicks.
+
+**VERIFIED:**
+- `scripts/build-host-app.sh` + restart: built, signed, and installed `~/Applications/WiredDisplayHost.app`.
+
+## CHANGE ID: P1-092 — Recover video after oversized frames and clarify host latency
+
+**OBJECTIVE:** Keep an oversized encoded frame from causing dependent frames to reach the decoder on USB-C, ADB/AOA, or Wi-Fi. Fix repeated socket starts and clarify what the host latency sample measures.
+
+- Rejecting an oversized frame clears queued video and waits for the next keyframe. The transport still asks the encoder for a replacement immediately.
+- Starting a wired socket more than once now leaves one reader and one writer active.
+- Rename `capture->wire` to `capture->sendQueue`: the sample ends before the transport enqueues the encoded frame.
+
+**VERIFIED:** The macOS Swift suite passed all 199 tests, including socket ordering, keyframe recovery, encrypted loopback and codec round trips. No change to codec presets or refresh targets.
+
+## CHANGE ID: P1-093 — Warm Balanced's still encoder and report p99 latency
+
+- Warm Balanced's 4:4:4 compression session before capture with one synthetic frame whose output is discarded. The first real frame on that lane remains a keyframe.
+- Skip work that reached the encode queue after a quality transition had already superseded its lane. Keep the immediate drain for real 4:4:4 frames.
+- Report p99 for host encode and iPad presentation. Label the iPad's estimated transport segment from the host send queue.
+
+**PHYSICAL A/B:** One controlled USB-C run per variant on the iPad Air M2. The first Balanced transition's peak 4:4:4 encode time was 28.1 ms with the control and 11.6 ms with the candidate. The candidate spent 56.9 ms warming the encoder at startup. During motion, the median capture-to-send-queue latency went from 15.6 to 16.1 ms and median encode cadence went from 59.8 to 59.7 fps. The Ultra warm-up experiment did not consistently improve frame times, so it was excluded. End-to-end presentation was not measured because the iPad log pull failed.

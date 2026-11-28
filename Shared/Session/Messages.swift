@@ -32,6 +32,10 @@ public struct CodecSet: OptionSet, Sendable, Hashable {
     public init(rawValue: UInt8) { self.rawValue = rawValue }
     public static let h264 = CodecSet(rawValue: 1 << 0)
     public static let hevc = CodecSet(rawValue: 1 << 1)
+    /// Client cannot decode HEVC 4:4:4; host skips 4:4:4 without waiting for failures.
+    public static let no444 = CodecSet(rawValue: 1 << 2)
+    /// Client cannot decode 10-bit HEVC (Main10); host uses 8-bit 4:2:0.
+    public static let no10Bit = CodecSet(rawValue: 1 << 3)
 
     public func contains(_ codec: VideoCodec) -> Bool {
         // Explicit type: a bare `.h264` resolves to VideoCodec and recursed forever.
@@ -154,6 +158,33 @@ public enum ControlMessage: Sendable, Equatable {
     case volume(level: Float, muted: Bool)
     /// Client -> host: put the Mac to system sleep (confirmed by user on iPad).
     case sleepMac
+    /// Host -> client: PAM biometric authentication challenge (Touch ID / Face ID on iPad).
+    case authChallenge(requestID: UInt32, service: String, username: String, reason: String, nonce: [UInt8])
+    /// Client -> host: signed PAM challenge response (status: 0=ok, 1=cancelled, 2=unavailable, 3=notEnrolled).
+    case authResponse(requestID: UInt32, status: UInt8, signature: [UInt8])
+    /// Client -> host: 65-byte uncompressed X9.63 ECDSA P-256 public key from iPad Secure Enclave.
+    case biometricPublicKey([UInt8])
+}
+
+/// Canonical message format signed by the iPad Secure Enclave and verified by `pam_wireddisplay.so`.
+public enum BiometricAuthMessage {
+    public static let domainPrefix = Array("WiredDisplay PAM v1\0".utf8)
+    public static let nonceLength = 32
+    public static let p256PublicKeyLength = 65
+    public static let maxSignatureLength = 128
+
+    /// `"WiredDisplay PAM v1\0" || service || "\0" || username || "\0" || nonce`
+    public static func canonical(service: String, username: String, nonce: [UInt8]) -> [UInt8] {
+        var out: [UInt8] = []
+        out.reserveCapacity(domainPrefix.count + service.utf8.count + 1 + username.utf8.count + 1 + nonce.count)
+        out.append(contentsOf: domainPrefix)
+        out.append(contentsOf: service.utf8)
+        out.append(0)
+        out.append(contentsOf: username.utf8)
+        out.append(0)
+        out.append(contentsOf: nonce)
+        return out
+    }
 }
 
 public struct CursorImage: Sendable, Equatable {
@@ -265,7 +296,7 @@ public enum InputEvent: Sendable, Equatable {
 
 public enum SessionCodec {
     private enum ControlTag: UInt8 {
-        case hello = 1, streamConfig, requestKeyframe, ping, pong, bye, audioRoute, videoActive, authHello, authProof, decodeFailed, brightness, cursor, cursorImage, panelSize, displaySpace, qualityPreset, volume, sleepMac
+        case hello = 1, streamConfig, requestKeyframe, ping, pong, bye, audioRoute, videoActive, authHello, authProof, decodeFailed, brightness, cursor, cursorImage, panelSize, displaySpace, qualityPreset, volume, sleepMac, authChallenge, authResponse, biometricPublicKey
     }
 
     private enum InputTag: UInt8 {
@@ -345,6 +376,24 @@ public enum SessionCodec {
             writer.u8(muted ? 1 : 0)
         case .sleepMac:
             writer.u8(ControlTag.sleepMac.rawValue)
+        case .authChallenge(let requestID, let service, let username, let reason, let nonce):
+            writer.u8(ControlTag.authChallenge.rawValue)
+            writer.u32(requestID)
+            writer.string(truncatedUTF8(service, maxBytes: 64))
+            writer.string(truncatedUTF8(username, maxBytes: 64))
+            writer.string(truncatedUTF8(reason, maxBytes: 128))
+            writer.u8(UInt8(clamping: nonce.count))
+            writer.raw(nonce)
+        case .authResponse(let requestID, let status, let signature):
+            writer.u8(ControlTag.authResponse.rawValue)
+            writer.u32(requestID)
+            writer.u8(status)
+            writer.u16(UInt16(clamping: signature.count))
+            writer.raw(signature)
+        case .biometricPublicKey(let key):
+            writer.u8(ControlTag.biometricPublicKey.rawValue)
+            writer.u16(UInt16(clamping: key.count))
+            writer.raw(key)
         case .cursorImage(let image):
             writer.u8(ControlTag.cursorImage.rawValue)
             writer.f32(image.width)
@@ -454,6 +503,32 @@ public enum SessionCodec {
             message = .volume(level: level, muted: mutedRaw != 0)
         case .sleepMac:
             message = .sleepMac
+        case .authChallenge:
+            let requestID = try reader.u32()
+            let service = try reader.string(maxBytes: 64)
+            let username = try reader.string(maxBytes: 64)
+            let reason = try reader.string(maxBytes: 128)
+            let nonceLen = Int(try reader.u8())
+            guard nonceLen == BiometricAuthMessage.nonceLength else {
+                throw WireError.invalidValue("authChallenge nonce \(nonceLen)")
+            }
+            let nonce = try reader.raw(count: nonceLen)
+            message = .authChallenge(requestID: requestID, service: service, username: username, reason: reason, nonce: nonce)
+        case .authResponse:
+            let requestID = try reader.u32()
+            let status = try reader.u8()
+            let sigLen = Int(try reader.u16())
+            guard status <= 3, sigLen <= BiometricAuthMessage.maxSignatureLength else {
+                throw WireError.invalidValue("authResponse status \(status) sig \(sigLen)")
+            }
+            let sig = try reader.raw(count: sigLen)
+            message = .authResponse(requestID: requestID, status: status, signature: sig)
+        case .biometricPublicKey:
+            let keyLen = Int(try reader.u16())
+            guard keyLen == BiometricAuthMessage.p256PublicKeyLength else {
+                throw WireError.invalidValue("biometricPublicKey length \(keyLen)")
+            }
+            message = .biometricPublicKey(try reader.raw(count: keyLen))
         case .cursorImage:
             let width = try reader.f32(), height = try reader.f32()
             let hotX = try reader.f32(), hotY = try reader.f32()

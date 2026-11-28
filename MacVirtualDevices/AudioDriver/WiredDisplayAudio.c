@@ -92,6 +92,7 @@ typedef struct {
     pthread_mutex_t lock;
     _Atomic UInt32 ioClients; // across both devices of the channel
     _Atomic UInt64 anchorHostTime;
+    _Atomic UInt64 clockSeed;
     // End (exclusive, in sample time) of what the writer has put in the ring.
     // Readers only copy frames inside [writtenEnd - kRingFrames, writtenEnd);
     // everything else reads as silence. This replaces "zero after read",
@@ -101,8 +102,8 @@ typedef struct {
     Float32 ring[kRingFrames * kChannels];
 } LoopbackChannel;
 
-static LoopbackChannel gSpeakerChannel = {PTHREAD_MUTEX_INITIALIZER, 0, 0, 0.0, {0}};
-static LoopbackChannel gMicChannel = {PTHREAD_MUTEX_INITIALIZER, 0, 0, 0.0, {0}};
+static LoopbackChannel gSpeakerChannel = {PTHREAD_MUTEX_INITIALIZER, 0, 0, 1, 0.0, {0}};
+static LoopbackChannel gMicChannel = {PTHREAD_MUTEX_INITIALIZER, 0, 0, 1, 0.0, {0}};
 
 // One direction of a channel.
 typedef struct {
@@ -116,17 +117,18 @@ typedef struct {
     CFStringRef name;
     CFStringRef uid;
     LoopbackChannel *channel;
+    _Atomic UInt32 ioClients;
 } LoopbackDevice;
 
 static LoopbackDevice gDevices[kDeviceCount] = {
     {kObjectID_SpeakerDevice, kObjectID_SpeakerOutput, false, false, true, true, CFSTR("iPad Speaker"),
-     CFSTR("dev.wireddisplay.audio.speaker"), &gSpeakerChannel},
+     CFSTR("dev.wireddisplay.audio.speaker"), &gSpeakerChannel, 0},
     {kObjectID_SpeakerTapDevice, kObjectID_SpeakerTapInput, true, true, false, false, CFSTR("iPad Speaker Tap"),
-     CFSTR("dev.wireddisplay.audio.speaker.tap"), &gSpeakerChannel},
+     CFSTR("dev.wireddisplay.audio.speaker.tap"), &gSpeakerChannel, 0},
     {kObjectID_MicDevice, kObjectID_MicInput, true, false, true, false, CFSTR("iPad Microphone"),
-     CFSTR("dev.wireddisplay.audio.microphone"), &gMicChannel},
+     CFSTR("dev.wireddisplay.audio.microphone"), &gMicChannel, 0},
     {kObjectID_MicFeedDevice, kObjectID_MicFeedOutput, false, true, false, false, CFSTR("iPad Microphone Feed"),
-     CFSTR("dev.wireddisplay.audio.microphone.feed"), &gMicChannel},
+     CFSTR("dev.wireddisplay.audio.microphone.feed"), &gMicChannel, 0},
 };
 
 static AudioServerPlugInHostRef gHost = NULL;
@@ -281,10 +283,12 @@ static OSStatus GetControlProperty(AudioObjectID object, const AudioObjectProper
     }
     case kAudioLevelControlPropertyConvertScalarToDecibels:
         // In/out: the caller passes the value in outData.
-        if (!volume || inDataSize < sizeof(Float32)) break;
+        if (!volume) break;
+        if (inDataSize < sizeof(Float32)) return kAudioHardwareBadPropertySizeError;
         RETURN_VALUE(Float32, ScalarToDB(*(Float32 *)outData));
     case kAudioLevelControlPropertyConvertDecibelsToScalar:
-        if (!volume || inDataSize < sizeof(Float32)) break;
+        if (!volume) break;
+        if (inDataSize < sizeof(Float32)) return kAudioHardwareBadPropertySizeError;
         RETURN_VALUE(Float32, DBToScalar(*(Float32 *)outData));
     case kAudioBooleanControlPropertyValue:
         if (volume) break;
@@ -339,7 +343,7 @@ static OSStatus GetDeviceProperty(LoopbackDevice *d, const AudioObjectPropertyAd
     case kAudioDevicePropertyClockDomain: RETURN_VALUE(UInt32, 0);
     case kAudioDevicePropertyDeviceIsAlive: RETURN_VALUE(UInt32, 1);
     case kAudioDevicePropertyDeviceIsRunning: {
-        UInt32 running = atomic_load(&d->channel->ioClients) > 0;
+        UInt32 running = atomic_load(&d->ioClients) > 0;
         RETURN_VALUE(UInt32, running);
     }
     case kAudioDevicePropertyDeviceCanBeDefaultDevice:
@@ -548,10 +552,12 @@ static OSStatus StartIO(AudioServerPlugInDriverRef d, AudioObjectID inDevice, UI
     UInt32 clients = atomic_load(&c->ioClients);
     if (clients == 0) {
         atomic_store(&c->anchorHostTime, mach_absolute_time());
+        atomic_fetch_add(&c->clockSeed, 1);
         atomic_store(&c->writtenEnd, 0.0);
         memset(c->ring, 0, sizeof(c->ring));
     }
     atomic_store(&c->ioClients, clients + 1);
+    atomic_fetch_add(&device->ioClients, 1);
     pthread_mutex_unlock(&c->lock);
     return kAudioHardwareNoError;
 }
@@ -563,6 +569,8 @@ static OSStatus StopIO(AudioServerPlugInDriverRef d, AudioObjectID inDevice, UIn
     pthread_mutex_lock(&c->lock);
     UInt32 clients = atomic_load(&c->ioClients);
     if (clients > 0) atomic_store(&c->ioClients, clients - 1);
+    UInt32 devClients = atomic_load(&device->ioClients);
+    if (devClients > 0) atomic_store(&device->ioClients, devClients - 1);
     pthread_mutex_unlock(&c->lock);
     return kAudioHardwareNoError;
 }
@@ -580,7 +588,7 @@ static OSStatus GetZeroTimeStamp(AudioServerPlugInDriverRef d, AudioObjectID inD
     UInt64 count = (now >= anchor && ticksPerRing > 0) ? (UInt64)((Float64)(now - anchor) / ticksPerRing) : 0;
     *outSampleTime = (Float64)(count * kRingFrames);
     *outHostTime = anchor + (UInt64)((Float64)count * ticksPerRing);
-    *outSeed = 1;
+    *outSeed = atomic_load(&c->clockSeed);
     return kAudioHardwareNoError;
 }
 
@@ -637,13 +645,25 @@ static OSStatus DoIOOperation(AudioServerPlugInDriverRef d, AudioObjectID inDevi
         Float64 time = floor(inIOCycleInfo->mInputTime.mSampleTime);
         double end = atomic_load(&c->writtenEnd);
         double oldest = end - (double)kRingFrames;
-        for (UInt32 frame = 0; frame < inIOBufferFrameSize; frame++) {
-            double t = time + frame;
-            Float32 *out = buffer + frame * kChannels;
-            if (t >= oldest && t < end) {
-                memcpy(out, &c->ring[RingIndex(t) * kChannels], kBytesPerFrame);
-            } else {
-                memset(out, 0, kBytesPerFrame);
+        double reqEnd = time + (double)inIOBufferFrameSize;
+        double validStart = time > oldest ? time : oldest;
+        double validEnd = reqEnd < end ? reqEnd : end;
+        if (validStart >= validEnd) {
+            memset(buffer, 0, inIOBufferFrameSize * kBytesPerFrame);
+        } else {
+            UInt32 lead = (UInt32)(validStart - time);
+            UInt32 validCount = (UInt32)(validEnd - validStart);
+            UInt32 tailStart = lead + validCount;
+            if (lead > 0) memset(buffer, 0, lead * kBytesPerFrame);
+            UInt32 ringStart = RingIndex(validStart);
+            UInt32 first = validCount;
+            if (ringStart + first > kRingFrames) first = kRingFrames - ringStart;
+            memcpy(buffer + lead * kChannels, &c->ring[ringStart * kChannels], first * kBytesPerFrame);
+            if (validCount > first) {
+                memcpy(buffer + (lead + first) * kChannels, &c->ring[0], (validCount - first) * kBytesPerFrame);
+            }
+            if (tailStart < inIOBufferFrameSize) {
+                memset(buffer + tailStart * kChannels, 0, (inIOBufferFrameSize - tailStart) * kBytesPerFrame);
             }
         }
     }

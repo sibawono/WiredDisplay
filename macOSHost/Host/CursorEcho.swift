@@ -89,21 +89,27 @@ final class CursorEcho: @unchecked Sendable {
         var hasher = Hasher()
         hasher.combine(bytes)
         hasher.combine(bitmap.width)
+        hasher.combine(bitmap.height)
         hasher.combine(cursor.hotSpot.x)
         hasher.combine(cursor.hotSpot.y)
         hasher.combine(Int(display.width))
+        hasher.combine(Int(display.height))
         let key = hasher.finalize()
         guard key != lastImageKey else { return }
-        guard let tiff = image.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
-              let png = rep.representation(using: .png, properties: [:]),
-              png.count <= CursorImage.maxPNGBytes else { return }
         lastImageKey = key
         let size = image.size
         let hot = cursor.hotSpot // top-left origin in image points
-        send(.cursorImage(CursorImage(png: [UInt8](png),
-                                      width: Float(size.width / display.width),
-                                      height: Float(size.height / display.height),
-                                      hotX: size.width > 0 ? Float(hot.x / size.width) : 0,
-                                      hotY: size.height > 0 ? Float(hot.y / size.height) : 0)))
+        guard let tiff = image.tiffRepresentation else { return }
+        let send = self.send
+        queue.async {
+            guard let rep = NSBitmapImageRep(data: tiff),
+                  let png = rep.representation(using: .png, properties: [:]),
+                  png.count <= CursorImage.maxPNGBytes else { return }
+            send(.cursorImage(CursorImage(png: [UInt8](png),
+                                          width: Float(size.width / display.width),
+                                          height: Float(size.height / display.height),
+                                          hotX: size.width > 0 ? Float(hot.x / size.width) : 0,
+                                          hotY: size.height > 0 ? Float(hot.y / size.height) : 0)))
+        }
     }
 }

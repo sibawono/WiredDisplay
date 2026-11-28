@@ -31,9 +31,8 @@ public enum SampleBuffers {
 
         var lengthSize: Int32 = 4
         let format = CMSampleBufferGetFormatDescription(sample)
-        var paramSets: [[UInt8]]?
         if let format {
-            paramSets = try? parameterSets(of: format, codec: codec, lengthSize: &lengthSize)
+            _ = nalLengthSize(of: format, codec: codec, out: &lengthSize)
         }
         let lenBytes = Int(lengthSize)
         guard lenBytes == 1 || lenBytes == 2 || lenBytes == 4 else {
@@ -50,7 +49,7 @@ public enum SampleBuffers {
         if ptrStatus == kCMBlockBufferNoErr, let contiguousPtr, contiguousLen >= totalLength {
             let srcBase = UnsafeRawPointer(contiguousPtr).assumingMemoryBound(to: UInt8.self)
             return try buildAnnexB(from: UnsafeBufferPointer(start: srcBase, count: totalLength),
-                                   codec: codec, lengthSize: lenBytes, format: format, paramSets: paramSets)
+                                   codec: codec, lengthSize: lenBytes, format: format)
         }
         var fallbackStorage = [UInt8](repeating: 0, count: totalLength)
         let copyStatus = fallbackStorage.withUnsafeMutableBytes { raw in
@@ -60,13 +59,27 @@ public enum SampleBuffers {
             throw Error.coreMedia("CMBlockBufferCopyDataBytes", copyStatus)
         }
         return try fallbackStorage.withUnsafeBufferPointer { buf in
-            try buildAnnexB(from: buf, codec: codec, lengthSize: lenBytes, format: format, paramSets: paramSets)
+            try buildAnnexB(from: buf, codec: codec, lengthSize: lenBytes, format: format)
+        }
+    }
+
+    /// Reads only `nalUnitHeaderLengthOut` without allocating parameter-set arrays on P-frames.
+    private static func nalLengthSize(of format: CMFormatDescription, codec: VideoCodecKind, out: inout Int32) -> OSStatus {
+        var count = 0
+        switch codec {
+        case .h264:
+            return CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+                format, parameterSetIndex: 0, parameterSetPointerOut: nil, parameterSetSizeOut: nil,
+                parameterSetCountOut: &count, nalUnitHeaderLengthOut: &out)
+        case .hevc:
+            return CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+                format, parameterSetIndex: 0, parameterSetPointerOut: nil, parameterSetSizeOut: nil,
+                parameterSetCountOut: &count, nalUnitHeaderLengthOut: &out)
         }
     }
 
     private static func buildAnnexB(from bytes: UnsafeBufferPointer<UInt8>, codec: VideoCodecKind,
-                                    lengthSize: Int, format: CMFormatDescription?,
-                                    paramSets cachedSets: [[UInt8]]?) throws -> EncodedFrame {
+                                    lengthSize: Int, format: CMFormatDescription?) throws -> EncodedFrame {
         let count = bytes.count
         var detectedKeyframe = false
         var scan = 0
@@ -78,7 +91,7 @@ public enum SampleBuffers {
             scan += lengthSize
             guard nalLen > 0 else { throw AnnexB.Error.emptyNAL }
             guard nalLen <= count - scan else { throw AnnexB.Error.invalidLengthPrefix(offset: lengthStart) }
-            if codec.kind(of: Array(bytes[scan..<min(scan + 2, scan + nalLen)])) == .keyframeSlice {
+            if codec.kind(ofFirstByte: bytes[scan]) == .keyframeSlice {
                 detectedKeyframe = true
             }
             scan += nalLen
@@ -87,7 +100,7 @@ public enum SampleBuffers {
         var resolvedSets: [[UInt8]] = []
         if detectedKeyframe, let format {
             var ignoredLengthSize: Int32 = Int32(lengthSize)
-            resolvedSets = try cachedSets ?? parameterSets(of: format, codec: codec, lengthSize: &ignoredLengthSize)
+            resolvedSets = try parameterSets(of: format, codec: codec, lengthSize: &ignoredLengthSize)
         }
 
         var extraCapacity = 0
@@ -106,8 +119,7 @@ public enum SampleBuffers {
             var nalLen = 0
             for j in 0..<lengthSize { nalLen = (nalLen << 8) | Int(bytes[offset + j]) }
             offset += lengthSize
-            let isParam = stripInBandParams &&
-                codec.kind(of: Array(bytes[offset..<min(offset + 2, offset + nalLen)])) == .parameterSet
+            let isParam = stripInBandParams && codec.kind(ofFirstByte: bytes[offset]) == .parameterSet
             if !isParam {
                 out.append(contentsOf: [0, 0, 0, 1])
                 out.append(contentsOf: bytes[offset..<(offset + nalLen)])
@@ -241,6 +253,150 @@ public enum SampleBuffers {
                                      Unmanaged.passUnretained(kCFBooleanTrue).toOpaque())
             }
             if !unit.isKeyframe {
+                CFDictionarySetValue(dictionary, Unmanaged.passUnretained(kCMSampleAttachmentKey_NotSync).toOpaque(),
+                                     Unmanaged.passUnretained(kCFBooleanTrue).toOpaque())
+            }
+        }
+        return sample
+    }
+
+    /// Zero-intermediate-allocation Annex-B parser for the iPad receive hot path:
+    /// scans NAL ranges in one pass, extracts parameter sets only when a keyframe
+    /// arrives, and writes 4-byte length prefixes + picture NAL bytes directly into
+    /// a `CMBlockBuffer`.
+    public struct ParsedAnnexB {
+        public let isKeyframe: Bool
+        public let parameterSets: [[UInt8]]
+        fileprivate let pictureRanges: [Range<Int>]
+        fileprivate let pictureByteCount: Int
+    }
+
+    public static func scanAnnexB(_ annexB: [UInt8], codec: VideoCodecKind) -> ParsedAnnexB {
+        annexB.withUnsafeBufferPointer { buf in
+            let count = buf.count
+            var pictureRanges: [Range<Int>] = []
+            pictureRanges.reserveCapacity(8)
+            var paramRanges: [Range<Int>] = []
+            var isKeyframe = false
+            var pictureByteCount = 0
+
+            var i = 0
+            var nalStart: Int?
+            func finish(_ end: Int) {
+                guard let start = nalStart, end > start else { return }
+                let kind = codec.kind(ofFirstByte: buf[start])
+                if kind == .parameterSet {
+                    paramRanges.append(start..<end)
+                } else {
+                    if kind == .keyframeSlice { isKeyframe = true }
+                    pictureRanges.append(start..<end)
+                    pictureByteCount += 4 + (end - start)
+                }
+            }
+
+            while i + 2 < count {
+                if buf[i] == 0, buf[i + 1] == 0 {
+                    if buf[i + 2] == 1 {
+                        finish(i)
+                        i += 3
+                        nalStart = i
+                        continue
+                    }
+                    if i + 3 < count, buf[i + 2] == 0, buf[i + 3] == 1 {
+                        finish(i)
+                        i += 4
+                        nalStart = i
+                        continue
+                    }
+                }
+                i += 1
+            }
+            finish(count)
+
+            var sets: [[UInt8]] = []
+            if isKeyframe && !paramRanges.isEmpty {
+                sets.reserveCapacity(paramRanges.count)
+                for r in paramRanges { sets.append(Array(buf[r])) }
+            }
+            return ParsedAnnexB(isKeyframe: isKeyframe, parameterSets: sets,
+                                pictureRanges: pictureRanges, pictureByteCount: pictureByteCount)
+        }
+    }
+
+    public static func formatDescription(codec: VideoCodecKind, parameterSets sets: [[UInt8]]) throws -> CMVideoFormatDescription {
+        guard !sets.isEmpty else { throw AnnexB.Error.missingParameterSets }
+        var format: CMVideoFormatDescription?
+        let status: OSStatus = withPointers(to: sets) { pointers, sizes in
+            switch codec {
+            case .h264:
+                return CMVideoFormatDescriptionCreateFromH264ParameterSets(
+                    allocator: kCFAllocatorDefault, parameterSetCount: sets.count, parameterSetPointers: pointers,
+                    parameterSetSizes: sizes, nalUnitHeaderLength: 4, formatDescriptionOut: &format)
+            case .hevc:
+                return CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+                    allocator: kCFAllocatorDefault, parameterSetCount: sets.count, parameterSetPointers: pointers,
+                    parameterSetSizes: sizes, nalUnitHeaderLength: 4, extensions: nil, formatDescriptionOut: &format)
+            }
+        }
+        guard status == noErr, let format else { throw Error.coreMedia("format description", status) }
+        return format
+    }
+
+    public static func sampleBuffer(fromAnnexB annexB: [UInt8], parsed: ParsedAnnexB,
+                                    format: CMVideoFormatDescription,
+                                    presentationTime: CMTime, displayImmediately: Bool = true) throws -> CMSampleBuffer {
+        let totalBytes = parsed.pictureByteCount
+        guard totalBytes > 0 else { throw Error.noDataBuffer }
+
+        var block: CMBlockBuffer?
+        var status = CMBlockBufferCreateWithMemoryBlock(
+            allocator: kCFAllocatorDefault, memoryBlock: nil, blockLength: totalBytes,
+            blockAllocator: kCFAllocatorDefault, customBlockSource: nil, offsetToData: 0,
+            dataLength: totalBytes, flags: kCMBlockBufferAssureMemoryNowFlag, blockBufferOut: &block)
+        guard status == kCMBlockBufferNoErr, let block else { throw Error.coreMedia("block buffer", status) }
+
+        var destPtr: UnsafeMutablePointer<CChar>?
+        var destLen = 0
+        status = CMBlockBufferGetDataPointer(block, atOffset: 0, lengthAtOffsetOut: &destLen,
+                                             totalLengthOut: nil, dataPointerOut: &destPtr)
+        guard status == kCMBlockBufferNoErr, let destPtr, destLen >= totalBytes else {
+            throw Error.coreMedia("block buffer pointer", status)
+        }
+
+        annexB.withUnsafeBufferPointer { src in
+            guard let srcBase = src.baseAddress else { return }
+            let dstBase = UnsafeMutableRawPointer(destPtr).assumingMemoryBound(to: UInt8.self)
+            var outOffset = 0
+            for range in parsed.pictureRanges {
+                let len = UInt32(range.count)
+                dstBase[outOffset] = UInt8(truncatingIfNeeded: len >> 24)
+                dstBase[outOffset + 1] = UInt8(truncatingIfNeeded: len >> 16)
+                dstBase[outOffset + 2] = UInt8(truncatingIfNeeded: len >> 8)
+                dstBase[outOffset + 3] = UInt8(truncatingIfNeeded: len)
+                outOffset += 4
+                memcpy(dstBase + outOffset, srcBase + range.lowerBound, range.count)
+                outOffset += range.count
+            }
+        }
+
+        var timing = CMSampleTimingInfo(duration: .invalid, presentationTimeStamp: presentationTime,
+                                        decodeTimeStamp: .invalid)
+        var size = totalBytes
+        var sample: CMSampleBuffer?
+        status = CMSampleBufferCreateReady(
+            allocator: kCFAllocatorDefault, dataBuffer: block, formatDescription: format, sampleCount: 1,
+            sampleTimingEntryCount: 1, sampleTimingArray: &timing, sampleSizeEntryCount: 1,
+            sampleSizeArray: &size, sampleBufferOut: &sample)
+        guard status == noErr, let sample else { throw Error.coreMedia("sample buffer", status) }
+
+        if let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: true),
+           CFArrayGetCount(attachments) > 0 {
+            let dictionary = unsafeBitCast(CFArrayGetValueAtIndex(attachments, 0), to: CFMutableDictionary.self)
+            if displayImmediately {
+                CFDictionarySetValue(dictionary, Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque(),
+                                     Unmanaged.passUnretained(kCFBooleanTrue).toOpaque())
+            }
+            if !parsed.isKeyframe {
                 CFDictionarySetValue(dictionary, Unmanaged.passUnretained(kCMSampleAttachmentKey_NotSync).toOpaque(),
                                      Unmanaged.passUnretained(kCFBooleanTrue).toOpaque())
             }

@@ -36,6 +36,8 @@ public enum TransportConstants {
 public protocol FramedTransport: AnyObject, Sendable {
     var isClosed: Bool { get }
     var droppedVideoFrames: Int { get }
+    var congestionDroppedVideoFrames: Int { get }
+    var queuedVideoFrames: Int { get }
     var transportKind: ActiveTransportKind { get }
 
     func start()

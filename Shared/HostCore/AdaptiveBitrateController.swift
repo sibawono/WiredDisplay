@@ -73,7 +73,8 @@ public struct AdaptiveBitrateController: Sendable {
         if let since = stableSince {
             guard now - since >= config.increaseInterval else { return nil }
             stableSince = now
-            let next = min(config.maxMbps, currentMbps + config.increaseStepMbps)
+            let step = max(config.increaseStepMbps, currentMbps / 10)
+            let next = min(config.maxMbps, currentMbps + step)
             guard next != currentMbps else { return nil }
             currentMbps = next
             return next

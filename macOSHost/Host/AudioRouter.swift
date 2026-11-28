@@ -73,11 +73,10 @@ final class AudioRouter: @unchecked Sendable {
             noteRealDefault(input: true)
             // Left over from a session that ended while the host was not
             // running: no iPad carries audio yet, so do not keep a dead
-            // default. With switching on, the iPad gets it back on connect.
-            if isEnabled {
-                if !iPadSpeaker { restoreFromIPad(input: false) }
-                if !iPadMicrophone { restoreFromIPad(input: true) }
-            }
+            // default (applies even with auto-switching off, since a dead
+            // default helps nobody).
+            if !iPadSpeaker { restoreFromIPad(input: false) }
+            if !iPadMicrophone { restoreFromIPad(input: true) }
         }
     }
 

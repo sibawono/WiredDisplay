@@ -18,6 +18,14 @@ struct PanelSnapshot {
         var detail: String { [model, "Key \(key)"].compactMap { $0 }.joined(separator: " · ") }
     }
 
+    struct AndroidUSBDevice: Identifiable, Equatable {
+        var id: String { serial }
+        var serial: String
+        var name: String
+        var inAccessoryMode: Bool
+        var approved: Bool
+    }
+
     var stateText = "Waiting for the iPad on USB"
     var stateColor: Color = .orange
     var connectedFor: String?
@@ -30,6 +38,7 @@ struct PanelSnapshot {
     var pixels: String?
     var encoding: String?
     var limitNote: String?
+    var canResetDecodeLimits = false
     var brightness: Float?
     var quality: QualityPreset?
     var inputEnabled = false
@@ -46,10 +55,14 @@ struct PanelSnapshot {
     var bothSpeakersBalance: Double = 1.0
     var paired: [Paired] = []
     var connectionCode: String?
+    var pamInstalled = false
+    var pamAllowWiFi = false
+    var pamEnrolledKeyFingerprint: String?
     var openAtLogin = false
     var keepDisplayAwake = true
     var keepMacAwake = false
     var transportMode: TransportMode = .usbOnly
+    var androidUSBDevices: [AndroidUSBDevice] = []
     var loginNeedsApproval = false
     var version = "0.0"
 }
@@ -58,6 +71,7 @@ struct PanelActions {
     var setDisplaySpace: (VirtualDisplayController.Space) -> Void = { _ in }
     var setBrightness: (Float) -> Void = { _ in }
     var setQuality: (QualityPreset) -> Void = { _ in }
+    var resetDecodeLimits: () -> Void = {}
     var setInput: (Bool) -> Void = { _ in }
     var setOpenAtLogin: (Bool) -> Void = { _ in }
     var setAutoSwitchAudio: (Bool) -> Void = { _ in }
@@ -65,6 +79,7 @@ struct PanelActions {
     var setKeepDisplayAwake: (Bool) -> Void = { _ in }
     var setKeepMacAwake: (Bool) -> Void = { _ in }
     var setTransportMode: (TransportMode) -> Void = { _ in }
+    var setAndroidAoaApproved: (String, Bool) -> Void = { _, _ in }
     var setLocalCursor: (Bool) -> Void = { _ in }
     var setAutoSwitchMicrophone: (Bool) -> Void = { _ in }
     var setBothSpeakers: (Bool) -> Void = { _ in }
@@ -75,6 +90,8 @@ struct PanelActions {
     var openAccessibility: () -> Void = {}
     var openScreenRecording: () -> Void = {}
     var forgetPaired: () -> Void = {}
+    var copyPamSetupCommand: () -> Void = {}
+    var setPamAllowWiFi: (Bool) -> Void = { _ in }
     var showLog: () -> Void = {}
     var quit: () -> Void = {}
 }
@@ -234,7 +251,17 @@ struct StatusPanelView: View {
                     }
                     if let encoding = s.encoding {
                         CardDivider()
-                        InfoLine(symbol: "film", title: encoding, detail: s.limitNote)
+                        HStack(alignment: .center, spacing: 8) {
+                            InfoLine(symbol: "film", title: encoding, detail: s.limitNote)
+                            if s.canResetDecodeLimits {
+                                Spacer(minLength: 4)
+                                Button("Reset") {
+                                    model.actions.resetDecodeLimits()
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                            }
+                        }
                     }
                 } else {
                     InfoLine(symbol: "display.trianglebadge.exclamationmark", title: "No iPad display",
@@ -440,6 +467,31 @@ struct StatusPanelView: View {
                 .foregroundStyle(s.paired.isEmpty ? Color.secondary : Color.red)
                 .disabled(s.paired.isEmpty)
             }
+            Card {
+                Text("iPad Touch ID / Face ID for Mac").font(.system(size: 11, weight: .semibold))
+                StatusLine(symbol: s.pamInstalled ? "touchid" : "lock.shield",
+                           title: s.pamInstalled ? "PAM module installed" : "Not installed",
+                           detail: s.pamEnrolledKeyFingerprint.map {
+                               "Enrolled key \($0) · \(s.pamAllowWiFi ? "USB-C + Wi-Fi" : "USB-C only")"
+                           } ?? "Approve sudo & Lock Screen using iPad Touch ID or Face ID",
+                           on: s.pamInstalled)
+                CardDivider()
+                ToggleLine(title: "Allow over encrypted Wi-Fi",
+                           detail: s.pamAllowWiFi
+                               ? "Approvals work over USB-C and encrypted local Wi-Fi"
+                               : "USB-C cable required for sudo and Lock Screen approval",
+                           isOn: Binding(get: { s.pamAllowWiFi },
+                                         set: { model.snapshot.pamAllowWiFi = $0; model.actions.setPamAllowWiFi($0) }))
+                CardDivider()
+                Button(action: model.actions.copyPamSetupCommand) {
+                    Label(s.pamInstalled ? "Copy Re-enroll Command" : "Copy Setup Command", systemImage: "doc.on.doc")
+                        .font(.system(size: 12))
+                }
+                .buttonStyle(.bordered)
+                Text("Enroll a key on the iPad (Controls › More), then run the copied sudo command in Terminal.")
+                    .font(.system(size: 10.5)).foregroundStyle(Color.caption)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 
@@ -460,6 +512,41 @@ struct StatusPanelView: View {
                 Text(transportDetail(s.transportMode))
                     .font(.system(size: 11)).foregroundStyle(Color.caption)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+            if !s.androidUSBDevices.isEmpty {
+                Card {
+                    Text("Android USB-C Devices").font(.system(size: 11, weight: .semibold))
+                    ForEach(s.androidUSBDevices) { device in
+                        HStack(spacing: 8) {
+                            Image(systemName: "apps.iphone")
+                                .font(.system(size: 13))
+                                .foregroundStyle(device.inAccessoryMode ? Color.green : Color.caption)
+                                .frame(width: 18)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(device.name).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                                Text(device.inAccessoryMode ? "Accessory mode" : (device.approved ? "Switching to accessory…" : "File transfer / charging"))
+                                    .font(.system(size: 10.5)).foregroundStyle(Color.caption)
+                            }
+                            Spacer(minLength: 4)
+                            if device.approved {
+                                Button("Remove") {
+                                    model.actions.setAndroidAoaApproved(device.serial, false)
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                            } else {
+                                Button("Connect") {
+                                    model.actions.setAndroidAoaApproved(device.serial, true)
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.small)
+                            }
+                        }
+                    }
+                    Text("Only approved Android devices are switched to USB accessory mode; others stay in file-transfer or charging mode.")
+                        .font(.system(size: 10.5)).foregroundStyle(Color.caption)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             Card {
                 Text("Permissions").font(.system(size: 11, weight: .semibold))

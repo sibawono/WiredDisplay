@@ -59,10 +59,17 @@ final class PowerMonitor {
         let onConsole = (session?[kCGSessionOnConsoleKey as String] as? Bool) ?? true
         let saverRunning = NSWorkspace.shared.runningApplications
             .contains { $0.bundleIdentifier == "com.apple.ScreenSaver.Engine" }
+        let mainDisplayAsleep = CGDisplayIsAsleep(CGMainDisplayID()) != 0
         let state = current.withLock { $0 }
-        guard state.locked != lockedNow || state.sessionActive != onConsole || state.screensaver != saverRunning,
+        guard state.locked != lockedNow || state.sessionActive != onConsole ||
+              state.screensaver != saverRunning || state.displaysAsleep != mainDisplayAsleep,
               !state.systemAsleep else { return }
-        update("reconcile") { $0.locked = lockedNow; $0.sessionActive = onConsole; $0.screensaver = saverRunning }
+        update("reconcile") {
+            $0.locked = lockedNow
+            $0.sessionActive = onConsole
+            $0.screensaver = saverRunning
+            $0.displaysAsleep = mainDisplayAsleep
+        }
     }
 
     private func observe(_ center: NotificationCenter, _ name: Notification.Name, _ change: @escaping @Sendable (inout PowerState) -> Void) {

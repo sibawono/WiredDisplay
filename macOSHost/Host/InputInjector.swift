@@ -61,6 +61,13 @@ final class InputInjector: @unchecked Sendable {
         self.power = power
     }
 
+    deinit {
+        if userActivity != 0 {
+            IOPMAssertionRelease(userActivity)
+            userActivity = 0
+        }
+    }
+
     /// Diagnostics (E-07): every non-move event is logged with where it was
     /// posted and where the real cursor ended up; moves are counted.
     private var movesSinceLog = 0
@@ -111,7 +118,13 @@ final class InputInjector: @unchecked Sendable {
             releaseAll()
             switch InputGate.decision(for: event, state: state) {
             case .moveOnly:
-                guard case .pointer(_, _, let x, let y) = event, withinRateLimit(), let bounds = liveBounds() else { return }
+                let coords: (Float, Float)?
+                switch event {
+                case .pointer(_, _, let x, let y): coords = (x, y)
+                case .stylus(_, let x, let y, _): coords = (x, y)
+                default: coords = nil
+                }
+                guard let (x, y) = coords, withinRateLimit(), let bounds = liveBounds() else { return }
                 lastPoint = clamp(CGPoint(x: bounds.minX + CGFloat(x) * bounds.width,
                                           y: bounds.minY + CGFloat(y) * bounds.height), to: bounds)
                 post(.mouseMoved, at: lastPoint!, button: .none, clickState: 0)
@@ -157,9 +170,10 @@ final class InputInjector: @unchecked Sendable {
             case .move:
                 guard withinRateLimit() else { return }
                 lastPoint = point
+                let dragClicks = heldButton == .left ? (lastDown?.count ?? 1) : 0
                 post(heldButton == .left ? .leftMouseDragged : .mouseMoved, at: point,
                      button: heldButton == .left ? .left : .none,
-                     clickState: heldButton == .left ? 1 : 0, pressure: Double(pressure))
+                     clickState: dragClicks, pressure: Double(pressure))
             case .down:
                 if heldButton != .none { releaseAll() }
                 lastPoint = point
@@ -175,10 +189,7 @@ final class InputInjector: @unchecked Sendable {
                 trace("posted stylus down", point)
             case .up:
                 guard heldButton == .left else { return }
-                lastPoint = point
-                heldButton = .none
-                let clicks = lastDown?.count ?? 1
-                post(.leftMouseUp, at: point, button: .left, clickState: clicks, pressure: 0)
+                release(.left, at: point)
                 trace("posted stylus up", point)
             }
         case .scroll(let dx, let dy):
@@ -477,7 +488,9 @@ final class InputInjector: @unchecked Sendable {
             case nil: break
             }
         }
-        if capsLock { flags.insert(.maskAlphaShift) }
+        if CGEventSource.flagsState(.hidSystemState).contains(.maskAlphaShift) {
+            flags.insert(.maskAlphaShift)
+        }
         return flags
     }
 
@@ -488,8 +501,9 @@ final class InputInjector: @unchecked Sendable {
         if usage == KeyMap.capsLockUsage {
             // Toggle on press, like the real key; the release does nothing.
             guard down else { return }
-            capsLock.toggle()
-            postKey(virtualKey, down: capsLock, usage: usage)
+            let nextCaps = !CGEventSource.flagsState(.hidSystemState).contains(.maskAlphaShift)
+            capsLock = nextCaps
+            postKey(virtualKey, down: nextCaps, usage: usage)
             return
         }
         if down {

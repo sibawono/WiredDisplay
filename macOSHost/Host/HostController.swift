@@ -119,6 +119,17 @@ final class HostController: @unchecked Sendable {
         UserDefaults.standard.string(forKey: transportModeKey).flatMap(TransportMode.init(rawValue:)) ?? .usbOnly
     }
 
+    /// USB serials of Android devices the user explicitly opted in for USB-C AOA mode.
+    static let aoaApprovedSerialsKey = "aoaApprovedSerials"
+    static func aoaApprovedSerials() -> Set<String> {
+        Set(UserDefaults.standard.stringArray(forKey: aoaApprovedSerialsKey) ?? [])
+    }
+    static func setAoaApproved(_ serial: String, approved: Bool) {
+        var current = aoaApprovedSerials()
+        if approved { current.insert(serial) } else { current.remove(serial) }
+        UserDefaults.standard.set(Array(current).sorted(), forKey: aoaApprovedSerialsKey)
+    }
+
     private let options: Options
     private let transportModeLock: OSAllocatedUnfairLock<TransportMode>
     var transportMode: TransportMode { transportModeLock.withLock { $0 } }
@@ -130,11 +141,12 @@ final class HostController: @unchecked Sendable {
         }
         guard previous != mode else { return }
         Log.info("transport mode changed: \(previous.rawValue) -> \(mode.rawValue)")
+        resetBackoff.withLock { $0 = true }
+        runLoopWake.signal()
         queue.async { [self] in
             if let active = socket {
                 if (active.transportKind == .wifi && !mode.allowsWiFi) ||
                    (active.transportKind == .usb && !mode.allowsUSB) {
-                    resetBackoff.withLock { $0 = true }
                     active.close("transport mode changed to \(mode.rawValue)")
                 }
             }
@@ -152,6 +164,69 @@ final class HostController: @unchecked Sendable {
     private let stateHandler: @Sendable (State) -> Void
     /// The fleet's record of this controller's state (D-041).
     var onStateRecorded: (@Sendable (State) -> Void)?
+    /// Notifies the fleet when the iPad changes Quality so `HostFleet.options` stays in sync.
+    var onQualityChanged: (@Sendable (QualityPreset) -> Void)?
+    /// The USB serial currently served by this controller (non-nil while on a USB session).
+    private let activeUSBSerialLock = OSAllocatedUnfairLock<String?>(initialState: nil)
+    var activeUSBSerial: String? { activeUSBSerialLock.withLock { $0 } }
+    /// Connected iPad's Secure Enclave P-256 public key (65 bytes X9.63), if enrolled for PAM.
+    private let biometricKeyLock = OSAllocatedUnfairLock<[UInt8]?>(initialState: nil)
+    var biometricPublicKey: [UInt8]? { biometricKeyLock.withLock { $0 } }
+    private let pamPendingLock = OSAllocatedUnfairLock<(nextID: UInt32, waiters: [UInt32: (sem: DispatchSemaphore, response: PamBridgeServer.Response?)])>(initialState: (1, [:]))
+    /// Called when a trusted session completes its Hello handshake (for pushing any active lockscreen challenge).
+    var onSessionReady: (@Sendable (HostController) -> Void)?
+    /// Called when the iPad responds to a long-lived Lock Screen biometric challenge (`requestID >= 0x8000_0001`).
+    var onLockscreenAuthResponse: (@Sendable (UInt32, UInt8, [UInt8]) -> Void)?
+
+    /// Sends a Lock Screen or Admin Touch ID / Face ID challenge to this iPad.
+    func pushLockscreenChallenge(requestID: UInt32, service: String, username: String, reason: String, nonce: [UInt8], allowWiFi: Bool) {
+        queue.async { [self] in
+            guard trusted, let socket, !socket.isClosed else { return }
+            if socket.transportKind == .wifi && !allowWiFi { return }
+            send(.authChallenge(requestID: requestID, service: service, username: username,
+                                reason: reason, nonce: nonce), on: socket)
+        }
+    }
+
+    /// Tells this iPad to dismiss any displayed Lock Screen Unlock Mac pill.
+    func clearLockscreenChallenge() {
+        queue.async { [self] in
+            guard trusted, let socket, !socket.isClosed else { return }
+            send(.authChallenge(requestID: 0, service: "lockscreen-clear", username: "",
+                                reason: "", nonce: [UInt8](repeating: 0, count: BiometricAuthMessage.nonceLength)),
+                 on: socket)
+        }
+    }
+
+    /// Sends a PAM Touch ID / Face ID challenge to this connected iPad and waits for its Secure Enclave signature.
+    /// Returns nil immediately if this controller has no eligible trusted session.
+    func requestBiometricAuth(_ request: PamBridgeServer.Request, allowWiFi: Bool = false) -> PamBridgeServer.Response? {
+        let sem = DispatchSemaphore(value: 0)
+        let reqID = pamPendingLock.withLock { state -> UInt32 in
+            let id = state.nextID
+            state.nextID &+= 1
+            if state.nextID == 0 { state.nextID = 1 }
+            state.waiters[id] = (sem, nil)
+            return id
+        }
+        let sent: Bool = queue.sync {
+            guard trusted, let socket, !socket.isClosed else { return false }
+            if socket.transportKind == .wifi && !allowWiFi { return false }
+            send(.authChallenge(requestID: reqID, service: request.service, username: request.username,
+                                reason: request.reason, nonce: request.nonce), on: socket)
+            return true
+        }
+        guard sent else {
+            _ = pamPendingLock.withLock { $0.waiters.removeValue(forKey: reqID) }
+            return nil
+        }
+        let waited = sem.wait(timeout: .now() + request.timeoutSeconds)
+        let entry = pamPendingLock.withLock { $0.waiters.removeValue(forKey: reqID) }
+        guard waited == .success, let response = entry?.response else {
+            return PamBridgeServer.Response(status: 2, signature: [])
+        }
+        return response
+    }
 
     private func onState(_ state: State) {
         stateHandler(state)
@@ -171,15 +246,26 @@ final class HostController: @unchecked Sendable {
     private var socket: (any FramedTransport)?
     private var abrController: AdaptiveBitrateController?
     private var lastObservedVideoDrops = 0
+    private var smoothedRTTMs: Double?
     private var peerHello: Hello?
-    private var lastHeard = Date()
+    private var lastHeardUptime: TimeInterval = ProcessInfo.processInfo.systemUptime
+    private var lastSentVolume: (level: Float, muted: Bool)?
     private var audio: HostAudioBridge?
+    private static let cachedHostName: String = Host.current().localizedName ?? "Mac"
     private let helloArrived = DispatchSemaphore(value: 0)
     /// The client's proven identity, and whether WE trust it yet. Until then,
     /// control messages wait in `pendingControl` and media/input are dropped.
     private var verifiedPeer: SecureChannel.Peer?
-    /// Formats the connected iPad cannot decode (D-031), from `decodeLimitsKey`.
-    private let peerLimits = OSAllocatedUnfairLock<(fingerprint: String?, limits: DecodeLimits)>(initialState: (nil, []))
+    private struct PeerDecodeLimits {
+        var fingerprint: String?
+        /// Limits declared by the client in `Hello.codecs` (immutable for the session).
+        var declared: DecodeLimits = []
+        /// Limits learned from `.decodeFailed` during this session (cleared on Quality switch or Reset).
+        var learned: DecodeLimits = []
+        var effective: DecodeLimits { declared.union(learned) }
+    }
+    /// Formats the connected client cannot decode (D-031); learned limits stay session-scoped.
+    private let peerLimits = OSAllocatedUnfairLock(initialState: PeerDecodeLimits())
     private var lastDecodeStepDown = Date.distantPast
     private var trusted = false
     private var pendingControl: [ControlMessage] = []
@@ -314,7 +400,15 @@ final class HostController: @unchecked Sendable {
     private func updateCursorEcho(_ pipeline: VideoPipeline) {
         cursorEcho?.stop()
         cursorEcho = nil
-        guard localCursor, let socket = pipeline.socket, let display = currentDisplay.withLock({ $0 }) else { return }
+        guard let socket = pipeline.socket else { return }
+        guard localCursor else {
+            if !socket.isClosed {
+                send(.cursor(x: 0, y: 0, visible: false), on: socket)
+            }
+            return
+        }
+        let display = pipeline.captureID != 0 ? pipeline.captureID : currentDisplay.withLock({ $0 })
+        guard let display else { return }
         let echo = CursorEcho(displayID: display) { [weak self, weak socket] message in
             guard let self, let socket, !socket.isClosed else { return }
             self.send(message, on: socket)
@@ -374,6 +468,8 @@ final class HostController: @unchecked Sendable {
             current = value
             return true
         }) else { return false }
+        let notify = onBrightnessChange
+        DispatchQueue.main.async { notify?(value) }
         queue.async { [self] in
             guard trusted, let socket, !socket.isClosed else { return }
             send(.brightness(value), on: socket)
@@ -392,48 +488,65 @@ final class HostController: @unchecked Sendable {
 
     static let decodeLimitsKey = "decodeLimits"
 
-    private static func savedLimits() -> [String: Int] {
-        UserDefaults.standard.dictionary(forKey: decodeLimitsKey) as? [String: Int] ?? [:]
-    }
-
     /// What the connected iPad cannot decode, for the menu; nil if nothing.
     var decodeLimitNote: String? {
-        let limits = peerLimits.withLock { $0.limits }
+        let limits = peerLimits.withLock { $0.effective }
         return limits.isEmpty ? nil : limits.summary
+    }
+
+    /// True when the active limit was learned dynamically (can be retried by the user).
+    var canResetDecodeLimits: Bool {
+        peerLimits.withLock { !$0.learned.isEmpty }
     }
 
     func forgetDecodeLimits() {
         UserDefaults.standard.removeObject(forKey: Self.decodeLimitsKey)
-        peerLimits.withLock { $0.limits = [] }
+        peerLimits.withLock { $0.learned = [] }
+    }
+
+    /// Clears learned decode limits for the active session and retries the user's preset.
+    func resetDecodeLimits() {
+        UserDefaults.standard.removeObject(forKey: Self.decodeLimitsKey)
+        let cleared = peerLimits.withLock { state -> Bool in
+            guard !state.learned.isEmpty else { return false }
+            state.learned = []
+            return true
+        }
+        guard cleared else { return }
+        Log.info("decode limits reset by the user; retrying selected quality")
+        queue.async { [self] in lastDecodeStepDown = .distantPast }
+        videoQueue.async { [self] in
+            do { try restartEncoding() } catch {
+                Log.warn("decode limit reset failed: \(error)")
+                queue.async { [self] in socket?.close("decode limit reset failed: \(error)") }
+            }
+        }
     }
 
     /// The quality actually encoded: the user's preset, within the iPad's limits.
     private func effectiveQuality() -> (chroma: ChromaMode, tenBit: Bool) {
         var current = quality.withLock { $0 }
-        let limits = peerLimits.withLock { $0.limits }
+        let limits = peerLimits.withLock { $0.effective }
         if limits.contains(.no444) { current.chroma = .c420 }
         if limits.contains(.no10Bit) { current.tenBit = false }
         return current
     }
 
-    /// The iPad says it cannot decode the stream: drop 4:4:4, then 10-bit,
-    /// remember it for this iPad, and restart the encoder. On `queue`.
+    /// The iPad says it cannot decode the stream: drop 4:4:4, then 10-bit
+    /// for the current session, and restart the encoder. On `queue`.
     private func handleDecodeFailure(socket: any FramedTransport) {
         guard Date().timeIntervalSince(lastDecodeStepDown) > 3 else { return } // a switch is under way
         let current = effectiveQuality()
-        let (fingerprint, limits) = peerLimits.withLock { $0 }
+        let limits = peerLimits.withLock { $0.effective }
         guard let next = DecodeLimits.next(after: limits, uses444: current.chroma != .c420, tenBit: current.tenBit) else {
             Log.warn("iPad cannot decode 4:2:0 8-bit either; nothing left to step down to")
             return
         }
         lastDecodeStepDown = Date()
-        peerLimits.withLock { $0.limits = next }
-        if let fingerprint {
-            var saved = Self.savedLimits()
-            saved[fingerprint] = next.rawValue
-            UserDefaults.standard.set(saved, forKey: Self.decodeLimitsKey)
+        peerLimits.withLock { state in
+            state.learned.formUnion(next.subtracting(state.declared))
         }
-        Log.warn("iPad cannot decode \(current.chroma.rawValue) \(current.tenBit ? 10 : 8)-bit; limiting it to \(next.summary)")
+        Log.warn("iPad cannot decode \(current.chroma.rawValue) \(current.tenBit ? 10 : 8)-bit; limiting session to \(next.summary)")
         videoQueue.async { [self] in
             do { try restartEncoding() } catch {
                 Log.warn("format step-down failed: \(error)")
@@ -443,16 +556,26 @@ final class HostController: @unchecked Sendable {
     }
 
     /// Switches the encoder live (the display and the session stay up) and
-    /// remembers the choice for the next launch.
+    /// remembers the choice for the next launch. Explicitly picking a preset
+    /// clears session-learned decode limits so the user can retry 4:4:4/10-bit.
     func setQuality(_ preset: QualityPreset) {
         quality.withLock { $0 = (preset.chroma, preset.tenBit) }
         UserDefaults.standard.set(preset.rawValue, forKey: QualityPreset.defaultsKey)
+        let hadLearnedLimits = peerLimits.withLock { state -> Bool in
+            let had = !state.learned.isEmpty
+            state.learned = []
+            return had
+        }
+        if hadLearnedLimits {
+            UserDefaults.standard.removeObject(forKey: Self.decodeLimitsKey)
+            Log.info("cleared session decode limits on explicit quality switch")
+        }
         Log.info("quality set to \(preset.rawValue) (\(preset.chroma.rawValue), \(preset.tenBit ? 10 : 8)-bit)")
-        if let idx = QualityPreset.allCases.firstIndex(of: preset) {
-            queue.async { [self] in
-                guard trusted, let socket, !socket.isClosed else { return }
-                send(.qualityPreset(UInt8(idx)), on: socket)
-            }
+        queue.async { [self] in
+            if hadLearnedLimits { lastDecodeStepDown = .distantPast }
+            guard let idx = QualityPreset.allCases.firstIndex(of: preset),
+                  trusted, let socket, !socket.isClosed else { return }
+            send(.qualityPreset(UInt8(idx)), on: socket)
         }
         videoQueue.async { [self] in
             do { try restartEncoding() } catch {
@@ -489,6 +612,7 @@ final class HostController: @unchecked Sendable {
     func stop() {
         stopping.withLock { $0 = true }
         wakeSignal.signal()
+        runLoopWake.signal()
         helloArrived.signal()
         queue.async { [self] in socket?.close("host stopping") }
     }
@@ -591,6 +715,7 @@ final class HostController: @unchecked Sendable {
     /// True from "will sleep" until "did wake": no session, no reconnects.
     private let systemAsleep = OSAllocatedUnfairLock(initialState: false)
     private let wakeSignal = DispatchSemaphore(value: 0)
+    private let runLoopWake = DispatchSemaphore(value: 0)
     private let resetBackoff = OSAllocatedUnfairLock(initialState: false)
     /// Accessed on `audioQueue`: speaker tap paused during display sleep so
     /// coreaudiod releases its idle-sleep assertion (PLW-06).
@@ -611,6 +736,7 @@ final class HostController: @unchecked Sendable {
             systemAsleep.withLock { $0 = false }
             resetBackoff.withLock { $0 = true }
             wakeSignal.signal()
+            runLoopWake.signal()
         }
         // PLW-06: pause the speaker IOProc while displays sleep so coreaudiod
         // does not block Mac idle sleep; resume seamlessly when displays wake.
@@ -742,6 +868,7 @@ final class HostController: @unchecked Sendable {
     private func runLoop() {
         var backoff: TimeInterval = 1
         var bonjour: BonjourBrowser?
+        var aoaSwitchAttempted: [UInt32: Date] = [:]
         defer { bonjour?.stop() }
 
         while !isStopping {
@@ -749,11 +876,15 @@ final class HostController: @unchecked Sendable {
             if resetBackoff.withLock({ value -> Bool in defer { value = false }; return value }) { backoff = 1 }
 
             let mode = transportMode
-            if mode.allowsWiFi && bonjour == nil {
-                let browser = BonjourBrowser()
+            let allowsWiFiHere = deviceSerial == nil && mode.allowsWiFi
+            if allowsWiFiHere && bonjour == nil {
+                let wake = runLoopWake
+                let browser = BonjourBrowser { peers in
+                    if !peers.isEmpty { wake.signal() }
+                }
                 browser.start()
                 bonjour = browser
-            } else if !mode.allowsWiFi, let existing = bonjour {
+            } else if !allowsWiFiHere, let existing = bonjour {
                 existing.stop()
                 bonjour = nil
             }
@@ -761,10 +892,15 @@ final class HostController: @unchecked Sendable {
             let started = Date()
             var sessionRan = false
 
-            // Always prefer USB-C whenever allowed and available.
+            // Always prefer USB-C whenever allowed and available (Apple usbmuxd, Android AOA, or ADB).
             if mode.allowsUSB {
-                let wired = pollWiredDevicesOnce()
+                let isAdbBound = deviceSerial.flatMap(AdbClient.stripPrefix) != nil
+                let isAoaBound = deviceSerial.flatMap(AoaClient.stripPrefix) != nil
+                let wired = (isAdbBound || isAoaBound) ? [] : pollWiredDevicesOnce()
                 let mine = deviceSerial.map { serial in wired.filter { $0.serialNumber == serial } } ?? wired
+                let aoaDevices = isAdbBound ? [] : pollAoaDevicesOnce()
+                let adbDevices = isAoaBound ? [] : pollAdbDevicesOnce()
+
                 if !mine.isEmpty {
                     let devices = UsbmuxDevice.preferring(serial: lastGoodSerial, in: mine)
                     onState(.connecting)
@@ -782,24 +918,74 @@ final class HostController: @unchecked Sendable {
                         }
                         break
                     }
-                    if !sessionRan && mode == .usbOnly {
-                        let which = devices.count == 1 ? "the iPad" : "any of the \(devices.count) cabled devices"
-                        noteWait("nothing listens on port \(SessionConstants.clientPort) on \(which) (WiredDisplay app not open or not in front?)")
-                        onState(.waitingForDevice)
-                        Thread.sleep(forTimeInterval: 1)
-                        continue
+                }
+                if !sessionRan && !aoaDevices.isEmpty {
+                    let activeLocations = Set(aoaDevices.map(\.locationID))
+                    aoaSwitchAttempted = aoaSwitchAttempted.filter { activeLocations.contains($0.key) }
+                    onState(.connecting)
+                    for device in aoaDevices where !isStopping && !systemAsleep.withLock({ $0 }) {
+                        if !device.inAccessoryMode {
+                            // Opt-in only: never switch an Android phone out of MTP/charging unless user approved it.
+                            guard Self.aoaApprovedSerials().contains(device.serial) else { continue }
+                            if let last = aoaSwitchAttempted[device.locationID], Date().timeIntervalSince(last) < 30 {
+                                continue
+                            }
+                            aoaSwitchAttempted[device.locationID] = Date()
+                            do {
+                                try AoaClient.switchToAccessory(device)
+                                Log.info("AOA: switched approved Android device \(device.serial) to accessory mode; waiting for re-enumeration")
+                                Thread.sleep(forTimeInterval: 1.5)
+                            } catch {
+                                Log.warn("AOA: switch failed for \(device.serial): \(error)")
+                            }
+                            continue
+                        }
+                        do {
+                            try runAoaSession(device)
+                            sessionRan = true
+                            onState(.backingOff("Android USB AOA session ended"))
+                        } catch {
+                            sessionRan = true
+                            Log.warn("Android USB AOA session ended with error: \(error)")
+                            onState(.backingOff("\(error)"))
+                        }
+                        break
                     }
-                } else if mode == .usbOnly {
-                    if isStopping { break }
-                    noteWait("waiting for device \(deviceSerial ?? "iPad") on USB")
+                }
+                if !sessionRan && !adbDevices.isEmpty {
+                    onState(.connecting)
+                    for device in adbDevices where !isStopping && !systemAsleep.withLock({ $0 }) {
+                        do {
+                            try runAdbSession(device)
+                            sessionRan = true
+                            onState(.backingOff("Android USB session ended"))
+                        } catch SessionError.notListening {
+                            continue
+                        } catch {
+                            sessionRan = true
+                            Log.warn("Android USB session ended with error: \(error)")
+                            onState(.backingOff("\(error)"))
+                        }
+                        break
+                    }
+                }
+                if !sessionRan && mode == .usbOnly {
+                    if !mine.isEmpty || !aoaDevices.isEmpty || !adbDevices.isEmpty {
+                        let total = mine.count + aoaDevices.count + adbDevices.count
+                        let which = total == 1 ? "the device" : "any of the \(total) cabled devices"
+                        noteWait("nothing listens on port \(SessionConstants.clientPort) on \(which) (WiredDisplay app not open or not in front?)")
+                    } else {
+                        if isStopping { break }
+                        noteWait("waiting for device \(deviceSerial ?? "iPad or Android") on USB")
+                    }
                     onState(.waitingForDevice)
-                    Thread.sleep(forTimeInterval: 1)
+                    _ = runLoopWake.wait(timeout: .now() + 1)
                     continue
                 }
             }
 
-            // Local Wi-Fi fallback or Wi-Fi-only mode.
-            if !sessionRan, mode.allowsWiFi, let peers = bonjour?.peers, !peers.isEmpty {
+            // Local Wi-Fi fallback or Wi-Fi-only mode (unbound controller only).
+            if !sessionRan, allowsWiFiHere, let peers = bonjour?.peers, !peers.isEmpty {
                 onState(.connecting)
                 for peer in peers where !isStopping && !systemAsleep.withLock({ $0 }) {
                     do {
@@ -819,12 +1005,17 @@ final class HostController: @unchecked Sendable {
                          ? "waiting for WiredDisplay iPad on local Wi-Fi (_wireddisplay._tcp)"
                          : "waiting for iPad on USB-C or local Wi-Fi")
                 onState(.waitingForDevice)
-                Thread.sleep(forTimeInterval: 1)
+                _ = runLoopWake.wait(timeout: .now() + 1)
+                continue
+            }
+            // Skip backoff sleep immediately if a mode switch, wake, or upgrade requested it.
+            if resetBackoff.withLock({ value -> Bool in defer { value = false }; return value }) {
+                backoff = 1
                 continue
             }
             // Never reconnect in a tight loop (review finding 9).
             if Date().timeIntervalSince(started) > 10 { backoff = 1 }
-            Thread.sleep(forTimeInterval: backoff)
+            _ = runLoopWake.wait(timeout: .now() + backoff)
             backoff = min(backoff * 2, 8)
         }
         onState(.stopped)
@@ -840,11 +1031,39 @@ final class HostController: @unchecked Sendable {
         return wired
     }
 
-    /// Returns true only when a wired USB-C device actually has WiredDisplay listening on clientPort.
+    private func pollAoaDevicesOnce() -> [AoaDevice] {
+        let all = AoaClient.listDevices()
+        if let serial = deviceSerial {
+            guard let rawSerial = AoaClient.stripPrefix(serial) else { return [] }
+            return all.filter { $0.serial == rawSerial }
+        }
+        return all
+    }
+
+    private func pollAdbDevicesOnce() -> [AdbDevice] {
+        guard let devices = try? AdbClient.listDevices() else { return [] }
+        let wired = AdbDevice.wiredOnly(devices)
+        if let serial = deviceSerial {
+            guard let rawSerial = AdbClient.stripPrefix(serial) else { return [] }
+            return wired.filter { $0.serial == rawSerial }
+        }
+        return wired
+    }
+
+    /// Returns true only when a wired USB-C device (Apple or Android) has WiredDisplay listening on clientPort.
     private func hasListeningWiredDevice() -> Bool {
         for device in pollWiredDevicesOnce() {
             guard let probe = try? UsbmuxConnection() else { continue }
             if (try? probe.connect(to: device, port: SessionConstants.clientPort)) != nil {
+                return true
+            }
+        }
+        for device in pollAoaDevicesOnce() where device.inAccessoryMode {
+            return true
+        }
+        for device in pollAdbDevicesOnce() {
+            if let fd = try? AdbClient.connect(to: device.serial, clientPort: SessionConstants.clientPort) {
+                Darwin.close(fd)
                 return true
             }
         }
@@ -983,6 +1202,101 @@ final class HostController: @unchecked Sendable {
                                 identityResult: identityResult, identityRead: identityRead)
     }
 
+    private func runAoaSession(_ device: AoaDevice) throws {
+        let descriptor = try AoaClient.openBridge(device)
+        Log.info("connected to Android device \(device.serial) over USB-C (AOA)")
+        sessionDeviceSerial = device.fleetSerial
+        let identityResult = OSAllocatedUnfairLock<DeviceIdentity?>(
+            initialState: DeviceIdentity(name: nil, productType: device.product, deviceClass: "Android")
+        )
+        let identityRead = DispatchSemaphore(value: 0)
+        identityRead.signal()
+
+        var generator = SystemRandomNumberGenerator()
+        let ended = DispatchSemaphore(value: 0)
+        let endReason = OSAllocatedUnfairLock(initialState: "")
+        let verified = DispatchSemaphore(value: 0)
+        let channel: SecureChannel
+        do {
+            channel = SecureChannel(role: .host, identity: try trust.identity())
+        } catch {
+            Darwin.close(descriptor)
+            throw error
+        }
+        let socket = FramedSocket(
+            descriptor: descriptor, sessionID: generator.next(), maxVideoFrames: 4, channel: channel,
+            onVerified: { [weak self] peer, origin in
+                guard let self else { return }
+                self.queue.async {
+                    guard self.socket === origin else { return }
+                    self.verifiedPeer = peer
+                    verified.signal()
+                }
+            },
+            onFrame: { [weak self] frame, origin in
+                guard let self else { return }
+                self.queue.async { self.handle(frame, from: origin) }
+            },
+            onClose: { [weak self] reason in
+                endReason.withLock { $0 = reason }
+                ended.signal()
+                verified.signal()
+                self?.helloArrived.signal()
+            })
+        try runTransportSession(socket: socket, ended: ended, endReason: endReason, verified: verified,
+                                identityResult: identityResult, identityRead: identityRead)
+    }
+
+    private func runAdbSession(_ device: AdbDevice) throws {
+        let descriptor: Int32
+        do {
+            descriptor = try AdbClient.connect(to: device.serial, clientPort: SessionConstants.clientPort)
+        } catch AdbClient.ClientError.failed {
+            throw SessionError.notListening
+        }
+        Log.info("connected to Android device \(device.serial) over USB (ADB), port \(SessionConstants.clientPort)")
+        sessionDeviceSerial = device.fleetSerial
+        let identityResult = OSAllocatedUnfairLock<DeviceIdentity?>(
+            initialState: DeviceIdentity(name: nil, productType: device.model, deviceClass: "Android")
+        )
+        let identityRead = DispatchSemaphore(value: 0)
+        identityRead.signal()
+
+        var generator = SystemRandomNumberGenerator()
+        let ended = DispatchSemaphore(value: 0)
+        let endReason = OSAllocatedUnfairLock(initialState: "")
+        let verified = DispatchSemaphore(value: 0)
+        let channel: SecureChannel
+        do {
+            channel = SecureChannel(role: .host, identity: try trust.identity())
+        } catch {
+            Darwin.close(descriptor)
+            throw error
+        }
+        let socket = FramedSocket(
+            descriptor: descriptor, sessionID: generator.next(), maxVideoFrames: 4, channel: channel,
+            onVerified: { [weak self] peer, origin in
+                guard let self else { return }
+                self.queue.async {
+                    guard self.socket === origin else { return }
+                    self.verifiedPeer = peer
+                    verified.signal()
+                }
+            },
+            onFrame: { [weak self] frame, origin in
+                guard let self else { return }
+                self.queue.async { self.handle(frame, from: origin) }
+            },
+            onClose: { [weak self] reason in
+                endReason.withLock { $0 = reason }
+                ended.signal()
+                verified.signal()
+                self?.helloArrived.signal()
+            })
+        try runTransportSession(socket: socket, ended: ended, endReason: endReason, verified: verified,
+                                identityResult: identityResult, identityRead: identityRead)
+    }
+
     private func runWiFiSession(_ bonjourPeer: BonjourPeer) throws {
         Log.info("connecting to \(bonjourPeer.name) over local Wi-Fi (\(bonjourPeer.id))")
         sessionDeviceSerial = "wifi-\(bonjourPeer.id)"
@@ -1039,16 +1353,24 @@ final class HostController: @unchecked Sendable {
         let abr: AdaptiveBitrateController? = socket.transportKind == .wifi
             ? AdaptiveBitrateController(config: .wifi(ceilingMbps: options.bitrateMbps))
             : nil
+        let notifyBrightnessNil = onBrightnessChange
+        if let serial = sessionDeviceSerial, socket.transportKind == .usb {
+            activeUSBSerialLock.withLock { $0 = serial }
+        } else {
+            activeUSBSerialLock.withLock { $0 = nil }
+        }
         queue.sync {
             self.socket = socket
             self.audio = audio
             self.abrController = abr
             self.lastObservedVideoDrops = 0
+            self.smoothedRTTMs = nil
+            self.lastSentVolume = nil
             peerHello = nil
             verifiedPeer = nil
             trusted = false
             pendingControl = []
-            lastHeard = Date()
+            lastHeardUptime = ProcessInfo.processInfo.systemUptime
             iPadBrightness.withLock { $0 = nil }
             sessionStatus.withLock {
                 $0 = SessionStatus()
@@ -1058,6 +1380,7 @@ final class HostController: @unchecked Sendable {
             if ownsAudio { audioRouter.iPadRoute(speaker: false, microphone: false) }
             releaseAudio()
         }
+        DispatchQueue.main.async { notifyBrightnessNil?(nil) }
         while helloArrived.wait(timeout: .now()) == .success {} // drain stale signals
         socket.start()
 
@@ -1080,6 +1403,19 @@ final class HostController: @unchecked Sendable {
                 releaseAudio()
                 sessionStatus.withLock { $0.speaker = false; $0.microphone = false }
             }
+            activeUSBSerialLock.withLock { $0 = nil }
+            biometricKeyLock.withLock { $0 = nil }
+            let pendingWaiters = pamPendingLock.withLock { state -> [DispatchSemaphore] in
+                let sems = state.waiters.values.map(\.sem)
+                for key in state.waiters.keys {
+                    state.waiters[key]?.response = PamBridgeServer.Response(status: 2, signature: [])
+                }
+                return sems
+            }
+            pendingWaiters.forEach { $0.signal() }
+            iPadBrightness.withLock { $0 = nil }
+            let notifyEnd = onBrightnessChange
+            DispatchQueue.main.async { notifyEnd?(nil) }
             Log.info("session cleaned up (\(socket.transportKind.rawValue)): \(endReason.withLock { $0 })")
             connectionCode.withLock { $0 = nil }
         }
@@ -1089,28 +1425,43 @@ final class HostController: @unchecked Sendable {
         if isStopping || socket.isClosed { throw SessionError.closedDuringSetup }
         guard let peer = queue.sync(execute: { verifiedPeer }) else { throw SessionError.notAuthenticated }
         Log.info("iPad authenticated over \(socket.transportKind.rawValue): key \(peer.fingerprint), pairing code \(peer.pairingCode)")
-        let known = DecodeLimits(rawValue: Self.savedLimits()[peer.fingerprint] ?? 0)
-        peerLimits.withLock { $0 = (peer.fingerprint, known) }
-        if !known.isEmpty { Log.info("this iPad's decode limits: \(known.summary)") }
+        // Purge any legacy persisted decode limits so capable iPads are never permanently stuck.
+        if UserDefaults.standard.object(forKey: Self.decodeLimitsKey) != nil {
+            UserDefaults.standard.removeObject(forKey: Self.decodeLimitsKey)
+        }
+        peerLimits.withLock { $0 = PeerDecodeLimits(fingerprint: peer.fingerprint) }
         connectionCode.withLock { $0 = peer.pairingCode }
 
+        let isWiFi = socket.transportKind == .wifi
+        let pingInterval: TimeInterval = isWiFi ? 0.5 : 2.0
+        var keepaliveTicks = 0
         keepalive.setEventHandler { [weak self, weak socket] in
             guard let self, let socket else { return }
-            if Date().timeIntervalSince(self.lastHeard) > 6 { return socket.close("no traffic from client for 6 s") }
+            let now = ProcessInfo.processInfo.systemUptime
+            if now - self.lastHeardUptime > 6 { return socket.close("no traffic from client for 6 s") }
             self.send(.ping(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)), on: socket)
-            self.videoQueue.async { self.followDisplayMode() }
-            // In Automatic mode, probe for a listening USB-C WiredDisplay device off-queue
-            // so unrelated USB devices (e.g. an iPhone) never disrupt an active Wi-Fi session.
-            if socket.transportKind == .wifi, self.transportMode == .automatic {
-                DispatchQueue.global(qos: .utility).async { [weak self, weak socket] in
-                    guard let self, let socket, !socket.isClosed, self.hasListeningWiredDevice() else { return }
-                    Log.info("listening USB-C WiredDisplay device detected during Wi-Fi session; switching to USB-C")
-                    self.resetBackoff.withLock { $0 = true }
-                    socket.close("upgrading to USB-C")
+            keepaliveTicks += 1
+            // Follow display mode and sync live Mac volume/mute back to the iPad (~1-2 s).
+            if !isWiFi || keepaliveTicks % 2 == 0 {
+                self.videoQueue.async { self.followDisplayMode() }
+                if self.trusted {
+                    let defaultOut = AudioDevices.defaultDevice(input: false)
+                    if let level = AudioDevices.outputVolume(defaultOut) {
+                        let muted = AudioDevices.outputMuted(defaultOut)
+                        if let last = self.lastSentVolume {
+                            if abs(last.level - level) >= 0.005 || last.muted != muted {
+                                self.lastSentVolume = (level, muted)
+                                self.send(.volume(level: level, muted: muted), on: socket)
+                            }
+                        } else {
+                            self.lastSentVolume = (level, muted)
+                            self.send(.volume(level: level, muted: muted), on: socket)
+                        }
+                    }
                 }
             }
         }
-        keepalive.schedule(deadline: .now() + 2, repeating: 2)
+        keepalive.schedule(deadline: .now() + pingInterval, repeating: pingInterval)
 
         // 2. Do WE trust it? Nothing from the iPad is acted on before this.
         try authorize(peer, over: socket.transportKind)
@@ -1123,7 +1474,7 @@ final class HostController: @unchecked Sendable {
         }
 
         // 3. Hello both ways. The iPad sends its hello once ITS user trusts us.
-        send(.hello(Hello(role: .host, deviceName: Host.current().localizedName ?? "Mac", pixelWidth: 1, pixelHeight: 1,
+        send(.hello(Hello(role: .host, deviceName: Self.cachedHostName, pixelWidth: 1, pixelHeight: 1,
                           scale: 1, maxRefreshHz: UInt16(options.fps), codecs: [.h264, .hevc])),
              on: socket)
 
@@ -1135,6 +1486,20 @@ final class HostController: @unchecked Sendable {
             throw SessionError.incompatible("protocol \(hello.protocolVersion), expected \(SessionConstants.protocolVersion)")
         }
         guard hello.codecs.contains(VideoCodec.h264) else { throw SessionError.incompatible("client lacks H.264") }
+        let readyCallback = onSessionReady
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            readyCallback?(self)
+        }
+        // Apply client-declared decode limits upfront (e.g. Android without 4:4:4 or 10-bit).
+        var declaredLimits: DecodeLimits = []
+        if hello.codecs.contains(.no444) { declaredLimits.insert(.no444) }
+        if hello.codecs.contains(.no10Bit) { declaredLimits.insert(.no10Bit) }
+        let immutableLimits = declaredLimits
+        if !immutableLimits.isEmpty {
+            peerLimits.withLock { $0.declared = immutableLimits }
+            Log.info("client declared decode limits: \(immutableLimits.summary)")
+        }
         // The iPad app can only send the generic "iPad" (iPadOS 16+), so the
         // name and model come from the device's lockdownd over the same USB.
         _ = identityRead.wait(timeout: .now() + 1)
@@ -1216,7 +1581,7 @@ final class HostController: @unchecked Sendable {
         pipeline.socket = socket
 
         let inputEnabled = inputEnabled
-        let injector = InputInjector(displayID: displayID, queue: queue,
+        let injector = InputInjector(displayID: captureID, queue: queue,
                                      isEnabled: { inputEnabled.withLock { $0 } },
                                      power: { currentPowerState.withLock { $0 } })
         queue.sync { self.injector = injector }
@@ -1282,17 +1647,18 @@ final class HostController: @unchecked Sendable {
             }
         }
         var codec: VideoCodec = (options.codec == .hevc && hello.codecs.contains(VideoCodec.hevc)) ? .hevc : .h264
+        let initialBitrate = queue.sync { self.abrController?.currentMbps } ?? options.bitrateMbps
         let encoder: VideoEncoder
         do {
             encoder = try VideoEncoder(codec: codec, width: Int(config.pixelWidth), height: Int(config.pixelHeight),
-                                       fps: fps, bitrateMbps: options.bitrateMbps,
+                                       fps: fps, bitrateMbps: initialBitrate,
                                        displayP3: options.displayP3, chroma: current.chroma,
                                        tenBit: current.tenBit, cursorInVideo: !localCursor, onUnit: onUnit)
         } catch where codec == .hevc {
             Log.warn("HEVC encoder unavailable (\(error)); falling back to H.264")
             codec = .h264
             encoder = try VideoEncoder(codec: codec, width: Int(config.pixelWidth), height: Int(config.pixelHeight),
-                                       fps: fps, bitrateMbps: options.bitrateMbps,
+                                       fps: fps, bitrateMbps: initialBitrate,
                                        displayP3: options.displayP3, chroma: current.chroma,
                                        tenBit: current.tenBit, cursorInVideo: !localCursor, onUnit: onUnit)
         }
@@ -1512,7 +1878,7 @@ final class HostController: @unchecked Sendable {
     private func handle(_ frame: Frame, from origin: any FramedTransport) {
         // Frames from a connection that is no longer current are ignored.
         guard let socket, socket === origin, !socket.isClosed else { return }
-        lastHeard = Date()
+        lastHeardUptime = ProcessInfo.processInfo.systemUptime
         do {
             switch frame.header.stream {
             case .control:
@@ -1557,19 +1923,21 @@ final class HostController: @unchecked Sendable {
             send(.pong(value), on: socket)
         case .pong(let sent):
             let rtt = Double(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) &- sent) / 1_000_000
-            let totalDrops = socket.droppedVideoFrames
+            let ewma = smoothedRTTMs.map { $0 * 0.7 + rtt * 0.3 } ?? rtt
+            smoothedRTTMs = ewma
+            let totalDrops = socket.congestionDroppedVideoFrames
             let deltaDrops = max(0, totalDrops - lastObservedVideoDrops)
             lastObservedVideoDrops = totalDrops
             if var abr = abrController {
-                if let nextMbps = abr.observe(rttMs: rtt, droppedFrames: deltaDrops,
-                                              queueDepth: deltaDrops > 0 ? 3 : 0,
+                if let nextMbps = abr.observe(rttMs: ewma, droppedFrames: deltaDrops,
+                                              queueDepth: socket.queuedVideoFrames,
                                               now: ProcessInfo.processInfo.systemUptime) {
                     encoder?.updateBitrate(nextMbps)
                 }
                 abrController = abr
             }
-            if Int.random(in: 0..<15) == 0 {
-                Log.info(String(format: "control RTT %.2f ms, video dropped %d", rtt, totalDrops))
+            if Int.random(in: 0..<30) == 0 {
+                Log.info(String(format: "control RTT %.2f ms (ewma %.2f), video dropped %d", rtt, ewma, socket.droppedVideoFrames))
             }
         case .bye(let reason):
             socket.close("client said bye: \(reason)")
@@ -1632,22 +2000,46 @@ final class HostController: @unchecked Sendable {
         case .qualityPreset(let raw):
             let presets = QualityPreset.allCases
             guard presets.indices.contains(Int(raw)) else { return }
-            setQuality(presets[Int(raw)])
+            let preset = presets[Int(raw)]
+            setQuality(preset)
+            onQualityChanged?(preset)
         case .volume(let level, let muted):
             let defaultOut = AudioDevices.defaultDevice(input: false)
             AudioDevices.setOutputVolume(defaultOut, level)
             AudioDevices.setOutputMuted(defaultOut, muted)
         case .sleepMac:
-            guard isInputEnabled, currentPowerState.withLock({ $0.allowsInput }) else {
-                Log.info("sleepMac ignored (input disabled or Mac locked/asleep)")
+            let state = currentPowerState.withLock { $0 }
+            guard !state.systemAsleep, state.sessionActive else {
+                Log.info("sleepMac ignored (Mac \(state))")
                 return
             }
             Log.info("sleepMac requested from iPad")
             let port = IOPMFindPowerManagement(kIOMainPortDefault)
             if port != 0 {
-                IOPMSleepSystem(port)
+                let kr = IOPMSleepSystem(port)
                 IOServiceClose(port)
+                if kr != kIOReturnSuccess {
+                    Log.warn("IOPMSleepSystem failed: 0x\(String(kr, radix: 16))")
+                }
             }
+        case .authResponse(let requestID, let status, let signature):
+            if requestID >= 0x8000_0001 {
+                onLockscreenAuthResponse?(requestID, status, signature)
+                return
+            }
+            let sem: DispatchSemaphore? = pamPendingLock.withLock { state in
+                guard var entry = state.waiters[requestID] else { return nil }
+                entry.response = PamBridgeServer.Response(status: status, signature: signature)
+                state.waiters[requestID] = entry
+                return entry.sem
+            }
+            sem?.signal()
+        case .biometricPublicKey(let key):
+            biometricKeyLock.withLock { $0 = key }
+            PamBridgeServer.recordBiometricPublicKey(key)
+            Log.info("pam: received iPad biometric public key (fingerprint \(SecureChannel.fingerprint(key)))")
+        case .authChallenge:
+            socket.close("protocol error: unexpected authChallenge from client")
         case .videoActive(let active):
             guard let hello = peerHello else { return }
             Log.info("iPad video \(active ? "resumed" : "paused (app in background)")")

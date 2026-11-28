@@ -47,6 +47,7 @@ final class ClientAudio {
     var onError: ((String) -> Void)?
 
     var isActive: Bool { speakerOn || microphoneOn }
+    var isRunning: Bool { isActive && (engine?.isRunning == true) }
 
     init() {
         interruptionObserver = NotificationCenter.default.addObserver(
@@ -79,6 +80,15 @@ final class ClientAudio {
                     ClientLog.write("audio configuration changes: too many restarts, giving up")
                     self.fail("audio keeps restarting; toggle it off and on")
                     return
+                }
+                if self.microphoneOn, let previousFormat = self.micFifo?.inputFormat {
+                    let currentFormat = engine.inputNode.outputFormat(forBus: 0)
+                    if currentFormat.sampleRate != previousFormat.sampleRate ||
+                       currentFormat.channelCount != previousFormat.channelCount {
+                        ClientLog.write("audio configuration change altered mic format (\(previousFormat.sampleRate) Hz -> \(currentFormat.sampleRate) Hz); rebuilding")
+                        self.scheduleRestart(after: 0.2)
+                        return
+                    }
                 }
                 // Voice processing stops the engine once right after it engages.
                 // Building a NEW engine re-engages it and stops again ~120 ms later,

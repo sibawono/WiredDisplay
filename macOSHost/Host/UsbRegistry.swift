@@ -25,7 +25,7 @@ enum UsbRegistry {
             guard (property("idVendor") as? Int) == appleVendorID,
                   let name = property("USB Product Name") as? String,
                   name.hasPrefix("iPad") || name.hasPrefix("iPhone") else { continue }
-            let location = (property("locationID") as? Int).map { String(format: "%08x", $0) } ?? "?"
+            let location = (property("locationID") as? Int).map { String(format: "%08x", UInt32(truncatingIfNeeded: $0)) } ?? "?"
             let configuration = (property("kUSBCurrentConfiguration") as? Int).map(String.init) ?? "none"
             let speed = (property("Device Speed") as? Int).map(String.init) ?? "?"
             let product = (property("idProduct") as? Int).map(String.init) ?? "?"

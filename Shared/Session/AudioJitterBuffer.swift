@@ -85,13 +85,28 @@ public final class AudioJitterBuffer: @unchecked Sendable {
         guard Int(packet.channels) == channels else { return }
         let frames = packet.frameCount
         guard frames > 0 else { return }
+        // Pre-convert Int16 -> Float outside the RT lock so the audio render thread never waits on conversion.
+        let sampleCount = frames * channels
+        let converted = [Float](unsafeUninitializedCapacity: sampleCount) { dst, initialized in
+            for i in 0..<sampleCount {
+                dst[i] = Float(packet.samples[i]) * (1.0 / 32768.0)
+            }
+            initialized = sampleCount
+        }
         state.withLock { s in
             for frame in 0..<frames {
                 let write = (s.readIndex + s.count) % capacity
+                let dstBase = write * channels
+                let srcBase = frame * channels
                 for channel in 0..<channels {
-                    s.ring[write * channels + channel] = Float(packet.samples[frame * channels + channel]) / 32768
+                    s.ring[dstBase + channel] = converted[srcBase + channel]
                 }
-                if s.count < capacity { s.count += 1 } else { s.readIndex = (s.readIndex + 1) % capacity }
+                if s.count < capacity {
+                    s.count += 1
+                } else {
+                    s.readIndex = (s.readIndex + 1) % capacity
+                    s.stats.droppedFrames += 1
+                }
             }
             if s.count > maxFrames {
                 // Too far behind real time: drop down to the target latency.
@@ -114,6 +129,7 @@ public final class AudioJitterBuffer: @unchecked Sendable {
     /// buffers. Missing channels in `buffers` are skipped; extra output
     /// channels get the last source channel (mono -> stereo).
     public func pull(into buffers: [UnsafeMutablePointer<Float>], frames: Int) {
+        guard !buffers.isEmpty, frames > 0 else { return }
         // Unchecked: the closure runs synchronously under the lock; the raw
         // output pointers never escape it.
         state.withLockUnchecked { s in
@@ -125,7 +141,7 @@ public final class AudioJitterBuffer: @unchecked Sendable {
     /// building an array: for render callbacks, which must not allocate.
     public func pull(_ first: UnsafeMutablePointer<Float>?, _ second: UnsafeMutablePointer<Float>?, frames: Int) {
         let count = first == nil ? 0 : second == nil ? 1 : 2
-        guard count > 0 else { return }
+        guard count > 0, frames > 0 else { return }
         state.withLockUnchecked { s in
             fill(&s, count: count, frames: frames) { $0 == 0 ? first! : second! }
         }

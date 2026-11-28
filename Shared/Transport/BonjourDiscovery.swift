@@ -18,7 +18,7 @@ public struct BonjourPeer: Sendable, Equatable, Hashable {
 
 /// Discovers WiredDisplay iPad receivers on the local network via Bonjour.
 public final class BonjourBrowser: @unchecked Sendable {
-    private let queue = DispatchQueue(label: "wireddisplay.bonjour.browser", qos: .utility)
+    private let queue = DispatchQueue(label: "wireddisplay.bonjour.browser", qos: .userInitiated)
     private let lock = NSLock()
     private var browser: NWBrowser?
     private var currentPeers: [BonjourPeer] = []

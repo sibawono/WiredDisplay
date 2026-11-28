@@ -2,6 +2,7 @@ import AVFoundation
 import CoreMedia
 import Foundation
 import Network
+import NetworkExtension
 import os
 import UIKit
 import WDProtocol
@@ -22,6 +23,8 @@ final class ConnectionModel {
     var phase: Phase = .starting
     var macName = ""
     var activeTransport = "USB-C"
+    var wifiConnected = false
+    var wifiName: String?
     var streamConfig: StreamConfig?
     var lastError: String?
     var framesShown = 0
@@ -42,9 +45,19 @@ final class ConnectionModel {
     var brightnessHUD: (value: Float, token: Int)?
     /// Live iPad screen brightness (0...1), kept in sync with Mac brightness keys and slider.
     var screenBrightness: Float = 0.7
+    struct PendingUnlock: Equatable, Sendable {
+        let requestID: UInt32
+        let service: String
+        let username: String
+        let reason: String
+        let nonce: [UInt8]
+    }
+
     /// Mac default output volume (0...1) and mute state.
     var macVolume: Float = 0.7
     var macMuted = false
+    /// Non-nil while the Mac is at the Lock Screen waiting for Touch ID / Face ID unlock.
+    var pendingUnlock: PendingUnlock?
 }
 
 /// Client side of a session (iPad). Listens on 127.0.0.1:9100; the Mac dials in
@@ -61,6 +74,7 @@ final class ClientSession: @unchecked Sendable {
 
     private var listener: NWListener?
     private var wifiListener: NWListener?
+    private var wifiMonitor: NWPathMonitor?
     private var activeIsUSB = true
     private var connection: NWConnection?
     private var parser = FrameParser()
@@ -70,8 +84,8 @@ final class ClientSession: @unchecked Sendable {
     private var config: StreamConfig?
     private var format: CMVideoFormatDescription?
     private var formatSets: [[UInt8]] = []
-    private var lastKeyframeRequest = Date.distantPast
-    private var lastHeard = Date()
+    private var lastKeyframeRequestUptime: TimeInterval = -.infinity
+    private var lastHeardUptime: TimeInterval = ProcessInfo.processInfo.systemUptime
     /// D-023: this iPad's identity and the Macs it trusts (Keychain).
     let trust = TrustStore(keychainService: "dev.wireddisplay.client")
     private var channel: SecureChannel?
@@ -87,6 +101,8 @@ final class ClientSession: @unchecked Sendable {
     private var audioRoute = (speaker: false, microphone: false)
     /// False while the app is in the background with audio running (D-018).
     private var videoActive = true
+    /// Active Lock Screen challenge ID (for restoring the Unlock pill if user cancels Touch ID while still locked).
+    private var activeLockscreenID: UInt32?
     private let speakerSink: AudioJitterBuffer
     private var speakerPackets = 0
     private let presentMeter = FrameRateMeter()
@@ -215,6 +231,7 @@ final class ClientSession: @unchecked Sendable {
         queue.async { [self] in
             guard !running else { return }
             running = true
+            startWiFiMonitor()
             startListener()
             startWiFiListener()
         }
@@ -230,16 +247,52 @@ final class ClientSession: @unchecked Sendable {
             listener = nil
             wifiListener?.cancel()
             wifiListener = nil
+            wifiMonitor?.cancel()
+            wifiMonitor = nil
             ui { $0.phase = .starting }
+        }
+    }
+
+    private func startWiFiMonitor() {
+        guard wifiMonitor == nil else { return }
+        let monitor = NWPathMonitor(requiredInterfaceType: .wifi)
+        monitor.pathUpdateHandler = { [weak self] path in
+            guard let self else { return }
+            let connected = path.status == .satisfied
+            self.ui { $0.wifiConnected = connected }
+            if connected {
+                self.refreshWiFiName()
+            } else {
+                self.ui { $0.wifiName = nil }
+            }
+        }
+        wifiMonitor = monitor
+        monitor.start(queue: queue)
+    }
+
+    /// Reads the current Wi-Fi SSID when iPadOS permits it (requires Access Wi-Fi
+    /// Information capability + Location permission; returns nil cleanly otherwise).
+    private func refreshWiFiName() {
+        NEHotspotNetwork.fetchCurrent { [weak self] network in
+            let ssid = network?.ssid.trimmingCharacters(in: .whitespacesAndNewlines)
+            let cleaned = (ssid?.isEmpty == false) ? ssid : nil
+            self?.ui { $0.wifiName = cleaned }
         }
     }
 
     func send(_ event: InputEvent) {
         queue.async { [self] in
             guard let connection, peerHello != nil else { return }
-            // Bounded: if the link backs up, drop pointer moves first; never
-            // drop button changes or releaseAll.
-            if case .pointer(.move, _, _, _) = event, outstandingSends > 64 { return }
+            // Bounded: if the link backs up, drop high-rate pointer/stylus moves first;
+            // never drop button/pen down/up changes or releaseAll.
+            if outstandingSends > 64 {
+                switch event {
+                case .pointer(.move, _, _, _), .stylus(.move, _, _, _):
+                    return
+                default:
+                    break
+                }
+            }
             send(stream: .input, payload: SessionCodec.encode(event), on: connection)
         }
     }
@@ -252,8 +305,10 @@ final class ClientSession: @unchecked Sendable {
         parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: port) // BUG-011
         parameters.allowLocalEndpointReuse = true
         parameters.acceptLocalOnly = true
+        parameters.serviceClass = .interactiveVideo
         if let options = parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
             options.noDelay = true
+            options.enableFastOpen = false
         }
         do {
             let created = try NWListener(using: parameters)
@@ -277,6 +332,11 @@ final class ClientSession: @unchecked Sendable {
         let tcp = NWProtocolTCP.Options()
         tcp.noDelay = true
         tcp.enableFastOpen = false
+        tcp.enableKeepalive = true
+        tcp.keepaliveIdle = 2
+        tcp.keepaliveInterval = 2
+        tcp.keepaliveCount = 3
+        tcp.connectionTimeout = 5
         let parameters = NWParameters(tls: nil, tcp: tcp)
         parameters.allowLocalEndpointReuse = true
         parameters.serviceClass = .interactiveVideo
@@ -318,11 +378,15 @@ final class ClientSession: @unchecked Sendable {
         ClientLog.write("listener \(state)")
         switch state {
         case .ready:
-            ui { $0.phase = .waitingForMac }
+            if connection == nil {
+                ui { $0.phase = .waitingForMac }
+            }
         case .failed(let error):
             listener = nil
             source.cancel()
-            ui { $0.phase = .failed("listener: \(error)") }
+            if connection == nil && wifiListener == nil {
+                ui { $0.phase = .failed("listener: \(error)") }
+            }
             // Retry while the app is in front.
             queue.asyncAfter(deadline: .now() + 2) { [weak self] in
                 guard let self, self.running, self.listener == nil else { return }
@@ -347,6 +411,7 @@ final class ClientSession: @unchecked Sendable {
         let label = isUSB ? "USB-C" : "Wi-Fi"
         ClientLog.write("incoming \(label) connection from the Mac")
         ui { $0.activeTransport = label }
+        if !isUSB { refreshWiFiName() }
         let channel: SecureChannel
         do {
             channel = SecureChannel(role: .client, identity: try trust.identity())
@@ -360,6 +425,7 @@ final class ClientSession: @unchecked Sendable {
         pendingPeer = nil
         trustedPeer = nil
         pendingHostHello = nil
+        activeLockscreenID = nil
         parser = FrameParser()
         validator = nil
         peerHello = nil
@@ -373,7 +439,7 @@ final class ClientSession: @unchecked Sendable {
         var generator = SystemRandomNumberGenerator()
         framer = SessionFramer(sessionID: generator.next(), channel: channel,
                                clock: { clock_gettime_nsec_np(CLOCK_UPTIME_RAW) })
-        lastHeard = Date()
+        lastHeardUptime = ProcessInfo.processInfo.systemUptime
         incoming.stateUpdateHandler = { [weak self, weak incoming] state in
             guard let self, let incoming, self.connection === incoming else { return }
             switch state {
@@ -400,7 +466,7 @@ final class ClientSession: @unchecked Sendable {
         timer.schedule(deadline: .now() + 2, repeating: 2)
         timer.setEventHandler { [weak self] in
             guard let self, self.connection != nil else { return }
-            if Date().timeIntervalSince(self.lastHeard) > 6 {
+            if ProcessInfo.processInfo.systemUptime - self.lastHeardUptime > 6 {
                 self.endConnection(reason: "no traffic from Mac for 6 s", sendBye: false)
             }
         }
@@ -417,6 +483,7 @@ final class ClientSession: @unchecked Sendable {
         pendingPeer = nil
         trustedPeer = nil
         pendingHostHello = nil
+        activeLockscreenID = nil
         current.stateUpdateHandler = nil
         if sendBye, peerHello != nil, let wire = try? framer.frame(.control, payload: SessionCodec.encode(.bye(reason))) {
             current.send(content: Data(wire), completion: .contentProcessed { _ in current.cancel() })
@@ -426,10 +493,17 @@ final class ClientSession: @unchecked Sendable {
         renderer.flush(removingImage: true)
         let wasStreaming = config != nil
         config = nil
+        shownInWindow = 0
+        hudTransitSamples.removeAll(keepingCapacity: true)
+        countersPublished = 0
         let stillRunning = running // read on `queue`, not on the main actor
         ui {
+            $0.macName = ""
             $0.streamConfig = nil
             $0.pairingCode = nil
+            $0.pendingUnlock = nil
+            $0.liveFPS = 0
+            $0.liveLatencyMs = nil
             $0.lastError = reason
             if case .failed = $0.phase { return }
             $0.phase = stillRunning ? .waitingForMac : .starting
@@ -454,7 +528,7 @@ final class ClientSession: @unchecked Sendable {
                             self.validator = SequenceValidator(sessionID: frame.header.sessionID)
                         }
                         try self.validator?.accept(frame.header)
-                        self.lastHeard = Date()
+                        self.lastHeardUptime = ProcessInfo.processInfo.systemUptime
                         guard let channel = self.channel else { return }
                         switch try channel.receive(frame) {
                         case .none: break
@@ -543,7 +617,37 @@ final class ClientSession: @unchecked Sendable {
                 ui { $0.qualityPreset = Int(raw) }
             case .volume(let level, let muted):
                 ui { $0.macVolume = level; $0.macMuted = muted }
-            case .pong, .requestKeyframe, .audioRoute, .videoActive, .decodeFailed, .panelSize, .sleepMac:
+            case .authChallenge(let requestID, let service, let username, let reason, let nonce):
+                if service == "lockscreen" || service == "admin" {
+                    guard BiometricAuthKey.publicKey() != nil else { break }
+                    activeLockscreenID = requestID
+                    let pending = ConnectionModel.PendingUnlock(
+                        requestID: requestID, service: service, username: username, reason: reason, nonce: nonce
+                    )
+                    // macOS invokes WiredDisplayAuth when submitting the Lock Screen or opening an Admin dialog,
+                    // so trigger the native Touch ID / Face ID sheet right away (no extra tap needed).
+                    triggerLockscreenSign(pending)
+                    break
+                }
+                if service == "lockscreen-clear" {
+                    activeLockscreenID = nil
+                    ui { $0.pendingUnlock = nil }
+                    break
+                }
+                // Run Touch ID / Face ID + Secure Enclave signing asynchronously so video/audio/input never stall.
+                Task.detached(priority: .userInitiated) { [weak self, weak current] in
+                    let (status, signature) = await BiometricAuthKey.sign(
+                        service: service, username: username, reason: reason, nonce: nonce
+                    )
+                    guard let self, let current else { return }
+                    self.queue.async {
+                        guard self.connection === current else { return }
+                        self.send(stream: .control,
+                                  payload: SessionCodec.encode(.authResponse(requestID: requestID, status: status, signature: signature)),
+                                  on: current)
+                    }
+                }
+            case .pong, .requestKeyframe, .audioRoute, .videoActive, .decodeFailed, .panelSize, .sleepMac, .authResponse, .biometricPublicKey:
                 break
             case .authHello, .authProof:
                 throw WireError.invalidValue("handshake message after handshake")
@@ -559,8 +663,8 @@ final class ClientSession: @unchecked Sendable {
                 requestKeyframe(on: current)
                 return
             }
-            present(AccessUnit(codec: config.codec == .hevc ? .hevc : .h264, annexB: frame.payload),
-                    wireBytes: frame.payload.count, timestamp: frame.header.timestampNanos, on: current)
+            present(annexB: frame.payload, codec: config.codec == .hevc ? .hevc : .h264,
+                    timestamp: frame.header.timestampNanos, on: current)
         case .speaker:
             guard trustedPeer != nil else { throw WireError.invalidValue("audio before pairing") }
             speakerSink.push(try AudioPacket.decode(frame.payload, expectedChannels: SessionConstants.speakerChannels))
@@ -608,6 +712,51 @@ final class ClientSession: @unchecked Sendable {
         }
     }
 
+    /// Sends the iPad's Secure Enclave biometric public key to the connected Mac (for PAM enrollment).
+    func sendBiometricPublicKey(_ key: [UInt8]) {
+        queue.async { [self] in
+            guard trustedPeer != nil, let connection else { return }
+            send(stream: .control, payload: SessionCodec.encode(.biometricPublicKey(key)), on: connection)
+        }
+    }
+
+    /// Triggered when the user taps the fallback Retry Touch ID / Face ID pill after cancelling.
+    func approvePendingUnlock(_ pending: ConnectionModel.PendingUnlock) {
+        triggerLockscreenSign(pending)
+    }
+
+    /// Dismisses the fallback Retry Touch ID / Face ID banner without unlocking.
+    func dismissPendingUnlock() {
+        ui { $0.pendingUnlock = nil }
+    }
+
+    private func triggerLockscreenSign(_ pending: ConnectionModel.PendingUnlock) {
+        ui {
+            if $0.pendingUnlock?.requestID == pending.requestID {
+                $0.pendingUnlock = nil
+            }
+        }
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let (status, signature) = await BiometricAuthKey.sign(
+                service: pending.service, username: pending.username, reason: pending.reason, nonce: pending.nonce
+            )
+            guard let self else { return }
+            self.queue.async {
+                guard self.activeLockscreenID == pending.requestID,
+                      self.trustedPeer != nil, let current = self.connection else { return }
+                if status == 0 {
+                    self.activeLockscreenID = nil
+                    self.send(stream: .control,
+                              payload: SessionCodec.encode(.authResponse(requestID: pending.requestID, status: 0, signature: signature)),
+                              on: current)
+                } else {
+                    // User cancelled or failed Touch ID / Face ID while Mac is still locked: show fallback retry banner.
+                    self.ui { $0.pendingUnlock = pending }
+                }
+            }
+        }
+    }
+
     private func acceptHostHello(_ host: Hello, on current: NWConnection) throws {
         guard host.protocolVersion == SessionConstants.protocolVersion else {
             throw WireError.invalidValue("Mac protocol \(host.protocolVersion)")
@@ -625,15 +774,19 @@ final class ClientSession: @unchecked Sendable {
         if let reportedBrightness {
             send(stream: .control, payload: SessionCodec.encode(.brightness(reportedBrightness)), on: current)
         }
+        if let bioKey = BiometricAuthKey.publicKey() {
+            send(stream: .control, payload: SessionCodec.encode(.biometricPublicKey(bioKey)), on: current)
+        }
         if let peer = trustedPeer { trust.rename(peer.identityKey, to: host.deviceName); refreshPairedMacs() }
     }
 
-    private func present(_ unit: AccessUnit, wireBytes: Int, timestamp: UInt64, on current: NWConnection) {
-        if unit.isKeyframe {
-            let sets = unit.parameterSets
+    private func present(annexB: [UInt8], codec: VideoCodecKind, timestamp: UInt64, on current: NWConnection) {
+        let parsed = SampleBuffers.scanAnnexB(annexB, codec: codec)
+        if parsed.isKeyframe {
+            let sets = parsed.parameterSets
             if format == nil || sets != formatSets {
                 do {
-                    format = try SampleBuffers.formatDescription(for: unit)
+                    format = try SampleBuffers.formatDescription(codec: codec, parameterSets: sets)
                     formatSets = sets
                 } catch {
                     format = nil
@@ -649,14 +802,14 @@ final class ClientSession: @unchecked Sendable {
             // Renderer switched (D-040): start the new path at a keyframe.
             renderer.flush(removingImage: false)
             format = nil
-            if !unit.isKeyframe { requestKeyframe(on: current); return }
-            format = try? SampleBuffers.formatDescription(for: unit)
+            if !parsed.isKeyframe { requestKeyframe(on: current); return }
+            format = try? SampleBuffers.formatDescription(codec: codec, parameterSets: parsed.parameterSets)
         }
         if renderer.isFailed {
-            // Repeated failures = this iPad cannot decode the format (D-031):
+            // Repeated failures while video is active = this iPad cannot decode the format (D-031):
             // ask the Mac to step down (no 4:4:4, then 8-bit).
             ClientLog.write("renderer failed: \(renderer.failureDescription ?? "no error")")
-            if decodeFailures.failed(at: ProcessInfo.processInfo.systemUptime) {
+            if videoActive, decodeFailures.failed(at: ProcessInfo.processInfo.systemUptime) {
                 ClientLog.write("decode keeps failing; asking the Mac for a simpler format")
                 send(stream: .control, payload: SessionCodec.encode(.decodeFailed), on: current)
             }
@@ -666,18 +819,15 @@ final class ClientSession: @unchecked Sendable {
             // good (review finding 4). Resume at the next keyframe.
             NSLog("WiredDisplay: renderer needs flush; flushing")
             renderer.flush(removingImage: false)
-            if !unit.isKeyframe { format = nil }
+            if !parsed.isKeyframe { format = nil }
         }
         // Frames were dropped because the decoder fell behind: resume at a keyframe.
-        // Repeated stalls count as decode failures, so the Mac steps down (D-031).
+        // Transient stalls (Wi-Fi jitter, foregrounding, brief backlog) do not indicate
+        // an unsupported format, so never report `.decodeFailed` for them.
         let backlog = renderer.takeBacklogEvents()
         if backlog.keyframeWanted { requestKeyframe(on: current) }
         if backlog.stalls > 0 {
             ClientLog.write("decoder behind the stream (\(backlog.stalls) stall(s)); frames dropped until a keyframe")
-            for _ in 0..<backlog.stalls where decodeFailures.failed(at: ProcessInfo.processInfo.systemUptime) {
-                ClientLog.write("decoder keeps falling behind; asking the Mac for a lighter format")
-                send(stream: .control, payload: SessionCodec.encode(.decodeFailed), on: current)
-            }
         }
         guard let format else {
             requestKeyframe(on: current)
@@ -686,7 +836,7 @@ final class ClientSession: @unchecked Sendable {
         }
         do {
             let time = CMTime(value: CMTimeValue(timestamp), timescale: 1_000_000_000)
-            let sample = try SampleBuffers.sampleBuffer(for: unit, format: format, presentationTime: time)
+            let sample = try SampleBuffers.sampleBuffer(fromAnnexB: annexB, parsed: parsed, format: format, presentationTime: time)
             if timestamp % 300 == 0, let offset = clockOffset { // about one sample every 5 s at 60 Hz
                 let hostNow = Int64(bitPattern: clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) &+ offset
                 let transit = Double(hostNow &- Int64(bitPattern: timestamp)) / 1e6
@@ -703,7 +853,7 @@ final class ClientSession: @unchecked Sendable {
                 hudTransitSamples.append(ms)
             }
             countFrame(shown: true)
-            if let report = presentMeter.tick(bytes: wireBytes) {
+            if let report = presentMeter.tick(bytes: annexB.count) {
                 var line = "video presented: \(report)"
                 if !transitSamples.isEmpty {
                     let sorted = transitSamples.sorted()
@@ -744,8 +894,9 @@ final class ClientSession: @unchecked Sendable {
     }
 
     private func requestKeyframe(on current: NWConnection) {
-        guard Date().timeIntervalSince(lastKeyframeRequest) > 0.5 else { return }
-        lastKeyframeRequest = Date()
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - lastKeyframeRequestUptime > 0.5 else { return }
+        lastKeyframeRequestUptime = now
         send(stream: .control, payload: SessionCodec.encode(.requestKeyframe), on: current)
     }
 
@@ -753,14 +904,10 @@ final class ClientSession: @unchecked Sendable {
         guard let wire = try? framer.frame(stream, payload: payload) else { return }
         outstandingSends += 1
         current.send(content: Data(wire), completion: .contentProcessed { [weak self] error in
-            guard let self else { return }
-            self.queue.async {
-                // Completions from an old connection must not touch the new one
-                // (review finding 10).
-                guard self.connection === current else { return }
-                self.outstandingSends -= 1
-                if let error { self.endConnection(reason: "send: \(error)", sendBye: false) }
-            }
+            // Already delivered on `self.queue` (via `incoming.start(queue: queue)`).
+            guard let self, self.connection === current else { return }
+            self.outstandingSends -= 1
+            if let error { self.endConnection(reason: "send: \(error)", sendBye: false) }
         })
     }
 

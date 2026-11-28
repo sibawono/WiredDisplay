@@ -61,6 +61,10 @@ public final class UsbmuxConnection {
         guard setsockopt(descriptor, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size)) == 0 else {
             throw failing("setsockopt(SO_NOSIGPIPE)", errno)
         }
+        // macOS defaults AF_UNIX stream buffers to 8 KiB, forcing 20-250+ write() syscalls per video frame.
+        var bufSize: Int32 = 512 * 1024
+        _ = setsockopt(descriptor, SOL_SOCKET, SO_SNDBUF, &bufSize, socklen_t(MemoryLayout<Int32>.size))
+        _ = setsockopt(descriptor, SOL_SOCKET, SO_RCVBUF, &bufSize, socklen_t(MemoryLayout<Int32>.size))
         let connected = withUnsafePointer(to: &address) { pointer in
             pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
                 Darwin.connect(descriptor, $0, socklen_t(MemoryLayout<sockaddr_un>.size))

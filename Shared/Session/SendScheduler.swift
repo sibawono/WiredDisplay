@@ -13,16 +13,18 @@ import WDProtocol
 public struct SendScheduler: Sendable {
     public struct Stats: Sendable, Equatable {
         public var videoDropped = 0
+        /// Video drops caused by backpressure/overflow (excludes keyframe supersedes).
+        public var videoCongestionDropped = 0
         public var urgentDropped = 0
         public var audioDropped = 0
     }
 
     public let maxVideoFrames: Int
     public let maxUrgentFrames: Int
-    private var control: [[UInt8]] = []
-    private var input: [[UInt8]] = []
-    private var audio: [[UInt8]] = []
-    private var video: [[UInt8]] = []
+    private var control = Deque<[UInt8]>()
+    private var input = Deque<[UInt8]>()
+    private var audio = Deque<[UInt8]>()
+    private var video = Deque<[UInt8]>()
     /// Audio packets are ~10–100 ms each; 64 queued is seconds behind real time.
     public static let maxAudioPackets = 64
     private var waitingForKeyframe = false
@@ -54,6 +56,7 @@ public struct SendScheduler: Sendable {
     public mutating func dropVideoIfWaiting(isKeyframe: Bool) -> Bool {
         guard waitingForKeyframe && !isKeyframe else { return false }
         stats.videoDropped += 1
+        stats.videoCongestionDropped += 1
         return true
     }
 
@@ -64,16 +67,18 @@ public struct SendScheduler: Sendable {
             return false // already asked for one
         }
         if isKeyframe {
-            // A keyframe makes everything queued before it pointless.
+            // A keyframe makes everything queued before it pointless (not a congestion drop).
             stats.videoDropped += video.count
-            video.removeAll(keepingCapacity: true)
+            video.removeAll()
             waitingForKeyframe = false
             video.append(wire)
             return false
         }
         if video.count >= maxVideoFrames {
-            stats.videoDropped += video.count + 1
-            video.removeAll(keepingCapacity: true)
+            let dropped = video.count + 1
+            stats.videoDropped += dropped
+            stats.videoCongestionDropped += dropped
+            video.removeAll()
             waitingForKeyframe = true
             return true
         }
@@ -82,19 +87,161 @@ public struct SendScheduler: Sendable {
     }
 
     public mutating func next() -> [UInt8]? {
-        if !control.isEmpty { return control.removeFirst() }
-        if !input.isEmpty { return input.removeFirst() }
-        if !audio.isEmpty { return audio.removeFirst() }
-        if !video.isEmpty { return video.removeFirst() }
+        if let item = control.popFirst() { return item }
+        if let item = input.popFirst() { return item }
+        if let item = audio.popFirst() { return item }
+        if let item = video.popFirst() { return item }
         return nil
     }
 
-    private static func push(_ queue: inout [[UInt8]], _ wire: [UInt8], cap: Int, dropped: inout Int) {
+    private static func push(_ queue: inout Deque<[UInt8]>, _ wire: [UInt8], cap: Int, dropped: inout Int) {
         if queue.count >= cap {
-            queue.removeFirst()
+            _ = queue.popFirst()
             dropped += 1
         }
         queue.append(wire)
+    }
+}
+
+/// Unencrypted frame queued for serialization on the transport writer thread.
+/// Deferring AES-256-GCM encryption until dequeue keeps queue locks at nanoseconds,
+/// guarantees wire order == sequence order, and avoids encrypting dropped frames.
+public struct PendingFrame: Sendable {
+    public let stream: StreamType
+    public let payload: [UInt8]
+    public let isKeyframe: Bool
+    public let timestampNanos: UInt64?
+
+    public init(stream: StreamType, payload: [UInt8], isKeyframe: Bool = false, timestampNanos: UInt64? = nil) {
+        self.stream = stream
+        self.payload = payload
+        self.isKeyframe = isKeyframe
+        self.timestampNanos = timestampNanos
+    }
+}
+
+/// Priority scheduler for unencrypted `PendingFrame`s, with `.cursor` coalescing
+/// and separate congestion-drop accounting for ABR.
+public struct PendingSendScheduler: Sendable {
+    public let maxVideoFrames: Int
+    public let maxUrgentFrames: Int
+    private var control = Deque<PendingFrame>()
+    private var input = Deque<PendingFrame>()
+    private var audio = Deque<PendingFrame>()
+    private var video = Deque<PendingFrame>()
+    /// Latest coalesced cursor position (control tag 13); always supersedes older cursor moves.
+    private var pendingCursor: PendingFrame?
+    private var waitingForKeyframe = false
+    public private(set) var stats = SendScheduler.Stats()
+
+    public init(maxVideoFrames: Int = 3, maxUrgentFrames: Int = 512) {
+        precondition(maxVideoFrames >= 1 && maxUrgentFrames >= 1)
+        self.maxVideoFrames = maxVideoFrames
+        self.maxUrgentFrames = maxUrgentFrames
+    }
+
+    public var isEmpty: Bool {
+        control.isEmpty && pendingCursor == nil && input.isEmpty && audio.isEmpty && video.isEmpty
+    }
+    public var queuedVideoFrames: Int { video.count }
+
+    public mutating func enqueue(urgent frame: PendingFrame) {
+        switch frame.stream {
+        case .control:
+            // ControlTag.cursor == 13: keep only the newest cursor coordinates.
+            if frame.payload.first == 13 {
+                pendingCursor = frame
+                return
+            }
+            Self.push(&control, frame, cap: maxUrgentFrames, dropped: &stats.urgentDropped)
+        case .input:
+            Self.push(&input, frame, cap: maxUrgentFrames, dropped: &stats.urgentDropped)
+        case .speaker, .microphone, .camera, .video:
+            Self.push(&audio, frame, cap: SendScheduler.maxAudioPackets, dropped: &stats.audioDropped)
+        }
+    }
+
+    /// A frame rejected before queueing can still be a reference for later frames.
+    public mutating func discardVideoReference() {
+        stats.videoDropped += video.count + 1
+        video.removeAll()
+        waitingForKeyframe = true
+    }
+
+    @discardableResult
+    public mutating func enqueue(video frame: PendingFrame) -> Bool {
+        if waitingForKeyframe && !frame.isKeyframe {
+            stats.videoDropped += 1
+            stats.videoCongestionDropped += 1
+            return false
+        }
+        if frame.isKeyframe {
+            stats.videoDropped += video.count
+            video.removeAll()
+            waitingForKeyframe = false
+            video.append(frame)
+            return false
+        }
+        if video.count >= maxVideoFrames {
+            let dropped = video.count + 1
+            stats.videoDropped += dropped
+            stats.videoCongestionDropped += dropped
+            video.removeAll()
+            waitingForKeyframe = true
+            return true
+        }
+        video.append(frame)
+        return false
+    }
+
+    public mutating func next() -> PendingFrame? {
+        if let item = control.popFirst() { return item }
+        if let cursor = pendingCursor { pendingCursor = nil; return cursor }
+        if let item = input.popFirst() { return item }
+        if let item = audio.popFirst() { return item }
+        if let item = video.popFirst() { return item }
+        return nil
+    }
+
+    private static func push(_ queue: inout Deque<PendingFrame>, _ item: PendingFrame, cap: Int, dropped: inout Int) {
+        if queue.count >= cap {
+            _ = queue.popFirst()
+            dropped += 1
+        }
+        queue.append(item)
+    }
+}
+
+/// Amortized O(1) FIFO queue avoiding `Array.removeFirst()` O(N) shifts.
+private struct Deque<Element: Sendable>: Sendable {
+    private var storage: [Element?] = []
+    private var head = 0
+
+    var isEmpty: Bool { head >= storage.count }
+    var count: Int { storage.count - head }
+
+    mutating func append(_ element: Element) {
+        storage.append(element)
+    }
+
+    mutating func popFirst() -> Element? {
+        guard head < storage.count else { return nil }
+        let element = storage[head]
+        storage[head] = nil
+        head += 1
+        if head == storage.count {
+            storage.removeAll(keepingCapacity: true)
+            head = 0
+        } else if head >= 64 && head * 2 >= storage.count {
+            storage.removeFirst(head)
+            head = 0
+        }
+        return element
+    }
+
+    mutating func removeAll() {
+        storage.removeAll(keepingCapacity: true)
+        head = 0
     }
 }
 

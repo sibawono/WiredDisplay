@@ -378,6 +378,10 @@ final class VideoView: UIView, UIPointerInteractionDelegate, UIGestureRecognizer
     private var shortcuts = ShortcutRemapper()
 
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        if softKeyboard.isFirstResponder {
+            softKeyboard.resignFirstResponder()
+            becomeFirstResponder()
+        }
         var unhandled = Set<UIPress>()
         for press in presses {
             guard streamSize != nil, let key = press.key else { unhandled.insert(press); continue }
@@ -639,12 +643,16 @@ final class VideoView: UIView, UIPointerInteractionDelegate, UIGestureRecognizer
         longPress = nil
     }
 
-    private func resetTouches() {
+    func resetTouches() {
         stopMomentum()
         if let pencil = pencilTouch { endPencilIfNeeded([pencil]) }
         endPointerPresses(Set(pointerPresses.keys))
         if !heldKeys.isEmpty {
-            emit(heldKeys.flatMap { shortcuts.key(usage: $0, down: false) })
+            // Release regular keys before modifiers so macOS does not see stray unmodified keys.
+            let ordered = heldKeys.sorted {
+                (KeyMap.modifier(forUsage: $0) != nil ? 1 : 0) < (KeyMap.modifier(forUsage: $1) != nil ? 1 : 0)
+            }
+            emit(ordered.flatMap { shortcuts.key(usage: $0, down: false) })
             heldKeys.removeAll()
             shortcuts.reset()
         }
@@ -763,6 +771,10 @@ private final class SoftKeyboardInputView: UIView, UIKeyInput {
     var smartInsertDeleteType: UITextSmartInsertDeleteType = .no
     var keyboardAppearance: UIKeyboardAppearance = .dark
 
+    /// Sticky modifier toggles for the soft keyboard accessory bar (e.g. ⌘C, ⌃C on a headless Mac).
+    private var stickyModifiers: Set<UInt16> = []
+    private var modifierButtons: [UInt16: UIBarButtonItem] = [:]
+
     private lazy var accessoryBar: UIToolbar = {
         let bar = UIToolbar(frame: CGRect(x: 0, y: 0, width: 320, height: 44))
         bar.barStyle = .black
@@ -772,10 +784,20 @@ private final class SoftKeyboardInputView: UIView, UIKeyInput {
             item.tag = Int(usage)
             return item
         }
+        @MainActor func modButton(_ title: String, usage: UInt16) -> UIBarButtonItem {
+            let item = UIBarButtonItem(title: title, style: .plain, target: self, action: #selector(modifierToggled(_:)))
+            item.tag = Int(usage)
+            modifierButtons[usage] = item
+            return item
+        }
         bar.items = [
             keyButton("Esc", usage: 0x29),
             keyButton("Tab", usage: 0x2B),
-            UIBarButtonItem(barButtonSystemItem: .fixedSpace, target: nil, action: nil),
+            modButton("⌘", usage: 0xE3),
+            modButton("⌃", usage: 0xE0),
+            modButton("⌥", usage: 0xE2),
+            modButton("⇧", usage: 0xE1),
+            keyButton("⌦", usage: 0x4C),
             keyButton("←", usage: 0x50),
             keyButton("↓", usage: 0x51),
             keyButton("↑", usage: 0x52),
@@ -798,25 +820,53 @@ private final class SoftKeyboardInputView: UIView, UIKeyInput {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
+    private func wrapWithStickyModifiers(_ events: [InputEvent]) -> [InputEvent] {
+        guard !stickyModifiers.isEmpty else { return events }
+        let mods = Array(stickyModifiers)
+        let downs = mods.map { InputEvent.key(usage: $0, down: true) }
+        let ups = mods.reversed().map { InputEvent.key(usage: $0, down: false) }
+        clearStickyModifiers()
+        return downs + events + ups
+    }
+
+    private func clearStickyModifiers() {
+        for usage in stickyModifiers {
+            modifierButtons[usage]?.tintColor = .white
+        }
+        stickyModifiers.removeAll()
+    }
+
     func insertText(_ text: String) {
         let events = KeyMap.keyEvents(for: text)
-        if !events.isEmpty { onEvents?(events) }
+        if !events.isEmpty { onEvents?(wrapWithStickyModifiers(events)) }
     }
 
     func deleteBackward() {
-        onEvents?([.key(usage: 0x2A, down: true), .key(usage: 0x2A, down: false)])
+        onEvents?(wrapWithStickyModifiers([.key(usage: 0x2A, down: true), .key(usage: 0x2A, down: false)]))
+    }
+
+    @objc private func modifierToggled(_ sender: UIBarButtonItem) {
+        let usage = UInt16(sender.tag)
+        if stickyModifiers.remove(usage) != nil {
+            sender.tintColor = .white
+        } else {
+            stickyModifiers.insert(usage)
+            sender.tintColor = .systemBlue
+        }
     }
 
     @objc private func accessoryKeyTapped(_ sender: UIBarButtonItem) {
         let usage = UInt16(sender.tag)
-        onEvents?([.key(usage: usage, down: true), .key(usage: usage, down: false)])
+        onEvents?(wrapWithStickyModifiers([.key(usage: usage, down: true), .key(usage: usage, down: false)]))
     }
 
     @objc private func dismissTapped() {
+        clearStickyModifiers()
         _ = resignFirstResponder()
     }
 
     override func resignFirstResponder() -> Bool {
+        clearStickyModifiers()
         let resigned = super.resignFirstResponder()
         if resigned { onDismiss?() }
         return resigned

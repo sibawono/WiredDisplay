@@ -32,6 +32,7 @@ final class AppModel {
     private var echoEnabled: Bool { UserDefaults.standard.bool(forKey: "diagnosticEcho") }
 
     private var inBackground = false
+    private var reconnectWork: DispatchWorkItem?
     /// What the user turned on; a failed start clears `audio`'s state but not this.
     private var wantedAudio = (speaker: false, microphone: false)
 
@@ -47,7 +48,10 @@ final class AppModel {
 
     func activate() {
         ClientLog.write("app active")
+        reconnectWork?.cancel()
+        reconnectWork = nil
         inBackground = false
+        videoView.metalRenderer?.setBackgrounded(false)
         videoView.isHidden = false
         if session == nil {
             let sink = SwitchableSink(standard: DisplayLayerSink(videoView.displayLayer.sampleBufferRenderer),
@@ -93,8 +97,8 @@ final class AppModel {
             self.session = session
             // Mac audio on the iPad speaker is on by default; the microphone is not.
             setAudio(speaker: true, microphone: false)
-        } else if !audio.isActive, wantedAudio.speaker || wantedAudio.microphone {
-            // Audio that failed while away (another app held the audio session) comes back with the app.
+        } else if !audio.isRunning, wantedAudio.speaker || wantedAudio.microphone {
+            // Audio that stopped while away (interruption or another app holding the session) comes back with the app.
             setAudio(speaker: wantedAudio.speaker, microphone: wantedAudio.microphone)
         }
         session?.setVideoActive(true)
@@ -109,9 +113,14 @@ final class AppModel {
     /// video (D-018); otherwise end the session as before.
     func deactivate(reason: String) {
         ClientLog.write("app leaving foreground: \(reason) (audio active \(audio.isActive))")
+        reconnectWork?.cancel()
+        reconnectWork = nil
         if echoEnabled { echo.stop(reason: "app not active") }
+        videoView.resetTouches()
         session?.send(.releaseAll)
         inBackground = true
+        // Gate Metal GPU commits synchronously before entering background (especially when background audio keeps the process alive).
+        videoView.metalRenderer?.setBackgrounded(true)
         if audio.isActive {
             session?.setVideoActive(false)
         } else {
@@ -124,12 +133,20 @@ final class AppModel {
     /// is active (unlike `deactivate`, which keeps the session for background audio).
     func reconnect() {
         ClientLog.write("user requested reconnect")
+        reconnectWork?.cancel()
         if echoEnabled { echo.stop(reason: "user reconnect") }
+        videoView.resetTouches()
         session?.send(.releaseAll)
         session?.stop(reason: "user reconnect")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            self?.activate()
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, !self.inBackground else { return }
+                self.reconnectWork = nil
+                self.activate()
+            }
         }
+        reconnectWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
     }
 
     // MARK: brightness (D-033)
@@ -189,6 +206,7 @@ final class AppModel {
 
     func setAudio(speaker: Bool, microphone: Bool) {
         wantedAudio = (speaker, microphone)
+        if speaker || microphone { connection.lastError = nil }
         connection.speakerOn = speaker
         connection.microphoneOn = microphone
         // The route is sent from onStateChange once audio really runs (or fails).
@@ -342,10 +360,56 @@ struct RootView: View {
                     .allowsHitTesting(false)
             }
 
+            if connection.phase == .streaming, let pending = connection.pendingUnlock {
+                let kind = BiometricAuthKey.biometryKind
+                HStack(spacing: 12) {
+                    Button {
+                        app.session?.approvePendingUnlock(pending)
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: kind.symbol)
+                                .font(.system(size: 19, weight: .semibold))
+                                .foregroundStyle(.tint)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(pending.service == "admin" ? "Retry \(kind.label) Admin" : "Retry \(kind.label) Unlock")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundStyle(.white)
+                                Text("WiredDisplay · Tap on iPad")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundStyle(.white.opacity(0.7))
+                            }
+                        }
+                    }
+                    .buttonStyle(.plain)
+
+                    Button {
+                        app.session?.dismissPendingUnlock()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(.white.opacity(0.75))
+                            .frame(width: 28, height: 28)
+                            .background(.white.opacity(0.14), in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Dismiss")
+                }
+                .padding(.leading, 18)
+                .padding(.trailing, 10)
+                .padding(.vertical, 10)
+                .background(.ultraThinMaterial, in: Capsule())
+                .overlay(Capsule().strokeBorder(.white.opacity(0.28), lineWidth: 1))
+                .shadow(color: .black.opacity(0.45), radius: 16, y: 6)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .padding(.top, 24)
+                .transition(.move(edge: .top).combined(with: .opacity))
+            }
+
             GeometryReader { space in
                 movableControls(in: space.size)
             }
         }
+        .animation(reduceMotion ? nil : .spring(duration: 0.32, bounce: 0.2), value: connection.pendingUnlock)
         .background(.black)
         .statusBarHidden(true)
         .persistentSystemOverlays(.hidden)
@@ -450,7 +514,14 @@ struct RootView: View {
         case .connecting: stage = .connecting
         case .failed(let reason): stage = .failed(reason)
         }
-        return StatusInfo(stage: stage, macName: connection.macName, lastError: connection.lastError)
+        return StatusInfo(
+            stage: stage,
+            macName: connection.macName,
+            activeTransport: stage == .connecting ? connection.activeTransport : nil,
+            wifiConnected: connection.wifiConnected,
+            wifiName: connection.wifiName,
+            lastError: connection.lastError
+        )
     }
 }
 
@@ -533,6 +604,7 @@ struct ControlsPanel: View {
             },
             pairedMacs: connection.pairedMacs.map { PairedMacRow(name: $0.name, fingerprint: $0.fingerprint) },
             forgetPaired: { app.session?.forgetPairedMacs() },
+            onBiometricKeyChanged: { key in app.session?.sendBiometricPublicKey(key) },
             reconnect: { app.reconnect() },
             close: close,
             device: app.deviceInfo)
@@ -540,15 +612,22 @@ struct ControlsPanel: View {
 
     private var summary: SessionSummary {
         let config = connection.streamConfig
+        let transportLabel: String
+        if connection.activeTransport == "Wi-Fi", let ssid = connection.wifiName, !ssid.isEmpty {
+            transportLabel = "Wi-Fi · \(ssid)"
+        } else {
+            transportLabel = connection.activeTransport
+        }
         return SessionSummary(
             macName: connection.macName,
             streaming: connection.phase == .streaming,
-            activeTransport: connection.activeTransport,
+            activeTransport: transportLabel,
             logicalSize: config.map { "\($0.pointWidth) × \($0.pointHeight)" },
             detail: config.map { "\($0.pixelWidth) × \($0.pixelHeight) px · \($0.refreshHz) Hz · \($0.codec == .hevc ? "HEVC" : "H.264")" },
             framesShown: connection.framesShown,
             framesDropped: connection.framesDropped,
             liveFPS: connection.liveFPS,
-            liveLatencyMs: connection.liveLatencyMs)
+            liveLatencyMs: connection.liveLatencyMs,
+            lastError: connection.lastError)
     }
 }

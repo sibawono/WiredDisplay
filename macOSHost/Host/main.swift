@@ -34,9 +34,13 @@ final class StatusMenu: NSObject {
     private var controller: HostController? { fleet?.focus }
     private var state: HostController.State { controller.map { fleet?.state(of: $0) ?? .waitingForDevice } ?? .waitingForDevice }
     private var ticker: Timer?
+    private var terminationObservers: [NSObjectProtocol] = []
+    private var signalSources: [DispatchSourceSignal] = []
+    private var shuttingDown = false
 
     func attach(_ fleet: HostFleet) {
         self.fleet = fleet
+        registerTerminationHandlers()
         item.button?.image = MenuBarGlyph.image(streaming: false)
         item.button?.toolTip = "WiredDisplay"
         item.button?.target = self
@@ -204,6 +208,7 @@ final class StatusMenu: NSObject {
             waiting.keepDisplayAwake = HostController.keepDisplayAwake
             waiting.keepMacAwake = HostController.keepMacAwake
             waiting.transportMode = opts?.transportMode ?? HostController.savedTransportMode
+            waiting.androidUSBDevices = Self.androidUSBDevicesSnapshot()
             waiting.autoSwitchAudio = fleet?.audioRouter.isEnabled ?? true
             waiting.autoSwitchMicrophone = fleet?.audioRouter.usesHeadsetMicrophone ?? true
             waiting.bothSpeakers = HostController.bothSpeakers
@@ -246,6 +251,7 @@ final class StatusMenu: NSObject {
             .compactMap { $0 }.joined(separator: " · ")
         if let codec = status.codec, let encoding = status.encoding { s.encoding = "\(codec) · \(encoding)" }
         s.limitNote = controller.decodeLimitNote.map { "Limited for this iPad: \($0)" }
+        s.canResetDecodeLimits = controller.canResetDecodeLimits
         s.brightness = controller.brightness
         s.quality = controller.qualityPreset
         s.inputEnabled = controller.isInputEnabled
@@ -262,20 +268,45 @@ final class StatusMenu: NSObject {
         s.bothSpeakersBalance = HostController.bothSpeakersBalance
         s.paired = controller.trust.peers.map { .init(name: $0.name, model: $0.model, key: String($0.fingerprint.prefix(8))) }
         if status.iPadName != nil { s.connectionCode = controller.connectionCode.withLock { $0 } }
+        s.pamInstalled = FileManager.default.fileExists(atPath: "/usr/local/lib/pam/pam_wireddisplay.so")
+        s.pamAllowWiFi = UserDefaults.standard.bool(forKey: HostFleet.pamAllowWiFiKey)
+        if let bioKey = controller.biometricPublicKey {
+            s.pamEnrolledKeyFingerprint = String(SecureChannel.fingerprint(bioKey).prefix(8))
+        }
         s.openAtLogin = LoginItem.isEnabled
         s.keepDisplayAwake = HostController.keepDisplayAwake
         s.keepMacAwake = HostController.keepMacAwake
         s.transportMode = controller.transportMode
+        s.androidUSBDevices = Self.androidUSBDevicesSnapshot()
         s.loginNeedsApproval = LoginItem.needsApproval
         s.version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
         return s
+    }
+
+    private static func androidUSBDevicesSnapshot() -> [PanelSnapshot.AndroidUSBDevice] {
+        let approved = HostController.aoaApprovedSerials()
+        return AoaClient.listDevices().map { dev in
+            PanelSnapshot.AndroidUSBDevice(
+                serial: dev.serial,
+                name: dev.product ?? "Android Device",
+                inAccessoryMode: dev.inAccessoryMode,
+                approved: approved.contains(dev.serial)
+            )
+        }
     }
 
     private func makeActions(_ fleet: HostFleet) -> PanelActions {
         var a = PanelActions()
         a.setDisplaySpace = { fleet.focus?.setDisplaySpace($0) }
         a.setBrightness = { fleet.focus?.setBrightness($0) }
-        a.setQuality = { fleet.setQuality($0) }
+        a.setQuality = { [weak self] preset in
+            fleet.setQuality(preset)
+            self?.refresh()
+        }
+        a.resetDecodeLimits = { [weak self] in
+            fleet.resetDecodeLimits()
+            self?.refresh()
+        }
         a.setInput = { [weak self] enable in
             if enable && !AXIsProcessTrusted() {
                 // Shows the system prompt that leads to Privacy & Security > Accessibility.
@@ -300,6 +331,10 @@ final class StatusMenu: NSObject {
             fleet.setTransportMode(mode)
             self?.refresh()
         }
+        a.setAndroidAoaApproved = { [weak self] serial, approved in
+            fleet.setAndroidAoaApproved(serial: serial, approved: approved)
+            self?.refresh()
+        }
         a.setLocalCursor = { fleet.setLocalCursor($0) }
         a.setAutoSwitchMicrophone = { fleet.audioRouter.usesHeadsetMicrophone = $0 }
         a.setBothSpeakers = { fleet.setBothSpeakers($0) }
@@ -310,6 +345,15 @@ final class StatusMenu: NSObject {
         a.openAccessibility = { Self.open("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") }
         a.openScreenRecording = { Self.open("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") }
         a.forgetPaired = { [weak self] in self?.forgetPaired() }
+        a.copyPamSetupCommand = {
+            let pb = NSPasteboard.general
+            pb.clearContents()
+            pb.setString("sudo scripts/install-pam.sh", forType: .string)
+        }
+        a.setPamAllowWiFi = { [weak self] allow in
+            fleet.setPamAllowWiFi(allow)
+            self?.refresh()
+        }
         a.showLog = {
             let log = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/WiredDisplayHost.log")
             NSWorkspace.shared.open([log], withApplicationAt: URL(fileURLWithPath: "/System/Applications/Utilities/Console.app"),
@@ -358,7 +402,45 @@ final class StatusMenu: NSObject {
         }
     }
 
+    private func registerTerminationHandlers() {
+        guard terminationObservers.isEmpty && signalSources.isEmpty else { return }
+        let powerOff = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.willPowerOffNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.handBackOnTermination(reason: "Mac shutting down or restarting") }
+        }
+        let willTerminate = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.handBackOnTermination(reason: "application terminating") }
+        }
+        terminationObservers = [powerOff, willTerminate]
+
+        for sig in [SIGTERM, SIGINT] {
+            signal(sig, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+            let name = sig == SIGTERM ? "SIGTERM" : "SIGINT"
+            source.setEventHandler { [weak self] in
+                MainActor.assumeIsolated { self?.handBackOnTermination(reason: name, exitAfter: true) }
+            }
+            source.resume()
+            signalSources.append(source)
+        }
+    }
+
+    private func handBackOnTermination(reason: String, exitAfter: Bool = false) {
+        if !shuttingDown {
+            shuttingDown = true
+            Log.info("WiredDisplayHost stopping (\(reason)); handing audio back")
+            popover.performClose()
+            fleet?.stop()
+        }
+        fleet?.audioRouter.handBackBeforeQuit()
+        if exitAfter { exit(0) }
+    }
+
     private func quit() {
+        shuttingDown = true
         popover.performClose()
         fleet?.stop()
         fleet?.audioRouter.handBackBeforeQuit()

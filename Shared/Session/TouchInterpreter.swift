@@ -243,15 +243,18 @@ public struct PinchZoomStepper: Sendable {
     /// `scale`: UIPinchGestureRecognizer's cumulative scale. Returns the keys
     /// for each step crossed since the last call.
     public mutating func update(scale: CGFloat) -> [InputEvent] {
-        guard scale > 0, scale.isFinite else { return [] }
+        guard scale > 0, scale.isFinite, stepRatio > 1, stepRatio.isFinite else { return [] }
         var events: [InputEvent] = []
-        while scale / anchor >= stepRatio {
+        var steps = 0
+        while scale / anchor >= stepRatio && steps < 16 {
             anchor *= stepRatio
             events += Self.step(zoomIn: true)
+            steps += 1
         }
-        while anchor / scale >= stepRatio {
+        while anchor / scale >= stepRatio && steps < 16 {
             anchor /= stepRatio
             events += Self.step(zoomIn: false)
+            steps += 1
         }
         return events
     }

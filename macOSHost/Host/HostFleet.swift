@@ -15,6 +15,8 @@ final class HostFleet: @unchecked Sendable {
     private let currentOptions: OSAllocatedUnfairLock<HostController.Options>
     var options: HostController.Options { currentOptions.withLock { $0 } }
     let audioRouter = AudioRouter()
+    private var pamBridge: PamBridgeServer?
+    private let activeLockscreen = OSAllocatedUnfairLock<PamBridgeServer.LockscreenSession?>(initialState: nil)
     private let confirmPairing: @Sendable (SecureChannel.Peer) -> Bool
     private let lock = OSAllocatedUnfairLock(initialState: (controllers: [HostController](), states: [ObjectIdentifier: HostController.State]()))
     private let stopping = OSAllocatedUnfairLock(initialState: false)
@@ -42,8 +44,57 @@ final class HostFleet: @unchecked Sendable {
         return all.first { $0.status.iPadName != nil } ?? all.first
     }
 
+    static let pamAllowWiFiKey = "pamAllowWiFi"
+    private let pamAllowWiFiLock = OSAllocatedUnfairLock<Bool>(
+        initialState: UserDefaults.standard.bool(forKey: HostFleet.pamAllowWiFiKey))
+    var pamAllowWiFi: Bool { pamAllowWiFiLock.withLock { $0 } }
+
+    func setPamAllowWiFi(_ allow: Bool) {
+        pamAllowWiFiLock.withLock { $0 = allow }
+        UserDefaults.standard.set(allow, forKey: Self.pamAllowWiFiKey)
+        changed()
+    }
+
     func start() {
         audioRouter.start()
+        let bridge = PamBridgeServer(
+            handler: { [weak self] request in
+                guard let self else { return PamBridgeServer.Response(status: 2, signature: []) }
+                let allowWiFi = self.pamAllowWiFi
+                for controller in self.controllers {
+                    if let response = controller.requestBiometricAuth(request, allowWiFi: allowWiFi) {
+                        return response
+                    }
+                }
+                return PamBridgeServer.Response(status: 2, signature: [])
+            },
+            onLockscreenStart: { [weak self] session in
+                guard let self else { return }
+                self.activeLockscreen.withLock { $0 = session }
+                let allowWiFi = self.pamAllowWiFi
+                for controller in self.controllers {
+                    controller.pushLockscreenChallenge(
+                        requestID: session.requestID, service: session.service, username: session.username,
+                        reason: session.reason, nonce: session.nonce, allowWiFi: allowWiFi
+                    )
+                }
+            },
+            onLockscreenEnd: { [weak self] requestID in
+                guard let self else { return }
+                let cleared: Bool = self.activeLockscreen.withLock { current in
+                    guard current?.requestID == requestID else { return false }
+                    current = nil
+                    return true
+                }
+                if cleared {
+                    for controller in self.controllers {
+                        controller.clearLockscreenChallenge()
+                    }
+                }
+            }
+        )
+        bridge.start()
+        pamBridge = bridge
         if options.transportMode.allowsWiFi && controllers.isEmpty {
             add(serial: nil)
         }
@@ -52,48 +103,65 @@ final class HostFleet: @unchecked Sendable {
 
     func stop() {
         stopping.withLock { $0 = true }
+        pamBridge?.stop()
+        pamBridge = nil
         for controller in controllers { controller.stop() }
     }
 
-    /// Every 2 s: add a controller for each new cabled device, and remove idle
-    /// controllers whose USB device has been absent for at least 10 s.
+    /// Every 2 s: add a controller for each new cabled device (Apple usbmuxd or Android ADB),
+    /// and remove idle controllers whose USB device has been absent for at least 10 s.
     private func watchDevices() {
         var lastSeen: [String: TimeInterval] = [:]
         while !stopping.withLock({ $0 }) {
             let now = ProcessInfo.processInfo.systemUptime
+            var discoveredSerials: [String] = []
             if let devices = try? UsbmuxConnection().listDevices() {
-                let wired = UsbmuxDevice.wiredOnly(devices)
-                let present = Set(wired.map(\.serialNumber))
-                for serial in present { lastSeen[serial] = now }
-                let known = Set(controllers.compactMap(\.deviceSerial))
-                let unbound = controllers.first { $0.deviceSerial == nil }
-                for device in wired where !known.contains(device.serialNumber) {
-                    if let unbound {
-                        switch state(of: unbound) {
-                        case .waitingForDevice, .backingOff, .stopped:
+                discoveredSerials.append(contentsOf: UsbmuxDevice.wiredOnly(devices).map(\.serialNumber))
+            }
+            let aoaDevices = AoaClient.listDevices()
+            let approvedAoa = HostController.aoaApprovedSerials()
+            for dev in aoaDevices where dev.inAccessoryMode || approvedAoa.contains(dev.serial) {
+                discoveredSerials.append(dev.fleetSerial)
+            }
+            if let adbDevices = try? AdbClient.listDevices() {
+                for dev in AdbDevice.wiredOnly(adbDevices) {
+                    if !aoaDevices.contains(where: { $0.inAccessoryMode && $0.serial == dev.serial }) {
+                        discoveredSerials.append(dev.fleetSerial)
+                    }
+                }
+            }
+            let present = Set(discoveredSerials)
+            for serial in present { lastSeen[serial] = now }
+            let known = Set(controllers.compactMap(\.deviceSerial))
+            let unbound = controllers.first { $0.deviceSerial == nil }
+            for serial in discoveredSerials where !known.contains(serial) {
+                if let unbound {
+                    switch state(of: unbound) {
+                    case .waitingForDevice, .backingOff, .stopped:
+                        if !options.transportMode.allowsWiFi {
                             remove(unbound)
-                        case .connecting, .streaming, .paused, .audioOnly, .pairing:
-                            // Unbound controller already owns the active session; avoid colliding dials.
-                            continue
                         }
-                    }
-                    add(serial: device.serialNumber)
-                }
-                if options.transportMode.allowsWiFi && controllers.isEmpty {
-                    add(serial: nil)
-                }
-                let stale = controllers.filter { controller in
-                    guard let serial = controller.deviceSerial, !present.contains(serial) else { return false }
-                    guard now - (lastSeen[serial] ?? 0) >= 10 else { return false }
-                    switch state(of: controller) {
-                    case .waitingForDevice, .backingOff, .stopped: return true
-                    case .connecting, .streaming, .paused, .audioOnly, .pairing: return false
+                    case .connecting, .streaming, .paused, .audioOnly, .pairing:
+                        // Skip only the specific USB device that the unbound controller is already serving.
+                        if unbound.activeUSBSerial == serial { continue }
                     }
                 }
-                for controller in stale {
-                    if let serial = controller.deviceSerial { lastSeen.removeValue(forKey: serial) }
-                    remove(controller)
+                add(serial: serial)
+            }
+            if options.transportMode.allowsWiFi && !controllers.contains(where: { $0.deviceSerial == nil }) {
+                add(serial: nil)
+            }
+            let stale = controllers.filter { controller in
+                guard let serial = controller.deviceSerial, !present.contains(serial) else { return false }
+                guard now - (lastSeen[serial] ?? 0) >= 10 else { return false }
+                switch state(of: controller) {
+                case .waitingForDevice, .backingOff, .stopped: return true
+                case .connecting, .streaming, .paused, .audioOnly, .pairing: return false
                 }
+            }
+            for controller in stale {
+                if let serial = controller.deviceSerial { lastSeen.removeValue(forKey: serial) }
+                remove(controller)
             }
             Thread.sleep(forTimeInterval: 2)
         }
@@ -107,6 +175,24 @@ final class HostFleet: @unchecked Sendable {
             guard let self, let controller else { return }
             self.lock.withLock { $0.states[ObjectIdentifier(controller)] = state }
             self.changed()
+        }
+        controller.onQualityChanged = { [weak self] preset in
+            guard let self else { return }
+            self.currentOptions.withLock { $0.chroma = preset.chroma; $0.tenBit = preset.tenBit }
+            self.changed()
+        }
+        controller.onSessionReady = { [weak self] readyController in
+            guard let self, let session = self.activeLockscreen.withLock({ $0 }) else { return }
+            readyController.pushLockscreenChallenge(
+                requestID: session.requestID, service: session.service, username: session.username,
+                reason: session.reason, nonce: session.nonce, allowWiFi: self.pamAllowWiFi
+            )
+        }
+        controller.onLockscreenAuthResponse = { [weak self] requestID, status, signature in
+            guard let self, status == 0 else { return }
+            if let session = self.activeLockscreen.withLock({ $0 }), session.requestID == requestID {
+                session.resolve(PamBridgeServer.Response(status: status, signature: signature))
+            }
         }
         lock.withLock { $0.controllers.append(controller) }
         if let serial {
@@ -150,7 +236,7 @@ final class HostFleet: @unchecked Sendable {
     func setTransportMode(_ mode: TransportMode) {
         UserDefaults.standard.set(mode.rawValue, forKey: HostController.transportModeKey)
         currentOptions.withLock { $0.transportMode = mode }
-        if mode.allowsWiFi && controllers.isEmpty {
+        if mode.allowsWiFi && !controllers.contains(where: { $0.deviceSerial == nil }) {
             add(serial: nil)
         }
         controllers.forEach { $0.setTransportMode(mode) }
@@ -173,6 +259,10 @@ final class HostFleet: @unchecked Sendable {
         UserDefaults.standard.removeObject(forKey: HostController.decodeLimitsKey)
         controllers.forEach { $0.forgetDecodeLimits() }
     }
+    func resetDecodeLimits() {
+        UserDefaults.standard.removeObject(forKey: HostController.decodeLimitsKey)
+        controllers.forEach { $0.resetDecodeLimits() }
+    }
     /// "Keep the display on" / "Keep the Mac awake" (General tab).
     func setKeepAwake(display: Bool? = nil, mac: Bool? = nil) {
         if let display { UserDefaults.standard.set(display, forKey: HostController.keepDisplayAwakeKey) }
@@ -193,5 +283,17 @@ final class HostFleet: @unchecked Sendable {
         let clamped = min(max(balance, 0), HostController.maxBothSpeakersBalance)
         UserDefaults.standard.set(clamped, forKey: HostController.bothSpeakersBalanceKey)
         controllers.forEach { $0.updateBothSpeakers() }
+    }
+
+    /// Opt-in or opt-out a specific USB-C Android device for AOA accessory mode.
+    func setAndroidAoaApproved(serial: String, approved: Bool) {
+        HostController.setAoaApproved(serial, approved: approved)
+        if approved {
+            let fleetSerial = "\(AoaClient.serialPrefix)\(serial)"
+            if !controllers.contains(where: { $0.deviceSerial == fleetSerial }) {
+                add(serial: fleetSerial)
+            }
+        }
+        changed()
     }
 }

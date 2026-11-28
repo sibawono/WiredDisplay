@@ -8,6 +8,8 @@
 	<array>
 		<string>audio</string>
 	</array>
+	<key>NSFaceIDUsageDescription</key>
+	<string>WiredDisplay uses Face ID to approve Mac authentication requests such as sudo and unlocking your Mac.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>WiredDisplay uses the local network to discover and stream securely from your trusted Mac over Wi-Fi.</string>
 	<key>NSBonjourServices</key>

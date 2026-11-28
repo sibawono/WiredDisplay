@@ -78,6 +78,7 @@ final class VirtualDisplayController {
             }
             handle = created
             if waitUntilOnline(created.displayID, timeout: 3) {
+                activeSerialNumber = candidateSerial
                 if offset != 0 {
                     Log.warn("virtual display came online with fallback serial \(candidateSerial) (offset +\(offset))")
                 }
@@ -101,13 +102,15 @@ final class VirtualDisplayController {
         throw lastError ?? Error.createFailed("unknown virtual display failure")
     }
 
+    private var activeSerialNumber: UInt32 = 1
+
     /// Updates modes in place (preserving window placement across rotation).
     /// Returns nil if the handle is absent or macOS rejects the mode change.
     func resizeInPlace(for hello: Hello, refreshHz: Double, wideColor: Bool, space: Space = .native,
                        serialNumber: UInt32 = 1) -> StreamConfig? {
         guard let handle else { return nil }
         let built = makeConfig(for: hello, refreshHz: refreshHz, wideColor: wideColor, space: space,
-                               serialNumber: serialNumber)
+                               serialNumber: activeSerialNumber)
         do {
             try handle.apply(built.config)
         } catch {

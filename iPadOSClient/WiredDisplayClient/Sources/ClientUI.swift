@@ -4,34 +4,44 @@ import SwiftUI
 // session objects), so every state can be rendered and reviewed on its own.
 
 enum Brand {
-    static let blue = Color(red: 0.12, green: 0.48, blue: 1.0)
-    /// Secondary text on the app's dark surfaces; the system style measured 3.6:1 there.
-    static let secondaryText = Color.white.opacity(0.7)
-    /// Filled buttons with white text: Brand.blue gave 3.2:1 under white text.
-    static let action = Color(red: 0.04, green: 0.33, blue: 0.80)
-    static let tile = LinearGradient(colors: [Color(red: 0.35, green: 0.72, blue: 1.0), blue, Color(red: 0.04, green: 0.32, blue: 0.88)],
-                                     startPoint: .top, endPoint: .bottom)
+    // Website studio-dark palette (site.css).
+    static let bg = Color(red: 0.027, green: 0.035, blue: 0.047)           // #07090c
+    static let tile = Color(red: 0.067, green: 0.082, blue: 0.106)         // #11151b
+    static let tileElevated = Color(red: 0.094, green: 0.118, blue: 0.153) // #181e27
+    static let hair = Color(red: 0.145, green: 0.176, blue: 0.224)         // #252d39
+    static let text = Color(red: 0.953, green: 0.961, blue: 0.973)         // #f3f5f8
+    static let muted = Color(red: 0.604, green: 0.643, blue: 0.698)        // #9aa4b2
+    static let soft = Color(red: 0.706, green: 0.745, blue: 0.796)         // #b4becb
+
+    static let blue = Color(red: 0.106, green: 0.431, blue: 0.761)         // #1b6ec2
+    static let signal = Color(red: 0.322, green: 0.659, blue: 1.0)         // #52a8ff (video lane)
+    static let laneAudio = Color(red: 0.749, green: 0.353, blue: 0.949)    // #bf5af2 (audio lane)
+    static let laneInput = Color(red: 0.188, green: 0.820, blue: 0.345)    // #30d158 (input lane)
+    static let secondaryText = muted
+    static let action = blue
+    static let tileGradient = LinearGradient(
+        colors: [signal, blue, Color(red: 0.04, green: 0.32, blue: 0.88)],
+        startPoint: .top, endPoint: .bottom
+    )
 }
 
-/// Dark backdrop behind every non-streaming screen.
+/// Solid studio-dark backdrop matching the WiredDisplay product page.
 struct Backdrop: View {
     var body: some View {
-        LinearGradient(colors: [Color(red: 0.03, green: 0.05, blue: 0.12), .black], startPoint: .top, endPoint: .bottom)
-            .ignoresSafeArea()
+        Brand.bg.ignoresSafeArea()
     }
 }
 
-/// A tile with a symbol, or (no symbol) the app icon itself, so the splash
-/// screen shows exactly the home screen icon.
+/// App icon tile used on pairing and header surfaces.
 struct IconTile: View {
     var symbol: String?
-    var size: CGFloat = 96
+    var size: CGFloat = 72
 
     var body: some View {
         Group {
             if let symbol {
                 RoundedRectangle(cornerRadius: size * 0.24, style: .continuous)
-                    .fill(Brand.tile)
+                    .fill(Brand.tileGradient)
                     .overlay(
                         Image(systemName: symbol)
                             .font(.system(size: size * 0.44, weight: .medium))
@@ -45,7 +55,7 @@ struct IconTile: View {
             }
         }
         .frame(width: size, height: size)
-        .shadow(color: Brand.blue.opacity(0.45), radius: 24, y: 10)
+        .overlay(RoundedRectangle(cornerRadius: size * 0.225, style: .continuous).strokeBorder(.white.opacity(0.1)))
     }
 }
 
@@ -55,160 +65,545 @@ struct StatusInfo: Equatable {
     enum Stage: Equatable { case starting, waitingForMac, connecting, failed(String) }
     var stage: Stage
     var macName: String
+    var activeTransport: String? = nil
+    var wifiConnected: Bool = false
+    var wifiName: String? = nil
     var lastError: String?
 }
 
 struct StatusScreen: View {
     let info: StatusInfo
-    /// When waiting began, for the re-plug hint (BUG-037: after the Mac
-    /// restarts, the iPad stays off its USB bus until the cable is re-plugged).
+    @AppStorage("wd.onboardingDone") private var onboardingDone = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var waitingSince = Date()
+    @State private var appeared = false
     static let replugHintDelay: TimeInterval = 20
 
+    private let iconGradient = LinearGradient(
+        colors: [Brand.signal, Brand.laneAudio],
+        startPoint: .topLeading, endPoint: .bottomTrailing
+    )
+
     var body: some View {
-        VStack(spacing: 28) {
-            IconTile()
-            VStack(spacing: 10) {
-                Text("WiredDisplay")
-                    .font(.system(size: 40, weight: .bold, design: .rounded))
-                    .foregroundStyle(.white)
-                statusLine
-            }
-            steps
-            TimelineView(.periodic(from: .now, by: 1)) { context in
-                if info.stage == .waitingForMac,
-                   context.date.timeIntervalSince(waitingSince) >= Self.replugHintDelay {
-                    ReplugHint()
-                        .transition(.opacity.combined(with: .move(edge: .bottom)))
+        Group {
+            if !onboardingDone {
+                OnboardingView {
+                    withAnimation(reduceMotion ? nil : .spring(response: 0.5, dampingFraction: 0.88)) {
+                        onboardingDone = true
+                    }
                 }
-            }
-            if let note {
-                Label(note, systemImage: "exclamationmark.triangle.fill")
-                    .font(.footnote)
-                    .foregroundStyle(.orange)
-                    .padding(.horizontal, 14).padding(.vertical, 8)
-                    .background(.orange.opacity(0.12), in: Capsule())
-                    .frame(maxWidth: 520)
+                .transition(.opacity)
+            } else {
+                waitingHome
+                    .transition(.opacity)
             }
         }
-        .padding(40)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .animation(.smooth, value: info)
         .onChange(of: info.stage, initial: true) { _, stage in
             if stage == .waitingForMac { waitingSince = Date() }
         }
     }
 
-    private var statusLine: some View {
-        HStack(spacing: 10) {
+    private var waitingHome: some View {
+        GeometryReader { geo in
+            let wide = geo.size.width >= 760
+            ScrollView {
+                VStack(spacing: 0) {
+                    Spacer(minLength: 24)
+
+                    VStack(spacing: 28) {
+                        // Hero section matching OnboardingView
+                        VStack(spacing: 14) {
+                            IconTile(size: 84)
+                                .shadow(color: Brand.signal.opacity(0.22), radius: 22, y: 8)
+                            Text(heroTitle)
+                                .font(.system(size: wide ? 38 : 30, weight: .bold))
+                                .tracking(-0.8)
+                                .foregroundStyle(Brand.text)
+                                .multilineTextAlignment(.center)
+                            Text(heroSubtitle)
+                                .font(.system(size: 17))
+                                .foregroundStyle(Brand.muted)
+                                .multilineTextAlignment(.center)
+                                .frame(maxWidth: 540)
+
+                            statusPill
+                                .padding(.top, 2)
+                        }
+                        .opacity(appeared ? 1 : 0)
+                        .offset(y: appeared ? 0 : 10)
+
+                        // 3 cards matching OnboardingView's 1:1 square card layout
+                        let cards = statusCards
+                        if wide {
+                            HStack(alignment: .top, spacing: 18) {
+                                ForEach(Array(cards.enumerated()), id: \.offset) { idx, item in
+                                    OnboardingFeatureCard(
+                                        symbol: item.symbol,
+                                        title: item.title,
+                                        detail: item.detail,
+                                        gradient: iconGradient,
+                                        square: true,
+                                        highlighted: item.highlighted,
+                                        badge: item.badge
+                                    )
+                                    .opacity(appeared ? 1 : 0)
+                                    .offset(y: appeared ? 0 : 14)
+                                    .animation(reduceMotion ? nil : .spring(response: 0.55, dampingFraction: 0.86).delay(Double(idx) * 0.08), value: appeared)
+                                }
+                            }
+                            .frame(maxWidth: 840)
+                        } else {
+                            VStack(spacing: 12) {
+                                ForEach(Array(cards.enumerated()), id: \.offset) { idx, item in
+                                    OnboardingFeatureCard(
+                                        symbol: item.symbol,
+                                        title: item.title,
+                                        detail: item.detail,
+                                        gradient: iconGradient,
+                                        square: false,
+                                        highlighted: item.highlighted,
+                                        badge: item.badge
+                                    )
+                                    .opacity(appeared ? 1 : 0)
+                                    .offset(y: appeared ? 0 : 12)
+                                    .animation(reduceMotion ? nil : .spring(response: 0.55, dampingFraction: 0.86).delay(Double(idx) * 0.07), value: appeared)
+                                }
+                            }
+                            .frame(maxWidth: 520)
+                        }
+
+                        TimelineView(.periodic(from: .now, by: 1)) { context in
+                            if info.stage == .waitingForMac,
+                               context.date.timeIntervalSince(waitingSince) >= Self.replugHintDelay {
+                                ReplugHint()
+                                    .frame(maxWidth: wide ? 840 : 520)
+                                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+                            }
+                        }
+
+                        if let note {
+                            Text(note)
+                                .font(.system(size: 13))
+                                .foregroundStyle(.orange)
+                                .multilineTextAlignment(.center)
+                                .frame(maxWidth: 600)
+                        }
+
+                        Button {
+                            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.3)) {
+                                onboardingDone = false
+                            }
+                        } label: {
+                            Label("Overview", systemImage: "sparkles.rectangle.stack")
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundStyle(Brand.soft)
+                                .padding(.horizontal, 18)
+                                .padding(.vertical, 10)
+                                .background(Brand.tile, in: Capsule())
+                                .overlay(Capsule().strokeBorder(Brand.hair))
+                        }
+                        .buttonStyle(.plain)
+                        .opacity(appeared ? 1 : 0)
+                    }
+                    .padding(.horizontal, wide ? 40 : 24)
+
+                    Spacer(minLength: 24)
+                }
+                .frame(minWidth: geo.size.width, minHeight: geo.size.height)
+            }
+            .scrollBounceBehavior(.basedOnSize)
+        }
+        .onAppear {
+            if reduceMotion { appeared = true }
+            else { withAnimation(.spring(response: 0.6, dampingFraction: 0.86)) { appeared = true } }
+        }
+    }
+
+    private var isConnectingWiFi: Bool {
+        info.stage == .connecting && info.activeTransport == "Wi-Fi"
+    }
+
+    private var isConnectingUSB: Bool {
+        info.stage == .connecting && info.activeTransport == "USB-C"
+    }
+
+    private var wifiLabel: String {
+        if let ssid = info.wifiName, !ssid.isEmpty {
+            return "Wi-Fi · \(ssid)"
+        }
+        return info.wifiConnected ? "Wi-Fi" : "Wi-Fi off"
+    }
+
+    private var heroTitle: String {
+        switch info.stage {
+        case .starting:
+            return "Starting WiredDisplay…"
+        case .waitingForMac:
+            return "Ready to Connect"
+        case .connecting:
+            return info.macName.isEmpty ? "Connecting to Mac…" : "Connecting to \(info.macName)…"
+        case .failed:
+            return "Unable to Start"
+        }
+    }
+
+    private var heroSubtitle: String {
+        switch info.stage {
+        case .starting:
+            return "Preparing USB-C and encrypted local Wi-Fi listeners."
+        case .waitingForMac:
+            return "Plug in a USB-C cable or stay on the same local Wi-Fi network as your Mac."
+        case .connecting:
+            if isConnectingWiFi {
+                if let ssid = info.wifiName, !ssid.isEmpty {
+                    return "Establishing encrypted local Wi-Fi session on “\(ssid)”."
+                }
+                return "Establishing encrypted local Wi-Fi session with your Mac."
+            } else if isConnectingUSB {
+                return "Establishing encrypted USB-C session with your Mac."
+            }
+            return "Establishing encrypted session with your Mac."
+        case .failed(let reason):
+            return reason
+        }
+    }
+
+    private var statusPill: some View {
+        HStack(spacing: 8) {
             switch info.stage {
             case .failed:
-                Image(systemName: "xmark.octagon.fill").foregroundStyle(.red)
+                Image(systemName: "exclamationmark.circle.fill")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.red)
             case .connecting, .starting:
-                ProgressView().controlSize(.small).tint(.white)
+                ProgressView().controlSize(.mini).tint(Brand.signal)
             case .waitingForMac:
                 WaitingDot()
             }
-            Text(headline)
-                .font(.title3.weight(.medium))
-                .foregroundStyle(.white.opacity(0.8))
+
+            if info.stage == .connecting {
+                Image(systemName: isConnectingWiFi ? "wifi" : "cable.connector")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Brand.signal)
+                Text(connectingPillText)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Brand.text)
+            } else if info.stage == .waitingForMac {
+                Text("Listening:")
+                    .font(.system(size: 13, weight: .regular))
+                    .foregroundStyle(Brand.muted)
+                Image(systemName: "cable.connector")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Brand.signal)
+                Text("USB-C")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Brand.text)
+                Text("·")
+                    .foregroundStyle(Brand.muted)
+                Image(systemName: info.wifiConnected ? "wifi" : "wifi.slash")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(info.wifiConnected ? Brand.signal : Brand.muted)
+                Text(wifiLabel)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(info.wifiConnected ? Brand.text : Brand.muted)
+            } else if info.stage == .starting {
+                Text("Starting listeners…")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Brand.muted)
+            } else {
+                Text("Listener stopped")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.red)
+            }
         }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 9)
+        .background(Brand.tileElevated, in: Capsule())
+        .overlay(
+            Capsule().strokeBorder(
+                info.stage == .connecting ? Brand.signal.opacity(0.6)
+                    : (info.stage == .waitingForMac ? Brand.hair : .red.opacity(0.45))
+            )
+        )
     }
 
-    private var headline: String {
-        switch info.stage {
-        case .starting: return "Starting…"
-        case .waitingForMac: return "Waiting for your Mac"
-        case .connecting: return info.macName.isEmpty ? "Connecting…" : "Connecting to \(info.macName)…"
-        case .failed: return "Can’t start"
+    private var connectingPillText: String {
+        if isConnectingWiFi {
+            if let ssid = info.wifiName, !ssid.isEmpty {
+                return "Connecting via Wi-Fi · \(ssid)"
+            }
+            return "Connecting via Wi-Fi"
         }
+        if isConnectingUSB {
+            return "Connecting via USB-C"
+        }
+        return "Connecting…"
     }
 
-    /// The error worth showing: a failure reason, or why the last session ended.
+    private struct StatusCardItem {
+        let symbol: String
+        let title: String
+        let detail: String
+        let highlighted: Bool
+        let badge: String?
+    }
+
+    private var statusCards: [StatusCardItem] {
+        let connectSymbol: String
+        let connectTitle: String
+        let connectDetail: String
+        let connectBadge: String?
+
+        if isConnectingUSB {
+            connectSymbol = "cable.connector"
+            connectTitle = "Connecting via USB-C"
+            connectDetail = "Wired USB-C link active for lowest latency and full Retina clarity."
+            connectBadge = "USB-C"
+        } else if isConnectingWiFi {
+            connectSymbol = "wifi"
+            connectTitle = "Connecting via Wi-Fi"
+            if let ssid = info.wifiName, !ssid.isEmpty {
+                connectDetail = "Connected to “\(ssid)”. Streaming over encrypted local Wi-Fi."
+                connectBadge = "Wi-Fi · \(ssid)"
+            } else {
+                connectDetail = "Local Wi-Fi link active. Streaming over encrypted local network."
+                connectBadge = "Wi-Fi"
+            }
+        } else {
+            connectSymbol = "display.2"
+            connectTitle = "01 · USB-C or Wi-Fi"
+            connectDetail = "Plug in a USB-C cable for lowest latency, or stay on the same local Wi-Fi network as your Mac."
+            connectBadge = info.wifiConnected ? "USB-C · \(wifiLabel)" : "USB-C ready"
+        }
+
+        return [
+            StatusCardItem(
+                symbol: connectSymbol,
+                title: connectTitle,
+                detail: connectDetail,
+                highlighted: info.stage == .connecting,
+                badge: connectBadge
+            ),
+            StatusCardItem(
+                symbol: "menubar.rectangle",
+                title: "02 · Mac menu bar",
+                detail: "Open WiredDisplay on your Mac and pick USB-C, Auto, or Wi-Fi in the General tab.",
+                highlighted: false,
+                badge: "USB-C · Auto · Wi-Fi"
+            ),
+            StatusCardItem(
+                symbol: "lock.shield",
+                title: "03 · Pair once",
+                detail: "Confirm the 6-digit code on first connection. Video, audio, and input stay encrypted with AES-256-GCM.",
+                highlighted: false,
+                badge: "AES-256-GCM"
+            ),
+        ]
+    }
+
     private var note: String? {
-        if case .failed(let reason) = info.stage { return reason }
+        if case .failed = info.stage { return nil }
         guard info.stage == .waitingForMac, let error = info.lastError, !error.isEmpty else { return nil }
         return "Last session: \(error)"
     }
-
-    private var steps: some View {
-        let connecting = info.stage == .connecting
-        return VStack(alignment: .leading, spacing: 0) {
-            StepRow(number: 1, symbol: "cable.connector", title: "Connect the USB‑C cable",
-                    detail: "Wired only. Wi‑Fi is never used.", done: connecting)
-            Divider().overlay(.white.opacity(0.08)).padding(.leading, 64)
-            StepRow(number: 2, symbol: "menubar.rectangle", title: "Start WiredDisplay on the Mac",
-                    detail: "It lives in the menu bar and opens at login.", done: connecting)
-            Divider().overlay(.white.opacity(0.08)).padding(.leading, 64)
-            StepRow(number: 3, symbol: "lock.shield", title: "Pair once",
-                    detail: "Confirm the code the first time this iPad meets a Mac.", done: false)
-        }
-        .padding(.vertical, 6)
-        .frame(maxWidth: 520)
-        .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).strokeBorder(.white.opacity(0.08)))
-    }
 }
 
-/// Shown after a while without a Mac: the usual cure after a Mac restart.
-private struct ReplugHint: View {
+// MARK: - Onboarding (first launch)
+
+private struct OnboardingView: View {
+    let onFinish: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var appeared = false
+
+    private let iconGradient = LinearGradient(
+        colors: [Brand.signal, Brand.laneAudio],
+        startPoint: .topLeading, endPoint: .bottomTrailing
+    )
+
     var body: some View {
-        HStack(alignment: .top, spacing: 14) {
-            Image(systemName: "arrow.triangle.2.circlepath")
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(.white)
-                .frame(width: 36, height: 36)
-                .background(Brand.blue.opacity(0.85), in: Circle())
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Mac restarted? Unplug the cable and plug it back in.")
-                    .font(.body.weight(.semibold))
-                    .foregroundStyle(.white)
-                Text("After a restart the Mac doesn’t see an iPad that stayed connected until the USB‑C cable is reconnected.")
-                    .font(.subheadline)
-                    .foregroundStyle(.white.opacity(0.6))
+        GeometryReader { geo in
+            let wide = geo.size.width >= 760
+            VStack(spacing: 0) {
+                Spacer(minLength: 24)
+
+                VStack(spacing: 28) {
+                    VStack(spacing: 14) {
+                        IconTile(size: 84)
+                            .shadow(color: Brand.signal.opacity(0.22), radius: 22, y: 8)
+                        Text("Welcome to WiredDisplay")
+                            .font(.system(size: wide ? 38 : 30, weight: .bold))
+                            .tracking(-0.8)
+                            .foregroundStyle(Brand.text)
+                            .multilineTextAlignment(.center)
+                        Text("Use your iPad as a Retina Mac display over USB-C or encrypted local Wi-Fi.")
+                            .font(.system(size: 17))
+                            .foregroundStyle(Brand.muted)
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: 540)
+                    }
+                    .opacity(appeared ? 1 : 0)
+                    .offset(y: appeared ? 0 : 10)
+
+                    // 3 feature cards matching the website's outlined gradient-icon card style
+                    let cards: [(symbol: String, title: String, body: String)] = [
+                        ("display.2", "USB-C or local Wi-Fi",
+                         "Plug in a USB-C cable for lowest latency, or switch to encrypted local Wi-Fi when you want to move freely."),
+                        ("speaker.wave.2", "Mac + iPad speakers together",
+                         "Stream system audio to your iPad or play both speakers in sync, with 240 Hz Apple Pencil, touch, and keyboard."),
+                        ("lock.shield", "Private and encrypted",
+                         "Pair once with a 6-digit code. Video, audio, and input stay on your cable or local network with AES-256-GCM."),
+                    ]
+
+                    if wide {
+                        HStack(alignment: .top, spacing: 18) {
+                            ForEach(Array(cards.enumerated()), id: \.offset) { idx, item in
+                                OnboardingFeatureCard(symbol: item.symbol, title: item.title, detail: item.body,
+                                                      gradient: iconGradient, square: true)
+                                    .opacity(appeared ? 1 : 0)
+                                    .offset(y: appeared ? 0 : 14)
+                                    .animation(reduceMotion ? nil : .spring(response: 0.55, dampingFraction: 0.86).delay(Double(idx) * 0.08), value: appeared)
+                            }
+                        }
+                        .frame(maxWidth: 840)
+                    } else {
+                        VStack(spacing: 12) {
+                            ForEach(Array(cards.enumerated()), id: \.offset) { idx, item in
+                                OnboardingFeatureCard(symbol: item.symbol, title: item.title, detail: item.body,
+                                                      gradient: iconGradient, square: false)
+                                    .opacity(appeared ? 1 : 0)
+                                    .offset(y: appeared ? 0 : 12)
+                                    .animation(reduceMotion ? nil : .spring(response: 0.55, dampingFraction: 0.86).delay(Double(idx) * 0.07), value: appeared)
+                            }
+                        }
+                        .frame(maxWidth: 520)
+                    }
+
+                    Button(action: onFinish) {
+                        Text("Start Connecting")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(minWidth: 220, minHeight: 48)
+                            .background(Brand.blue, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, 4)
+                    .opacity(appeared ? 1 : 0)
+                }
+                .padding(.horizontal, wide ? 40 : 24)
+
+                Spacer(minLength: 24)
             }
-            Spacer(minLength: 0)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .padding(16)
-        .frame(maxWidth: 520)
-        .background(Brand.blue.opacity(0.14), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(Brand.blue.opacity(0.4)))
+        .onAppear {
+            if reduceMotion { appeared = true }
+            else { withAnimation(.spring(response: 0.6, dampingFraction: 0.86)) { appeared = true } }
+        }
     }
 }
 
-private struct StepRow: View {
-    let number: Int
+private struct OnboardingFeatureCard: View {
     let symbol: String
     let title: String
     let detail: String
-    let done: Bool
+    let gradient: LinearGradient
+    let square: Bool
+    var highlighted: Bool = false
+    var badge: String? = nil
 
     var body: some View {
-        HStack(spacing: 16) {
-            ZStack {
-                Circle().fill(done ? Color.green.opacity(0.85) : Brand.blue.opacity(0.85))
-                Image(systemName: done ? "checkmark" : symbol)
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(.white)
+        VStack(alignment: .leading, spacing: 14) {
+            Image(systemName: symbol)
+                .font(.system(size: 36, weight: .light))
+                .foregroundStyle(gradient)
+                .frame(height: 42)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text(title)
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(Brand.text)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(detail)
+                    .font(.system(size: 14, weight: .regular))
+                    .lineSpacing(3)
+                    .foregroundStyle(Brand.muted)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .frame(width: 36, height: 36)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.body.weight(.semibold)).foregroundStyle(.white)
-                Text(detail).font(.subheadline).foregroundStyle(.white.opacity(0.55))
+            if square { Spacer(minLength: 0) }
+            if let badge, !badge.isEmpty {
+                Text(badge)
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(highlighted ? Brand.signal : Brand.soft)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(
+                        highlighted ? Brand.signal.opacity(0.14) : Brand.tileElevated,
+                        in: Capsule()
+                    )
+                    .overlay(
+                        Capsule().strokeBorder(highlighted ? Brand.signal.opacity(0.45) : Brand.hair)
+                    )
             }
-            Spacer(minLength: 0)
         }
-        .padding(.horizontal, 16).padding(.vertical, 12)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Step \(number): \(title). \(detail)\(done ? ". Done" : "")")
+        .padding(24)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .modifier(SquareAspectModifier(enabled: square))
+        .background(Brand.tile, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .strokeBorder(highlighted ? Brand.signal.opacity(0.65) : Brand.hair, lineWidth: highlighted ? 1.5 : 1)
+        )
+    }
+}
+
+private struct SquareAspectModifier: ViewModifier {
+    let enabled: Bool
+    func body(content: Content) -> some View {
+        if enabled {
+            content.aspectRatio(1, contentMode: .fit)
+        } else {
+            content
+        }
+    }
+}
+
+/// Shown after a while without a Mac: covers both USB-C replug and Wi-Fi mode check.
+private struct ReplugHint: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Not connecting yet?")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(Brand.text)
+            Text("If the Mac restarted, replug the USB-C cable. For Wi-Fi, set Connection to Auto or Wi-Fi in the Mac menu bar.")
+                .font(.system(size: 13))
+                .foregroundStyle(Brand.muted)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .background(Brand.tileElevated, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Brand.hair))
     }
 }
 
 private struct WaitingDot: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var dim = false
+
     var body: some View {
-        Circle().fill(Brand.blue)
-            .frame(width: 10, height: 10)
+        Circle()
+            .fill(Brand.signal)
+            .opacity(dim ? 0.35 : 1.0)
+            .frame(width: 7, height: 7)
             .accessibilityHidden(true)
+            .onAppear {
+                guard !reduceMotion else { return }
+                withAnimation(.easeInOut(duration: 1.4).repeatForever(autoreverses: true)) {
+                    dim = true
+                }
+            }
     }
 }
 
@@ -298,6 +693,7 @@ struct SessionSummary: Equatable {
     var framesDropped: Int
     var liveFPS: Int = 0
     var liveLatencyMs: Double? = nil
+    var lastError: String? = nil
 }
 
 struct PairedMacRow: Identifiable, Equatable {
@@ -394,6 +790,7 @@ struct ControlsContent: View {
     var sleepMac: () -> Void = {}
     let pairedMacs: [PairedMacRow]
     let forgetPaired: () -> Void
+    var onBiometricKeyChanged: ([UInt8]) -> Void = { _ in }
     let reconnect: () -> Void
     var close: () -> Void = {}
     var device: DeviceInfo? = nil
@@ -403,6 +800,8 @@ struct ControlsContent: View {
     @State private var confirmSleep = false
     @State private var showGestures = false
     @State private var showShortcuts = false
+    @State private var biometricFingerprint: String? = BiometricAuthKey.publicKey().map(BiometricAuthKey.fingerprint(of:))
+    @State private var biometricError: String? = nil
 
     private static let qualityTitles = ["Balanced", "Pro", "Ultra", "High"]
     private static let qualityDetails = [
@@ -615,6 +1014,13 @@ struct ControlsContent: View {
                         .foregroundStyle(.orange)
                         .padding(.leading, 34)
                 }
+                if let error = summary.lastError, !error.isEmpty {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 2)
+                }
             }
             card {
                 Label("Tip: turn on “Play on Mac speakers too” in the Mac menu bar to use both speakers together with sync & balance.",
@@ -744,7 +1150,59 @@ struct ControlsContent: View {
     }
 
     private var moreTab: some View {
-        Group {
+        let bioKind = BiometricAuthKey.biometryKind
+        return Group {
+            card("Mac \(bioKind.label) Auth") {
+                if let fp = biometricFingerprint {
+                    InfoRow(symbol: bioKind.symbol, title: "\(bioKind.label) enrolled", value: String(fp.prefix(8)))
+                    Text("Approve sudo or Mac Lock Screen using \(bioKind.label). Run install-pam.sh on your Mac to link this key.")
+                        .font(.caption).foregroundStyle(Brand.secondaryText)
+                    Divider().overlay(.white.opacity(0.08))
+                    HStack(spacing: 12) {
+                        Button("Re-enroll Key") {
+                            do {
+                                let pub = try BiometricAuthKey.enroll()
+                                biometricFingerprint = BiometricAuthKey.fingerprint(of: pub)
+                                biometricError = nil
+                                onBiometricKeyChanged(pub)
+                            } catch {
+                                biometricError = error.localizedDescription
+                            }
+                        }
+                        .font(.subheadline)
+                        Spacer()
+                        Button("Remove", role: .destructive) {
+                            BiometricAuthKey.delete()
+                            biometricFingerprint = nil
+                            biometricError = nil
+                        }
+                        .font(.subheadline)
+                    }
+                } else {
+                    Text("Use this iPad’s \(bioKind.label) (Secure Enclave) to approve sudo and unlock your Mac without storing your Mac password.")
+                        .font(.caption).foregroundStyle(Brand.secondaryText)
+                    Button {
+                        do {
+                            let pub = try BiometricAuthKey.enroll()
+                            biometricFingerprint = BiometricAuthKey.fingerprint(of: pub)
+                            biometricError = nil
+                            onBiometricKeyChanged(pub)
+                        } catch {
+                            biometricError = error.localizedDescription
+                        }
+                    } label: {
+                        Label("Enroll \(bioKind.label) Key", systemImage: bioKind.symbol)
+                            .font(.subheadline.weight(.medium))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 6)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(bioKind == .unavailable)
+                }
+                if let err = biometricError {
+                    Text(err).font(.caption).foregroundStyle(.orange)
+                }
+            }
             card("Paired Macs") {
                 if pairedMacs.isEmpty {
                     InfoRow(symbol: "lock.open", title: "No paired Mac", value: nil, secondary: true)

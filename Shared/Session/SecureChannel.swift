@@ -123,8 +123,9 @@ public final class SecureChannel: @unchecked Sendable {
             let headerBytes = try header.encoded()
             let box = try AES.GCM.seal(payload, using: key, nonce: Self.nonce(stream, sequence),
                                        authenticating: headerBytes)
-            var out = headerBytes
+            var out = [UInt8]()
             out.reserveCapacity(headerBytes.count + payload.count + Self.tagLength)
+            out.append(contentsOf: headerBytes)
             out.append(contentsOf: box.ciphertext)
             out.append(contentsOf: box.tag)
             return out
@@ -244,8 +245,17 @@ public final class SecureChannel: @unchecked Sendable {
     }
 
     private static func nonce(_ stream: StreamType, _ sequence: UInt64) throws -> AES.GCM.Nonce {
-        var bytes: [UInt8] = [stream.rawValue, 0, 0, 0]
-        withUnsafeBytes(of: sequence.bigEndian) { bytes.append(contentsOf: $0) }
-        return try AES.GCM.Nonce(data: bytes)
+        var raw: (UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8) = (
+            stream.rawValue, 0, 0, 0,
+            UInt8(truncatingIfNeeded: sequence >> 56),
+            UInt8(truncatingIfNeeded: sequence >> 48),
+            UInt8(truncatingIfNeeded: sequence >> 40),
+            UInt8(truncatingIfNeeded: sequence >> 32),
+            UInt8(truncatingIfNeeded: sequence >> 24),
+            UInt8(truncatingIfNeeded: sequence >> 16),
+            UInt8(truncatingIfNeeded: sequence >> 8),
+            UInt8(truncatingIfNeeded: sequence)
+        )
+        return try withUnsafeBytes(of: &raw) { try AES.GCM.Nonce(data: $0) }
     }
 }

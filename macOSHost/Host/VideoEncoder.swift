@@ -55,6 +55,49 @@ final class VideoEncoder: @unchecked Sendable {
             return converted
         }
 
+        func warmUp(displayP3: Bool, tenBit: Bool) {
+            guard let pool else { return }
+            var allocated: CVPixelBuffer?
+            guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &allocated) == kCVReturnSuccess,
+                  let buffer = allocated,
+                  CVPixelBufferLockBaseAddress(buffer, []) == kCVReturnSuccess else { return }
+            for plane in 0..<CVPixelBufferGetPlaneCount(buffer) {
+                if let base = CVPixelBufferGetBaseAddressOfPlane(buffer, plane) {
+                    let count = CVPixelBufferGetBytesPerRowOfPlane(buffer, plane) * CVPixelBufferGetHeightOfPlane(buffer, plane)
+                    if tenBit {
+                        let black: UInt16 = plane == 0 ? 0x1000 : 0x8000
+                        base.assumingMemoryBound(to: UInt16.self).initialize(repeating: black, count: count / 2)
+                    } else {
+                        memset(base, plane == 0 ? 16 : 128, count)
+                    }
+                }
+            }
+            CVPixelBufferUnlockBaseAddress(buffer, [])
+            CVBufferSetAttachment(buffer, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_709_2, .shouldPropagate)
+            CVBufferSetAttachment(buffer, kCVImageBufferColorPrimariesKey,
+                                  displayP3 ? kCVImageBufferColorPrimaries_P3_D65 : kCVImageBufferColorPrimaries_ITU_R_709_2,
+                                  .shouldPropagate)
+            CVBufferSetAttachment(buffer, kCVImageBufferTransferFunctionKey, kCVImageBufferTransferFunction_ITU_R_709_2, .shouldPropagate)
+            let started = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            // The first real frame is forced to be a keyframe. This frame never reaches the peer.
+            let status = VTCompressionSessionEncodeFrame(session, imageBuffer: buffer,
+                                                         presentationTimeStamp: .zero, duration: .invalid,
+                                                         frameProperties: nil, infoFlagsOut: nil) { status, _, _ in
+                if status != noErr { Log.warn("4:4:4 encoder warm-up output failed: \(status)") }
+            }
+            guard status == noErr else {
+                Log.warn("4:4:4 encoder warm-up submission failed: \(status)")
+                return
+            }
+            let drain = VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .zero)
+            if drain == noErr {
+                let elapsed = Double(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) &- started) / 1e6
+                Log.info(String(format: "encoder warm-up: %@ %.1f ms", label, elapsed))
+            } else {
+                Log.warn("4:4:4 encoder warm-up drain failed: \(drain)")
+            }
+        }
+
         func invalidate() {
             VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
             VTCompressionSessionInvalidate(session)
@@ -151,9 +194,16 @@ final class VideoEncoder: @unchecked Sendable {
             motion = try Self.makeLane(common, full444: true, convertFromBGRA: true)
             still = nil
         case .hybrid:
-            motion = try Self.makeLane(common, full444: false, convertFromBGRA: true)
-            still = try Self.makeLane(common, full444: true, convertFromBGRA: true)
+            let motionLane = try Self.makeLane(common, full444: false, convertFromBGRA: true)
+            do {
+                still = try Self.makeLane(common, full444: true, convertFromBGRA: true)
+            } catch {
+                motionLane.invalidate()
+                throw error
+            }
+            motion = motionLane
         }
+        still?.warmUp(displayP3: displayP3, tenBit: tenBit)
         Log.info("encoder ready: \(codec) \(width)x\(height) \(fps) fps \(bitrateMbps) Mbit/s, " +
                  "\(displayP3 ? "P3" : "sRGB") tags, chroma \(chroma.rawValue), \(tenBit ? 10 : 8)-bit, " +
                  "rate control \(chroma == .c444 ? "standard (4:4:4)" : fps > 60 ? "standard (high refresh)" : chroma == .hybrid ? "low-latency, standard on the 4:4:4 lane" : "low-latency"), " +
@@ -231,14 +281,17 @@ final class VideoEncoder: @unchecked Sendable {
         guard convertFromBGRA else { return Lane(session: session, transfer: nil, pool: nil, label: "4:2:0") }
         var transferSession: VTPixelTransferSession?
         guard VTPixelTransferSessionCreate(allocator: nil, pixelTransferSessionOut: &transferSession) == noErr,
-              let transferSession else { throw Error.create(-1) }
+              let transferSession else {
+            VTCompressionSessionInvalidate(session)
+            throw Error.create(-1)
+        }
         // Matrix conversion only: keep the source's sRGB-encoded values (no gamma
         // change), exactly as ScreenCaptureKit's own 4:2:0 output delivers them
         // (measured: otherwise ~11 levels darker).
         VTSessionSetProperty(transferSession, key: kVTPixelTransferPropertyKey_DestinationYCbCrMatrix,
                              value: kCVImageBufferYCbCrMatrix_ITU_R_709_2)
         VTSessionSetProperty(transferSession, key: kVTPixelTransferPropertyKey_DestinationColorPrimaries,
-                             value: kCVImageBufferColorPrimaries_ITU_R_709_2)
+                             value: c.displayP3 ? kCVImageBufferColorPrimaries_P3_D65 : kCVImageBufferColorPrimaries_ITU_R_709_2)
         VTSessionSetProperty(transferSession, key: kVTPixelTransferPropertyKey_DestinationTransferFunction,
                              value: kCVImageBufferTransferFunction_sRGB)
         // When the capture is larger than the panel ("more/most space", own
@@ -259,11 +312,15 @@ final class VideoEncoder: @unchecked Sendable {
                                            kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
                                            kCVPixelBufferMetalCompatibilityKey: true]
         CVPixelBufferPoolCreate(nil, nil, attributes as CFDictionary, &pool)
-        guard let pool else { throw Error.create(-2) }
+        guard let pool else {
+            VTPixelTransferSessionInvalidate(transferSession)
+            VTCompressionSessionInvalidate(session)
+            throw Error.create(-2)
+        }
         var lane = Lane(session: session, transfer: transferSession, pool: pool,
                         label: (full444 ? "4:4:4" : "4:2:0") + (c.tenBit ? "/10" : ""))
         if VideoEncoder.filteredChroma {
-            lane.gpu = ChromaConverter(tenBit: c.tenBit, full444: full444)
+            lane.gpu = ChromaConverter(tenBit: c.tenBit, full444: full444, displayP3: c.displayP3)
             let format = full444 ? "4:4:4" : "4:2:0"
             Log.info("encoder: \(format) conversion \(lane.gpu != nil ? "on the GPU" : "by VideoToolbox (GPU converter unavailable)")")
         }
@@ -278,29 +335,42 @@ final class VideoEncoder: @unchecked Sendable {
     }
 
     /// Updates target bitrate live on active VTCompressionSessions without rebuilding them.
+    /// Runs asynchronously on `encodeQueue` so it never blocks input handling on `HostController.queue`.
     func updateBitrate(_ mbps: Int) {
-        submitLock.lock()
-        defer { submitLock.unlock() }
-        guard !invalidated.withLock({ $0 }) else { return }
-        let bps = Self.clampedBitsPerSecond(mbps: mbps)
-        let burstBytesPerSec = min(bps / 8 * 3 / 2, Int(Int32.max))
-        let lanes: [Lane] = [motion] + (still.map { [$0] } ?? [])
-        for lane in lanes {
-            VTSessionSetProperty(lane.session, key: kVTCompressionPropertyKey_AverageBitRate, value: bps as CFNumber)
-            VTSessionSetProperty(lane.session, key: kVTCompressionPropertyKey_DataRateLimits, value: [burstBytesPerSec, 1] as CFArray)
+        encodeQueue.async { [weak self] in
+            guard let self else { return }
+            self.submitLock.lock()
+            defer { self.submitLock.unlock() }
+            guard !self.invalidated.withLock({ $0 }) else { return }
+            let bps = Self.clampedBitsPerSecond(mbps: mbps)
+            let burstBytesPerSec = min(bps / 8 * 3 / 2, Int(Int32.max))
+            let lanes: [Lane] = [self.motion] + (self.still.map { [$0] } ?? [])
+            for lane in lanes {
+                VTSessionSetProperty(lane.session, key: kVTCompressionPropertyKey_AverageBitRate, value: bps as CFNumber)
+                VTSessionSetProperty(lane.session, key: kVTCompressionPropertyKey_DataRateLimits, value: [burstBytesPerSec, 1] as CFArray)
+            }
+            Log.info("encoder bitrate updated live to \(mbps) Mbit/s")
         }
-        Log.info("encoder bitrate updated live to \(mbps) Mbit/s")
     }
+
+    private var dropReplayScheduled = false
 
     /// Re-encodes the last captured frame after one frame interval so a dropped
     /// final frame of a burst never leaves the Mac and iPad displays diverged.
     func requestDropReplay() {
-        let generation = stateLock.withLock { frameGeneration }
-        let delay = max(1.0 / Double(fps), 0.016)
+        let (shouldSchedule, generation): (Bool, UInt64) = stateLock.withLock {
+            guard !dropReplayScheduled else { return (false, frameGeneration) }
+            dropReplayScheduled = true
+            return (true, frameGeneration)
+        }
+        guard shouldSchedule else { return }
+        let delay = max(1.0 / Double(fps), 0.008)
         repeatQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
-            guard let self, !self.invalidated.withLock({ $0 }) else { return }
+            guard let self else { return }
             let job: Job? = self.stateLock.withLock {
-                guard self.frameGeneration == generation, !self.submitting, self.inFlightGPU == 0 else { return nil }
+                self.dropReplayScheduled = false
+                guard !self.invalidated.withLock({ $0 }),
+                      self.frameGeneration == generation, !self.submitting, self.inFlightGPU == 0 else { return nil }
                 return self.takeJob()
             }
             if let job {
@@ -345,17 +415,16 @@ final class VideoEncoder: @unchecked Sendable {
     /// Hands a job to the submit queue; a job already waiting there is
     /// replaced by this newer one (its keyframe request carries over).
     private func schedule(_ job: Job, presentationTime: CMTime) {
-        let (start, coalesced): (Bool, Bool) = stateLock.withLock {
+        let start: Bool = stateLock.withLock {
             if submitting || inFlightGPU >= 2 {
                 let replaced = waitingSubmit
                 waitingSubmit = (job.forcing(replaced?.job.force ?? false), presentationTime)
                 if replaced != nil { stats.coalesced() }
-                return (false, replaced != nil)
+                return false
             }
             submitting = true
-            return (true, false)
+            return true
         }
-        if coalesced { requestDropReplay() }
         guard start else { return }
         submitQueue.async { [weak self] in self?.drainSubmits(job, presentationTime) }
     }
@@ -427,10 +496,9 @@ final class VideoEncoder: @unchecked Sendable {
 
     /// Call with `stateLock` held: which recent activity makes this a motion
     /// frame, if any (for the lane statistics).
-    private func activityReason(_ now: UInt64) -> String? {
+    private func activityReason(_ now: UInt64, sinceKey: Double) -> String? {
         if now &- lastCursorMove < Self.cursorWindowNanos { return "cursor" }
         if now &- lastInput < Self.inputWindowNanos { return "ipad-input" }
-        let sinceKey = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyDown)
         if sinceKey.isFinite, sinceKey >= 0, sinceKey * 1e9 < Double(Self.inputWindowNanos) { return "typing" }
         return nil
     }
@@ -462,9 +530,6 @@ final class VideoEncoder: @unchecked Sendable {
         CVPixelBufferLockBaseAddress(buffer, [])
         if let base = CVPixelBufferGetBaseAddress(buffer) {
             memset(base, 0, CVPixelBufferGetDataSize(buffer))
-            // Opaque black: alpha 255 in BGRA.
-            let pixels = base.assumingMemoryBound(to: UInt8.self), row = CVPixelBufferGetBytesPerRow(buffer)
-            for y in 0..<height { for x in 0..<width { pixels[y * row + x * 4 + 3] = 255 } }
         }
         CVPixelBufferUnlockBaseAddress(buffer, [])
         stateLock.withLock { pendingKeyframe = true }
@@ -475,13 +540,17 @@ final class VideoEncoder: @unchecked Sendable {
         guard !invalidated.withLock({ $0 }) else { return }
         let now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         let cursor = cursorInVideo ? CGEvent(source: nil)?.location ?? .zero : .zero
+        // Read keyboard recency outside `stateLock` to avoid holding the lock across an IPC call.
+        let sinceKey: Double = (still != nil && dirtyFraction <= Self.motionDirtyShare)
+            ? CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyDown)
+            : .infinity
         let (job, motionFrame, reason): (Job?, Bool, String) = stateLock.withLock {
             lastSource = source
             lastCaptureTime = captureTime
             frameGeneration &+= 1
             if cursorInVideo, cursor != lastCursor { lastCursor = cursor; lastCursorMove = now }
             let reason = still == nil ? "single-lane" : dirtyFraction > Self.motionDirtyShare ? "dirty"
-                : activityReason(now) ?? "still"
+                : activityReason(now, sinceKey: sinceKey) ?? "still"
             let isMotion = reason != "still"
             if isMotion {
                 motionGeneration &+= 1
@@ -499,6 +568,55 @@ final class VideoEncoder: @unchecked Sendable {
 
     private struct SendableBuffer: @unchecked Sendable {
         let buffer: CVPixelBuffer
+    }
+
+    private struct PreparedFrame: @unchecked Sendable {
+        var job: Job
+        let pixelBuffer: CVPixelBuffer
+        let presentationTime: CMTime
+        let sourceAgeAtSubmit: Double
+        let convertStart: UInt64
+        let converted: UInt64
+    }
+
+    /// Single-slot latest-wins handoff to `encodeQueue`: prevents unbounded queue buildup
+    /// when GPU conversion (~1.5 ms) outpaces VideoToolbox encoding (e.g. 4:4:4 keyframes or 120 Hz).
+    private let encodeHandoffLock = NSLock()
+    private var encodeRunning = false
+    private var pendingEncode: PreparedFrame?
+
+    private func enqueuePrepared(_ frame: PreparedFrame) {
+        let shouldStart: Bool = encodeHandoffLock.withLock {
+            if encodeRunning {
+                var next = frame
+                if let replaced = pendingEncode {
+                    next.job = next.job.forcing(replaced.job.force)
+                    stats.coalesced()
+                }
+                pendingEncode = next
+                return false
+            }
+            encodeRunning = true
+            return true
+        }
+        guard shouldStart else { return }
+        encodeQueue.async { [weak self] in self?.drainEncodes(frame) }
+    }
+
+    private func drainEncodes(_ first: PreparedFrame) {
+        var current: PreparedFrame? = first
+        while let item = current {
+            encodePrepared(item.job, pixelBuffer: item.pixelBuffer, presentationTime: item.presentationTime,
+                           sourceAgeAtSubmit: item.sourceAgeAtSubmit, convertStart: item.convertStart, converted: item.converted)
+            current = encodeHandoffLock.withLock {
+                if let next = pendingEncode {
+                    pendingEncode = nil
+                    return next
+                }
+                encodeRunning = false
+                return nil
+            }
+        }
     }
 
     private func submit(_ job: Job, presentationTime: CMTime) {
@@ -523,16 +641,20 @@ final class VideoEncoder: @unchecked Sendable {
                         if job.force { self.stateLock.withLock { self.pendingKeyframe = true } }
                         return
                     }
-                    self.encodeQueue.async {
-                        self.encodePrepared(job, pixelBuffer: box.buffer, presentationTime: presentationTime,
-                                            sourceAgeAtSubmit: sourceAgeAtSubmit, convertStart: convertStart, converted: converted)
-                    }
+                    self.enqueuePrepared(PreparedFrame(job: job, pixelBuffer: box.buffer, presentationTime: presentationTime,
+                                                       sourceAgeAtSubmit: sourceAgeAtSubmit, convertStart: convertStart, converted: converted))
                 }
                 if enqueued { return }
                 releaseGPUSlot()
             }
         }
-        let prepared = lane.prepare(job.source)
+        let prepared: CVPixelBuffer? = {
+            submitLock.lock()
+            defer { submitLock.unlock() }
+            guard !invalidated.withLock({ $0 }) else { return nil }
+            return lane.prepare(job.source)
+        }()
+        if invalidated.withLock({ $0 }) { return }
         let converted = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         if lane.transfer != nil { stats.converted(nanos: converted &- convertStart) }
         guard let pixelBuffer = prepared else {
@@ -540,18 +662,15 @@ final class VideoEncoder: @unchecked Sendable {
             if job.force { stateLock.withLock { pendingKeyframe = true } }
             return
         }
-        let box = SendableBuffer(buffer: pixelBuffer)
-        encodeQueue.async { [weak self] in
-            self?.encodePrepared(job, pixelBuffer: box.buffer, presentationTime: presentationTime,
-                                 sourceAgeAtSubmit: sourceAgeAtSubmit, convertStart: convertStart, converted: converted)
-        }
+        enqueuePrepared(PreparedFrame(job: job, pixelBuffer: pixelBuffer, presentationTime: presentationTime,
+                                      sourceAgeAtSubmit: sourceAgeAtSubmit, convertStart: convertStart, converted: converted))
     }
 
     private func encodePrepared(_ job: Job, pixelBuffer: CVPixelBuffer, presentationTime: CMTime,
                                 sourceAgeAtSubmit: Double, convertStart: UInt64, converted: UInt64) {
         submitLock.lock()
         defer { submitLock.unlock() }
-        guard !invalidated.withLock({ $0 }) else { return }
+        guard !invalidated.withLock({ $0 }), outputLock.withLock({ job.epoch == epoch }) else { return }
         let lane = job.lane
         let frameEpoch = job.epoch
         let frameProperties = job.force ? [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary : nil
@@ -581,9 +700,9 @@ final class VideoEncoder: @unchecked Sendable {
                     guard self?.epoch == frameEpoch else { return } // superseded lane
                     let sent = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
                     if sent % 300 == 0, sourceAgeAtSubmit.isFinite { // about one sample every 5 s at 60 Hz
-                        let beforeWire = Double(sent &- convertStart) / 1e6
-                        Log.info(String(format: "frame host %llu: capture->wire %.3f ms; capture->convert %.3f; convert %.3f; encode+pack %.3f",
-                                        sent, sourceAgeAtSubmit * 1000 + beforeWire, sourceAgeAtSubmit * 1000,
+                        let toSendQueue = Double(sent &- convertStart) / 1e6
+                        Log.info(String(format: "frame host %llu: capture->sendQueue %.3f ms; capture->convert %.3f; convert %.3f; encode+pack %.3f",
+                                        sent, sourceAgeAtSubmit * 1000 + toSendQueue, sourceAgeAtSubmit * 1000,
                                         Double(converted &- convertStart) / 1e6, Double(sent &- converted) / 1e6))
                     }
                     onUnit(frame, sent)
@@ -594,6 +713,13 @@ final class VideoEncoder: @unchecked Sendable {
         if status != noErr {
             Log.warn("encode submit failed: \(status)")
             if job.force { requestKeyframe() }
+            return
+        }
+        // HEVC 4:4:4 rejects MaxFrameDelayCount=0 (-12900) and can hold 1 frame in its
+        // lookahead buffer (100+ ms latency on low-FPS typing/clicks). Complete immediately
+        // on encodeQueue so the last frame of a burst is delivered without waiting for new capture.
+        if lane.label.hasPrefix("4:4:4") {
+            VTCompressionSessionCompleteFrames(lane.session, untilPresentationTimeStamp: presentationTime)
         }
     }
 
@@ -687,28 +813,33 @@ private final class LaneStats: @unchecked Sendable {
 
     private func flushIfDue() {
         let now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-        let report: String? = lock.withLock {
+        let snapshot: (latencies: [String: [Double]], bytes: [String: Int], dirty: [Double],
+                       conversions: [Double], motionFrames: Int, switches: Int,
+                       reasons: [String: Int], replaced: Int)? = lock.withLock {
             guard now &- windowStart >= 5_000_000_000 else { return nil }
             windowStart = now
-            var parts: [String] = []
-            for (label, values) in latencies.sorted(by: { $0.key < $1.key }) where !values.isEmpty {
-                let sorted = values.sorted()
-                let p95 = sorted[min(sorted.count - 1, Int(Double(sorted.count) * 0.95))]
-                parts.append(String(format: "%@ %d frames, encode p50 %.1f p95 %.1f max %.1f ms, avg %d KB", label,
-                                    sorted.count, sorted[sorted.count / 2], p95, sorted.last!,
-                                    (bytes[label] ?? 0) / sorted.count / 1024))
-            }
-            let d = dirty.sorted()
-            let dirtyText = d.isEmpty ? "-" : String(format: "dirty p50 %.4f p90 %.4f", d[d.count / 2], d[Int(Double(d.count) * 0.9)])
-            if !conversions.isEmpty {
-                let c = conversions.sorted()
-                parts.append(String(format: "convert p50 %.2f p95 %.2f ms", c[c.count / 2], c[min(c.count - 1, c.count * 95 / 100)]))
-                conversions = []
-            }
-            let line = "lanes: \(parts.joined(separator: "; ")); motion frames \(motionFrames)/\(d.count) (\(reasons.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", "))), switches \(switches), replaced before encode \(replaced), \(dirtyText)"
-            latencies = [:]; bytes = [:]; dirty = []; motionFrames = 0; switches = 0; reasons = [:]; replaced = 0
-            return line
+            let snap = (latencies, bytes, dirty, conversions, motionFrames, switches, reasons, replaced)
+            latencies = [:]; bytes = [:]; dirty = []; conversions = []
+            motionFrames = 0; switches = 0; reasons = [:]; replaced = 0
+            return snap
         }
-        if let report { Log.info(report) }
+        guard let s = snapshot else { return }
+        var parts: [String] = []
+        for (label, values) in s.latencies.sorted(by: { $0.key < $1.key }) where !values.isEmpty {
+            let sorted = values.sorted()
+            let p95 = sorted[min(sorted.count - 1, sorted.count * 95 / 100)]
+            let p99 = sorted[min(sorted.count - 1, sorted.count * 99 / 100)]
+            parts.append(String(format: "%@ %d frames, encode p50 %.1f p95 %.1f p99 %.1f max %.1f ms, avg %d KB", label,
+                                sorted.count, sorted[sorted.count / 2], p95, p99, sorted.last!,
+                                (s.bytes[label] ?? 0) / sorted.count / 1024))
+        }
+        let d = s.dirty.sorted()
+        let dirtyText = d.isEmpty ? "-" : String(format: "dirty p50 %.4f p90 %.4f", d[d.count / 2], d[Int(Double(d.count) * 0.9)])
+        if !s.conversions.isEmpty {
+            let c = s.conversions.sorted()
+            parts.append(String(format: "convert p50 %.2f p95 %.2f ms", c[c.count / 2], c[min(c.count - 1, c.count * 95 / 100)]))
+        }
+        let line = "lanes: \(parts.joined(separator: "; ")); motion frames \(s.motionFrames)/\(d.count) (\(s.reasons.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", "))), switches \(s.switches), replaced before encode \(s.replaced), \(dirtyText)"
+        Log.info(line)
     }
 }

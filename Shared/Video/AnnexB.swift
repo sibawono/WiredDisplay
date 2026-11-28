@@ -85,8 +85,7 @@ public enum NALKind: Equatable, Sendable {
 }
 
 public extension VideoCodecKind {
-    func kind(of nal: [UInt8]) -> NALKind {
-        guard let first = nal.first else { return .other }
+    func kind(ofFirstByte first: UInt8) -> NALKind {
         switch self {
         case .h264:
             switch first & 0x1F {
@@ -103,6 +102,11 @@ public extension VideoCodecKind {
             default: return .other
             }
         }
+    }
+
+    func kind(of nal: [UInt8]) -> NALKind {
+        guard let first = nal.first else { return .other }
+        return kind(ofFirstByte: first)
     }
 }
 

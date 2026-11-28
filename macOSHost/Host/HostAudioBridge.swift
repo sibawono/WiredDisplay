@@ -28,7 +28,9 @@ final class HostAudioBridge: @unchecked Sendable {
     // iPad stay aligned without echo, while macOS volume keys control both.
     private let macSpeakerProvider: @Sendable () -> AudioDeviceID?
     private let localMirrorBuffer = OSAllocatedUnfairLock<AudioJitterBuffer?>(initialState: nil)
+    private let mirrorLock = NSLock()
     private var localMirrorEngine: AVAudioEngine?
+    private var localMirrorObserver: NSObjectProtocol?
     private var localMirrorDevice: AudioDeviceID = 0
     private var localMirrorEnabled = false
     private var localMirrorDelayMs: Double = 45
@@ -110,9 +112,11 @@ final class HostAudioBridge: @unchecked Sendable {
 
     /// Updates "Both Speakers" settings (called on `audioQueue`).
     func setLocalMirror(enabled: Bool, delayMs: Double, gain: Float) {
+        mirrorLock.lock()
         localMirrorEnabled = enabled
         localMirrorDelayMs = min(max(delayMs, 0), 120)
         localMirrorGain = min(max(gain, 0), 1.5)
+        mirrorLock.unlock()
         reconcileLocalMirror()
     }
 
@@ -120,15 +124,17 @@ final class HostAudioBridge: @unchecked Sendable {
     /// the iPad microphone is off (Mac speaker output cannot be echo-cancelled
     /// by the iPad's AEC).
     private func reconcileLocalMirror() {
+        mirrorLock.lock()
+        defer { mirrorLock.unlock() }
         guard localMirrorEnabled, isSpeakerRunning, !isMicrophoneRunning,
               let device = macSpeakerProvider(), device != 0 else {
-            stopLocalMirror()
+            stopLocalMirrorLocked()
             return
         }
         let targetFrames = max(Int((localMirrorDelayMs * SessionConstants.audioSampleRate / 1000.0).rounded()),
                                Int(Self.ioBufferFrames))
         let maxFrames = max(targetFrames + 2400, 4800)
-        if let engine = localMirrorEngine, localMirrorDevice == device {
+        if let engine = localMirrorEngine, engine.isRunning, localMirrorDevice == device {
             engine.mainMixerNode.outputVolume = localMirrorGain
             // Delay slider moved: swap the jitter buffer without restarting AVAudioEngine.
             let currentTarget = localMirrorBuffer.withLock { $0?.targetFrames }
@@ -139,7 +145,7 @@ final class HostAudioBridge: @unchecked Sendable {
             }
             return
         }
-        stopLocalMirror()
+        stopLocalMirrorLocked()
         do {
             let buffer = AudioJitterBuffer(channels: Int(SessionConstants.speakerChannels),
                                            targetFrames: targetFrames, maxFrames: maxFrames)
@@ -155,6 +161,14 @@ final class HostAudioBridge: @unchecked Sendable {
             try engine.start()
             localMirrorEngine = engine
             localMirrorDevice = device
+            localMirrorObserver = NotificationCenter.default.addObserver(
+                forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
+            ) { [weak self] _ in
+                guard let bridge = self else { return }
+                DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.25) {
+                    bridge.reconcileLocalMirror()
+                }
+            }
             Log.info("audio: Mac speaker mirror started on device \(device) (sync delay \(Int(localMirrorDelayMs.rounded())) ms, level \(Int((localMirrorGain * 100).rounded()))%)")
         } catch {
             localMirrorBuffer.withLock { $0 = nil }
@@ -163,7 +177,17 @@ final class HostAudioBridge: @unchecked Sendable {
     }
 
     private func stopLocalMirror() {
+        mirrorLock.lock()
+        defer { mirrorLock.unlock() }
+        stopLocalMirrorLocked()
+    }
+
+    private func stopLocalMirrorLocked() {
         localMirrorBuffer.withLock { $0 = nil }
+        if let observer = localMirrorObserver {
+            NotificationCenter.default.removeObserver(observer)
+            localMirrorObserver = nil
+        }
         guard let engine = localMirrorEngine else { return }
         engine.stop()
         localMirrorEngine = nil

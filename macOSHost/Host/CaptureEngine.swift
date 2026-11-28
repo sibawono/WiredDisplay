@@ -36,9 +36,9 @@ final class CaptureEngine: @unchecked Sendable {
         let configuration = SCStreamConfiguration()
         configuration.width = pixelWidth
         configuration.height = pixelHeight
-        // Half the frame period: at exactly 1/fps, frames arriving a hair early
-        // (16.66 vs 16.67 ms) were discarded, leaving 50 ms gaps (measured).
-        configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(max(fps, 1) * 2))
+        // ~5% headroom over target fps so frames arriving a hair early are not discarded,
+        // without admitting 2x fps bursts that waste GPU/encoder work.
+        configuration.minimumFrameInterval = CMTime(value: 1000, timescale: CMTimeScale(max(fps, 1) * 1050))
         configuration.pixelFormat = bgra ? kCVPixelFormatType_32BGRA : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         // Display P3 primaries + BT.709 YCbCr matrix, matching the encoder tags
         // (step 4; was sRGB, which clipped wide-gamut colour).
@@ -125,6 +125,8 @@ final class CaptureEngine: @unchecked Sendable {
         private var callbackTimes: [Double] = []
         private var reportStart = ProcessInfo.processInfo.systemUptime
         private var mismatchSince: TimeInterval?
+        private var boundsCheckCounter = 0
+        private var cachedExpectedBounds: CGRect = .zero
 
         init(displayID: CGDirectDisplayID,
              onFrame: @escaping @Sendable (CVPixelBuffer, CMTime, Double, CMTime) -> Void,
@@ -144,9 +146,14 @@ final class CaptureEngine: @unchecked Sendable {
                 return
             }
             // Guard against ScreenCaptureKit silently binding to the wrong display after wake/reconfig.
+            // Throttle CGDisplayBounds IPC to every 15 frames (~0.25 s) since mismatch timeout is 1.5 s.
             if let rectDict = info?[.screenRect] as? NSDictionary,
                let capturedRect = CGRect(dictionaryRepresentation: rectDict) {
-                let expected = CGDisplayBounds(displayID)
+                if boundsCheckCounter % 15 == 0 || cachedExpectedBounds.isEmpty {
+                    cachedExpectedBounds = CGDisplayBounds(displayID)
+                }
+                boundsCheckCounter += 1
+                let expected = cachedExpectedBounds
                 if capturedRect.isEmpty || expected.isEmpty {
                     mismatchSince = nil
                 } else {
@@ -176,8 +183,12 @@ final class CaptureEngine: @unchecked Sendable {
             var dirty = 1.0
             if let rects = info?[.dirtyRects] as? [NSDictionary] {
                 let total = Double(CVPixelBufferGetWidth(pixelBuffer) * CVPixelBufferGetHeight(pixelBuffer))
-                let changed = rects.compactMap { CGRect(dictionaryRepresentation: $0) }
-                    .reduce(0.0) { $0 + Double($1.width * $1.height) }
+                var changed = 0.0
+                for dict in rects {
+                    if let rect = CGRect(dictionaryRepresentation: dict) {
+                        changed += Double(rect.width * rect.height)
+                    }
+                }
                 dirty = total > 0 ? min(changed / total, 1) : 1
             }
             let started = ProcessInfo.processInfo.systemUptime

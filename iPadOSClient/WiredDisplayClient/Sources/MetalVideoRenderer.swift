@@ -156,6 +156,7 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
     private var backlogStalls = 0
     private var activeDisplayP3 = false
     private var scaledTextStrength: Float = 0
+    private var backgrounded = false
     private let scaledTextEnabled = !ProcessInfo.processInfo.arguments.contains("--disable-scaled-text-detail")
 
     init?() {
@@ -176,35 +177,35 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
             o.uv = uvs[id];
             return o;
         }
-        fragment float4 fmain(Out in [[stage_in]], texture2d<float> luma [[texture(0)]],
-                              texture2d<float> chroma [[texture(1)]],
+        fragment half4 fmain(Out in [[stage_in]], texture2d<half> luma [[texture(0)]],
+                              texture2d<half> chroma [[texture(1)]],
                               constant float2 &siting [[buffer(0)]], constant uint &pixelMatched [[buffer(1)]],
                               constant float &scaledTextStrength [[buffer(2)]]) {
             constexpr sampler s(filter::linear, address::clamp_to_edge);
             uint2 pixel = uint2(in.position.xy);
-            float lumaCode = pixelMatched ? luma.read(pixel).r : luma.sample(s, in.uv).r;
-            if (pixelMatched && scaledTextStrength > 0) {
+            half lumaCode = pixelMatched ? luma.read(pixel).r : luma.sample(s, in.uv).r;
+            if (pixelMatched && scaledTextStrength > 0.0f) {
                 uint2 last = uint2(luma.get_width() - 1, luma.get_height() - 1);
                 uint2 left = uint2(max(pixel.x, 1u) - 1u, pixel.y);
                 uint2 up = uint2(pixel.x, max(pixel.y, 1u) - 1u);
-                float a = luma.read(left).r;
-                float b = luma.read(min(pixel + uint2(1, 0), last)).r;
-                float c = luma.read(up).r;
-                float d = luma.read(min(pixel + uint2(0, 1), last)).r;
-                float low = min(lumaCode, min(min(a, b), min(c, d)));
-                float high = max(lumaCode, max(max(a, b), max(c, d)));
-                float contrast = smoothstep(0.02f, 0.12f, high - low);
-                float detail = lumaCode - (a + b + c + d) * 0.25f;
-                lumaCode = clamp(lumaCode + scaledTextStrength * contrast * detail, low, high);
+                half a = luma.read(left).r;
+                half b = luma.read(min(pixel + uint2(1, 0), last)).r;
+                half c = luma.read(up).r;
+                half d = luma.read(min(pixel + uint2(0, 1), last)).r;
+                half low = min(lumaCode, min(min(a, b), min(c, d)));
+                half high = max(lumaCode, max(max(a, b), max(c, d)));
+                half contrast = smoothstep(0.02h, 0.12h, high - low);
+                half detail = lumaCode - (a + b + c + d) * 0.25h;
+                lumaCode = clamp(lumaCode + half(scaledTextStrength) * contrast * detail, low, high);
             }
             bool fullChroma = luma.get_width() == chroma.get_width() && luma.get_height() == chroma.get_height();
             // 4:2:0 still needs chroma reconstruction at the signalled sample position.
-            float2 chromaCode = pixelMatched && fullChroma ? chroma.read(pixel).rg : chroma.sample(s, in.uv + siting).rg;
+            half2 chromaCode = pixelMatched && fullChroma ? chroma.read(pixel).rg : chroma.sample(s, in.uv + siting).rg;
             // BT.709 video range (MSB-aligned 10-bit reads the same as 8-bit).
-            float y = (lumaCode - 16.0 / 255.0) * (255.0 / 219.0);
-            float2 c = (chromaCode - 128.0 / 255.0) * (255.0 / 224.0);
-            float3 rgb = float3(y + 1.5748 * c.y, y - 0.1873 * c.x - 0.4681 * c.y, y + 1.8556 * c.x);
-            return float4(saturate(rgb), 1);
+            half y = (lumaCode - half(16.0 / 255.0)) * half(255.0 / 219.0);
+            half2 c = (chromaCode - half(128.0 / 255.0)) * half(255.0 / 224.0);
+            half3 rgb = half3(y + 1.5748h * c.y, y - 0.1873h * c.x - 0.4681h * c.y, y + 1.8556h * c.x);
+            return half4(saturate(rgb), 1.0h);
         }
         """
         guard let library = try? device.makeLibrary(source: source, options: nil),
@@ -245,6 +246,20 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
             if overscale > 0.02 { strength = min(2.8 * overscale, 0.65) }
         }
         lock.withLock { scaledTextStrength = strength }
+    }
+
+    /// Gates Metal GPU commits so iPadOS never terminates the app with
+    /// `kIOGPUCommandBufferCallbackErrorBackgroundExecutionNotPermitted`
+    /// while background audio keeps the process alive.
+    func setBackgrounded(_ isBackground: Bool) {
+        lock.withLock {
+            backgrounded = isBackground
+            if isBackground { pending = nil }
+        }
+        if isBackground {
+            // Drain any in-flight drawPending/clearToBlack before UIKit enters background.
+            presentQueue.sync {}
+        }
     }
 
     // MARK: VideoSink
@@ -342,11 +357,13 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
                                                        infoFlagsOut: &flags) { [weak self] status, _, image, _, _ in
             guard let self else { return }
             guard status == noErr, let image else {
-                self.lock.withLock { self.failed = "decode \(status)" }
+                self.lock.withLock {
+                    if self.generation == generation { self.failed = "decode \(status)" }
+                }
                 return
             }
             let needsDraw = self.lock.withLock { () -> Bool in
-                guard self.generation == generation else { return false }
+                guard self.generation == generation, !self.backgrounded else { return false }
                 let had = self.pending != nil
                 let decoded = CACurrentMediaTime()
                 self.pending = (image, enqueued, decoded, sampleID, transitMS)
@@ -355,7 +372,11 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
             }
             if needsDraw { self.presentQueue.async { self.drawPending() } }
         }
-        if status != noErr { lock.withLock { failed = "decode submit \(status)" } }
+        if status != noErr {
+            lock.withLock {
+                if self.generation == generation { failed = "decode submit \(status)" }
+            }
+        }
     }
 
     /// Decoder output matching the stream (D-042): 4:4:4 stays 4:4:4 (it was
@@ -403,6 +424,7 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
     /// Clears the Metal layer to black without touching `layer.contents`
     /// (setting `CAMetalLayer.contents = nil` detaches its drawable swapchain on iPadOS).
     private func clearToBlack() {
+        guard !lock.withLock({ backgrounded }) else { return }
         guard let drawable = layer.nextDrawable(),
               let commands = queue.makeCommandBuffer() else { return }
         let pass = MTLRenderPassDescriptor()
@@ -418,7 +440,7 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
     }
 
     private func drawPending(retry: Int = 0) {
-        guard lock.withLock({ pending != nil }) else { return }
+        guard lock.withLock({ !backgrounded && pending != nil }) else { return }
         // Drawable acquisition can block. Pick the freshest decoded frame after that wait.
         let drawableRequested = CACurrentMediaTime()
         guard let drawable = layer.nextDrawable() else {
@@ -440,11 +462,14 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
             return
         }
         let drawableAcquired = CACurrentMediaTime()
-        guard let frame = lock.withLock({ () -> (buffer: CVPixelBuffer, enqueued: CFTimeInterval, decoded: CFTimeInterval,
-                          sampleID: Int64, transitMS: Double?)? in
-            defer { pending = nil }
-            return pending
-        }), let cache = textureCache else { return }
+        // Take pending atomically before creating textures: if a newer frame decodes
+        // while this one is preparing, it must see `pending == nil` so it schedules
+        // the next `drawPending()` (leaving `pending` set stranded draws permanently).
+        guard let cache = textureCache,
+              let frame = lock.withLock({ () -> (buffer: CVPixelBuffer, enqueued: CFTimeInterval, decoded: CFTimeInterval, sampleID: Int64, transitMS: Double?)? in
+                  defer { pending = nil }
+                  return pending
+              }) else { return }
         let buffer = frame.buffer
         // Match CAMetalLayer colorspace to the decoded frame's primaries so Display P3
         // streams render with full wide-gamut saturation instead of sRGB desaturation.
@@ -464,12 +489,6 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
         guard let luma = texture(buffer, plane: 0, format: tenBit ? .r16Unorm : .r8Unorm, cache: cache),
               let chroma = texture(buffer, plane: 1, format: tenBit ? .rg16Unorm : .rg8Unorm, cache: cache),
               let commands = queue.makeCommandBuffer() else { return }
-        let pass = MTLRenderPassDescriptor()
-        pass.colorAttachments[0].texture = drawable.texture
-        pass.colorAttachments[0].loadAction = .clear
-        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
-        pass.colorAttachments[0].storeAction = .store
-        guard let encoder = commands.makeRenderCommandEncoder(descriptor: pass) else { return }
         // Aspect fit, like videoGravity .resizeAspect.
         let target = CGSize(width: drawable.texture.width, height: drawable.texture.height)
         let video = CGSize(width: CVPixelBufferGetWidth(buffer), height: CVPixelBufferGetHeight(buffer))
@@ -479,6 +498,14 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
             let w = Float(video.width * scale / target.width * 2), h = Float(video.height * scale / target.height * 2)
             rect = SIMD4<Float>(-w / 2, -h / 2, w, h)
         }
+        let fullScreen = rect.z >= 1.999 && rect.w >= 1.999
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = drawable.texture
+        // Skip full-screen TBDR tile clear when the quad covers every pixel of the drawable.
+        pass.colorAttachments[0].loadAction = fullScreen ? .dontCare : .clear
+        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+        pass.colorAttachments[0].storeAction = .store
+        guard let encoder = commands.makeRenderCommandEncoder(descriptor: pass) else { return }
         encoder.setRenderPipelineState(pipeline)
         encoder.setVertexBytes(&rect, length: MemoryLayout<SIMD4<Float>>.size, index: 0)
         var pixelMatched: UInt32 = target == video ? 1 : 0
@@ -504,7 +531,7 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
                                             drawableWait: drawableAcquired - drawableRequested,
                                             submitToGlass: time - submitted)
             if let transitMS {
-                ClientLog.write(String(format: "frame glass %lld: wire->enqueue %.3f ms; enqueue->glass %.3f; decode %.3f; ready->submit %.3f; submit->glass %.3f",
+                ClientLog.write(String(format: "frame glass %lld: sendQueue->enqueue estimate %.3f ms; enqueue->glass %.3f; decode %.3f; ready->submit %.3f; submit->glass %.3f",
                                        sampleID, transitMS, timing.total * 1000, timing.decode * 1000,
                                        timing.readyToSubmit * 1000, timing.submitToGlass * 1000))
             }
@@ -568,33 +595,36 @@ final class MetalVideoRenderer: VideoSink, @unchecked Sendable {
     /// Logs every 5 s: frames that reached the glass, and how long from
     /// "handed to the renderer" to "on the glass" (decode + GPU + vsync).
     private func notePresented(at time: CFTimeInterval, timing: PresentationTiming) {
-        let report: String? = lock.withLock {
+        let snapshot: (presented: [PresentationTiming], gpuTimes: [CFTimeInterval], replaced: Int, elapsed: CFTimeInterval)? = lock.withLock {
             presented.append(timing)
             let elapsed = time - meterStart
             guard elapsed >= 5 else { return nil }
-            let ages = presented.map(\.total).sorted()
-            func stages(_ label: String, _ samples: [CFTimeInterval]) -> String {
-                guard !samples.isEmpty else { return "\(label) n/a" }
-                let sorted = samples.sorted()
-                return String(format: "%@ %.2f/%.2f", label,
-                              sorted[sorted.count / 2] * 1000,
-                              sorted[min(sorted.count - 1, sorted.count * 95 / 100)] * 1000)
-            }
-            let rate = String(format: "metal on glass: %.1f fps, enqueued->glass p50 %.1f p95 %.1f ms, %d replaced before shown",
-                              Double(presented.count) / elapsed, ages[ages.count / 2] * 1000,
-                              ages[min(ages.count - 1, ages.count * 95 / 100)] * 1000, replacedBeforeShown)
-            let breakdown = [stages("decode", presented.map(\.decode)),
-                             stages("ready->submit", presented.map(\.readyToSubmit)),
-                             stages("nextDrawable", presented.map(\.drawableWait)),
-                             stages("GPU", gpuTimes),
-                             stages("submit->glass", presented.map(\.submitToGlass))].joined(separator: ", ")
+            let snap = (presented, gpuTimes, replacedBeforeShown, elapsed)
             presented.removeAll(keepingCapacity: true)
             gpuTimes.removeAll(keepingCapacity: true)
             replacedBeforeShown = 0
             meterStart = time
-            return rate + " | p50/p95 ms: " + breakdown
+            return snap
         }
-        if let report { ClientLog.write(report) }
+        guard let s = snapshot, !s.presented.isEmpty else { return }
+        let ages = s.presented.map(\.total).sorted()
+        func stages(_ label: String, _ samples: [CFTimeInterval]) -> String {
+            guard !samples.isEmpty else { return "\(label) n/a" }
+            let sorted = samples.sorted()
+            return String(format: "%@ %.2f/%.2f", label,
+                          sorted[sorted.count / 2] * 1000,
+                          sorted[min(sorted.count - 1, sorted.count * 95 / 100)] * 1000)
+        }
+        let rate = String(format: "metal on glass: %.1f fps, enqueued->glass p50 %.1f p95 %.1f p99 %.1f ms, %d replaced before shown",
+                          Double(s.presented.count) / s.elapsed, ages[ages.count / 2] * 1000,
+                          ages[min(ages.count - 1, ages.count * 95 / 100)] * 1000,
+                          ages[min(ages.count - 1, ages.count * 99 / 100)] * 1000, s.replaced)
+        let breakdown = [stages("decode", s.presented.map(\.decode)),
+                         stages("ready->submit", s.presented.map(\.readyToSubmit)),
+                         stages("nextDrawable", s.presented.map(\.drawableWait)),
+                         stages("GPU", s.gpuTimes),
+                         stages("submit->glass", s.presented.map(\.submitToGlass))].joined(separator: ", ")
+        ClientLog.write(rate + " | p50/p95 ms: " + breakdown)
     }
 
     private func texture(_ buffer: CVPixelBuffer, plane: Int, format: MTLPixelFormat, cache: CVMetalTextureCache) -> CVMetalTexture? {

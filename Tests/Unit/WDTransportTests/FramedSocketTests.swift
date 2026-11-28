@@ -68,6 +68,7 @@ final class FramedSocketTests: XCTestCase {
         host.start(); client.start()
         defer { host.close("test end"); client.close("test end") }
 
+        DispatchQueue.concurrentPerform(iterations: 12) { _ in host.start() }
         DispatchQueue.concurrentPerform(iterations: 400) { index in
             host.send(.control, payload: SessionCodec.encode(.ping(UInt64(index))))
         }
@@ -116,12 +117,28 @@ final class FramedSocketTests: XCTestCase {
         XCTAssertTrue(inboxB.closed.withLock { $0.first?.hasPrefix("protocol error") ?? false })
     }
 
-    func testOversizedVideoAsksForKeyframeInsteadOfThrowing() throws {
+    func testOversizedVideoDropsDependentFramesUntilKeyframe() throws {
         let (a, b) = try pair()
+        let inbox = Inbox()
         let host = socket(a, session: 1, inbox: Inbox())
-        defer { host.close("test end"); Darwin.close(b) }
+        let client = socket(b, session: 2, inbox: inbox)
+        defer { host.close("test end"); client.close("test end") }
+
+        XCTAssertTrue(host.send(.control, payload: SessionCodec.encode(.ping(1))))
+        XCTAssertEqual(host.sendVideo([1], isKeyframe: true), .queued)
         let tooBig = [UInt8](repeating: 0, count: Int(StreamType.video.maxPayloadLength) + 1)
         XCTAssertEqual(host.sendVideo(tooBig, isKeyframe: false), .needKeyframe)
+        _ = host.sendVideo([2], isKeyframe: false)
+        XCTAssertEqual(host.queuedVideoFrames, 0)
+        XCTAssertEqual(host.droppedVideoFrames, 3)
+
+        XCTAssertEqual(host.sendVideo([3], isKeyframe: true), .queued)
+        XCTAssertEqual(host.sendVideo([4], isKeyframe: false), .queued)
+        host.start(); client.start()
+        wait(inbox.gotFrame, count: 3)
+        let video = inbox.frames.withLock { $0.filter { $0.header.stream == .video } }
+        XCTAssertEqual(video.map(\.payload), [[3], [4]])
+        XCTAssertTrue(video.first?.header.flags.contains(.keyframe) == true)
     }
 
     func testPeerThatStopsReadingIsCutOffByTheWriteDeadline() throws {

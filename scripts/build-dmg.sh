@@ -47,25 +47,71 @@ EOF
 chmod +x "$ROOT/Audio Driver/"*.command
 
 cat > "$ROOT/README.txt" <<EOF
-WiredDisplay $VERSION — use an iPad as a wired USB-C display for this Mac
+WiredDisplay $VERSION - use an iPad or Android device as a display for this Mac
 
 1. Drag WiredDisplayHost to Applications (or ~/Applications) and open it.
    It lives in the menu bar (screen + USB icon); there is no Dock icon.
    It adds itself to Login Items (menu: "Open at Login" to turn off).
-2. Grant Screen Recording (required), and Accessibility if you want touch
-   input from the iPad. Microphone access is only for sending Mac audio
-   to the iPad speaker.
-3. Connect the iPad with a USB-C cable and open the WiredDisplay app on it.
-   USB only: there is no Wi-Fi fallback.
+2. Grant Screen Recording (required), and Accessibility if you want touch,
+   stylus, or keyboard input from your iPad or Android device.
+3. Connect over USB-C or encrypted local Wi-Fi:
+   - iPad: plug in USB-C or select Auto / Wi-Fi in General > Connection.
+   - Android (USB-C AOA, no USB Debugging): plug in USB-C, open General >
+     Android USB-C Devices in the Mac menu bar, and click "Connect".
+   - Android (Wi-Fi): select Auto or Wi-Fi in General > Connection on the
+     same local Wi-Fi network, then confirm the 6-digit pairing code.
 4. Optional audio: run "Audio Driver/Install Audio Driver.command"
    (asks for your password), then pick "iPad Speaker" / "iPad Microphone".
 
-Options (Terminal): open WiredDisplayHost.app --args --allow-input
-  --codec h264|hevc   --bitrate-mbps 5…150   --fps 24…120
-  --chroma 420|444|hybrid   --depth 8|10   --color srgb|p3
-
 Not notarized: on first launch, approve it in System Settings >
 Privacy & Security > "Open Anyway".
+EOF
+
+cat > "$ROOT/PANDUAN-INSTALASI.txt" <<EOF
+Panduan Instalasi WiredDisplay $VERSION (Mac + Android / iPad)
+==============================================================
+
+1. Instalasi di Mac (WiredDisplay-$VERSION.dmg)
+----------------------------------------------
+1. Tarik WiredDisplayHost.app ke folder Applications (atau ~/Applications).
+2. (Opsional untuk audio) Jalankan "Audio Driver/Install Audio Driver.command"
+   lalu masukkan password Mac agar perangkat audio virtual terpasang.
+3. Buka WiredDisplayHost.app.
+   Jika macOS menolak karena ad-hoc signed, klik Done lalu buka:
+   System Settings > Privacy & Security > klik "Open Anyway".
+4. Aktifkan izin macOS yang diminta:
+   - Screen Recording (wajib agar layar Mac terkirim).
+   - Accessibility (wajib untuk input sentuh, stylus, dan keyboard).
+   Setelah memberi izin, tutup lalu buka ulang WiredDisplayHost.
+
+2. Instalasi di Android (WiredDisplay-$VERSION-android.apk)
+----------------------------------------------------------
+1. Kirim file WiredDisplay-$VERSION-android.apk ke tablet/HP Android (Android 8.0+).
+2. Tap file APK di File Manager. Izinkan "Install unknown apps" bila diminta.
+3. Buka WiredDisplay di Android lalu tap "Start Connecting".
+
+3. Cara Menghubungkan
+---------------------
+A. Lewat Kabel USB-C (Plug-and-Play AOA, tanpa USB Debugging):
+   1. Colokkan kabel USB-C data antara Mac dan Android.
+   2. Di menu bar Mac, buka WiredDisplay > General, pilih USB-C atau Auto.
+   3. Pada kartu "Android USB-C Devices", klik "Connect" di samping perangkat Anda.
+   4. Setujui dialog izin USB Accessory di Android (tap OK).
+   5. Pada koneksi pertama, cocokkan kode pairing 6 digit lalu tap Pair.
+
+B. Lewat Wi-Fi Lokal Terenkripsi:
+   1. Pastikan Mac dan Android berada di jaringan Wi-Fi yang sama.
+   2. Di menu bar Mac, buka WiredDisplay > General, pilih Auto atau Wi-Fi.
+   3. Pastikan aplikasi WiredDisplay di Android sedang terbuka di layar depan.
+   4. Cocokkan kode pairing 6 digit di kedua layar lalu tap Pair.
+
+4. Tips
+-------
+- Ketuk tombol bulat Controls di Android untuk mengatur Display Space,
+  Quality, Brightness, Volume Mac, Speaker/Mic, Quick Actions, dan Soft Keyboard.
+- Secara default input dimatikan demi keamanan; aktifkan "Allow Input from iPad"
+  di tab Input pada menu bar Mac untuk menggunakan sentuhan/stylus/keyboard.
+- Jika Wi-Fi tidak tersambung, matikan VPN / AP Isolation atau gunakan kabel USB-C.
 EOF
 
 # Volume icon.

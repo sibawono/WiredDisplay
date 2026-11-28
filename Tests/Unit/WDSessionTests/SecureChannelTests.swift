@@ -405,6 +405,35 @@ final class DecodeLimitTests: XCTestCase {
         bad.pixelsPerInch = 5000
         XCTAssertThrowsError(try SessionCodec.decodeControl(SessionCodec.encode(.hello(bad))))
     }
+
+    func testBiometricPamControlMessagesRoundTrip() throws {
+        let nonce = [UInt8](repeating: 0xAB, count: BiometricAuthMessage.nonceLength)
+        let challenge: ControlMessage = .authChallenge(requestID: 42, service: "sudo", username: "alice",
+                                                       reason: "Approve sudo for alice", nonce: nonce)
+        XCTAssertEqual(try SessionCodec.decodeControl(SessionCodec.encode(challenge)), challenge)
+
+        let sig = [UInt8](repeating: 0xCD, count: 72)
+        let response: ControlMessage = .authResponse(requestID: 42, status: 0, signature: sig)
+        XCTAssertEqual(try SessionCodec.decodeControl(SessionCodec.encode(response)), response)
+
+        var pub = [UInt8](repeating: 0x11, count: BiometricAuthMessage.p256PublicKeyLength)
+        pub[0] = 0x04
+        let pubMsg: ControlMessage = .biometricPublicKey(pub)
+        XCTAssertEqual(try SessionCodec.decodeControl(SessionCodec.encode(pubMsg)), pubMsg)
+
+        // Canonical payload format must match pam_wireddisplay.c byte-for-byte.
+        let canonical = BiometricAuthMessage.canonical(service: "sudo", username: "alice", nonce: nonce)
+        XCTAssertEqual(Array(canonical.prefix(20)), Array("WiredDisplay PAM v1\0".utf8))
+        XCTAssertEqual(Array(canonical.suffix(32)), nonce)
+
+        // Reject invalid nonce length and invalid public key length.
+        XCTAssertThrowsError(try SessionCodec.decodeControl(
+            SessionCodec.encode(.authChallenge(requestID: 1, service: "sudo", username: "a", reason: "r", nonce: [1, 2, 3]))
+        ))
+        XCTAssertThrowsError(try SessionCodec.decodeControl(
+            SessionCodec.encode(.biometricPublicKey([0x04, 0x01]))
+        ))
+    }
 }
 
 final class BrightnessTests: XCTestCase {

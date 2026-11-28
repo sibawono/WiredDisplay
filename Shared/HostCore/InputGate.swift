@@ -17,7 +17,7 @@ public enum InputGate {
         if state.allowsInput { return .inject }
         guard !state.systemAsleep, state.sessionActive else { return .drop }
         switch event {
-        case .pointer(.move, _, _, _): return .moveOnly
+        case .pointer(.move, _, _, _), .stylus(.move, _, _, _): return .moveOnly
         case .pointer(.down, _, _, _), .stylus(.down, _, _, _), .key(_, true), .scroll, .gestureScroll(_, _, .began, _): return .wakeAndDrop
         default: return .drop
         }
