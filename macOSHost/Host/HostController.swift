@@ -269,6 +269,8 @@ final class HostController: @unchecked Sendable {
     private var lastDecodeStepDown = Date.distantPast
     private var trusted = false
     private var pendingControl: [ControlMessage] = []
+    /// Unknown control tags already logged this session (a newer iPad build).
+    private var loggedUnknownControlTags: Set<UInt8> = []
 
     // Owned by `videoQueue`.
     private var video: VideoPipeline?
@@ -1077,10 +1079,12 @@ final class HostController: @unchecked Sendable {
         case incompatible(String)
         case notAuthenticated
         case pairingRejected
+        case pairOverUSBFirst
         var description: String {
             switch self {
             case .notAuthenticated: return "iPad app not answering (in the background?)"
             case .pairingRejected: return "pairing with this iPad was not confirmed"
+            case .pairOverUSBFirst: return "a new iPad must pair over USB-C first"
             case .notListening: return "client not listening"
             case .noHello: return "client did not send hello (pairing not confirmed on the iPad?)"
             case .closedDuringSetup: return "connection closed during setup"
@@ -1370,6 +1374,7 @@ final class HostController: @unchecked Sendable {
             verifiedPeer = nil
             trusted = false
             pendingControl = []
+            loggedUnknownControlTags = []
             lastHeardUptime = ProcessInfo.processInfo.systemUptime
             iPadBrightness.withLock { $0 = nil }
             sessionStatus.withLock {
@@ -1523,9 +1528,13 @@ final class HostController: @unchecked Sendable {
 
     /// Pinned iPads pass. Over USB-C with no iPad paired yet, the first one is paired
     /// without asking so a headless Mac works without a screen (D-023). Over Wi-Fi,
-    /// unknown devices ALWAYS require explicit 6-digit SAS confirmation.
+    /// only paired iPads connect: anyone on the network could otherwise raise a pairing alert (audit SEC-01).
     private func authorize(_ peer: SecureChannel.Peer, over transport: ActiveTransportKind) throws {
         if trust.isTrusted(peer.identityKey) { return }
+        if transport != .usb {
+            Log.info("unknown iPad over \(transport.rawValue) (key \(peer.fingerprint)) refused: pair over USB-C first")
+            throw SessionError.pairOverUSBFirst
+        }
         if transport == .usb && trust.peers.isEmpty {
             try trust.trust(peer.identityKey, name: "iPad")
             Log.info("no iPad paired yet: paired this USB-C iPad on first use (key \(peer.fingerprint), code \(peer.pairingCode))")
@@ -1882,6 +1891,13 @@ final class HostController: @unchecked Sendable {
         do {
             switch frame.header.stream {
             case .control:
+                if SessionCodec.hasUnknownControlTag(frame.payload) {
+                    let tag = frame.payload[0]
+                    if loggedUnknownControlTags.insert(tag).inserted {
+                        Log.info("ignoring control message \(tag) from the iPad (a newer app version?)")
+                    }
+                    return
+                }
                 let message = try SessionCodec.decodeControl(frame.payload)
                 switch message {
                 case .ping, .pong, .bye: break

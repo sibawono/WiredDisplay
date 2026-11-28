@@ -107,11 +107,12 @@ WiredDisplay $VERSION - use an iPad or Android device as a display for this Mac
 2. Grant Screen Recording (required), and Accessibility if you want touch,
    stylus, or keyboard input from your iPad or Android device.
 3. Connect over USB-C or encrypted local Wi-Fi:
-   - iPad: plug in USB-C or select Auto / Wi-Fi in General > Connection.
+   - iPad: plug in USB-C. A new iPad pairs over the cable once; then Auto or
+     Wi-Fi in General > Connection works for it.
    - Android (USB-C AOA, no USB Debugging): plug in USB-C, open General >
      Android USB-C Devices in the Mac menu bar, and click "Connect".
-   - Android (Wi-Fi): select Auto or Wi-Fi in General > Connection on the
-     same local Wi-Fi network, then confirm the 6-digit pairing code.
+   - Android (Wi-Fi): pair over USB-C first, then select Auto or Wi-Fi in
+     General > Connection on the same local Wi-Fi network.
 4. Optional: open "Install Extras.command". It asks whether to add the
    audio devices ("iPad Speaker" / "iPad Microphone") and iPad Touch ID /
    Face ID unlock, then asks for your password once. For Touch ID / Face ID,
@@ -134,6 +135,8 @@ Panduan Instalasi WiredDisplay $VERSION (Mac + Android / iPad)
    Face ID di iPad, lalu meminta password Mac sekali. Untuk Touch ID / Face ID,
    ketuk dulu Controls > More > Enroll di iPad. "Uninstall Extras.command"
    melepas keduanya.
+   Touch ID / Face ID dari build sebelumnya? Jalankan "Install Extras.command"
+   sekali lagi untuk memasang modul baru.
 3. Buka WiredDisplayHost.app.
    Jika macOS menolak karena ad-hoc signed, klik Done lalu buka:
    System Settings > Privacy & Security > klik "Open Anyway".
@@ -157,11 +160,12 @@ A. Lewat Kabel USB-C (Plug-and-Play AOA, tanpa USB Debugging):
    4. Setujui dialog izin USB Accessory di Android (tap OK).
    5. Pada koneksi pertama, cocokkan kode pairing 6 digit lalu tap Pair.
 
-B. Lewat Wi-Fi Lokal Terenkripsi:
-   1. Pastikan Mac dan Android berada di jaringan Wi-Fi yang sama.
-   2. Di menu bar Mac, buka WiredDisplay > General, pilih Auto atau Wi-Fi.
-   3. Pastikan aplikasi WiredDisplay di Android sedang terbuka di layar depan.
-   4. Cocokkan kode pairing 6 digit di kedua layar lalu tap Pair.
+B. Lewat Wi-Fi Lokal Terenkripsi (setelah pernah dipasangkan lewat USB-C):
+   1. Pasangkan dulu sekali lewat kabel USB-C (cara A). Perangkat baru tidak
+      bisa dipasangkan lewat Wi-Fi.
+   2. Pastikan Mac dan Android berada di jaringan Wi-Fi yang sama.
+   3. Di menu bar Mac, buka WiredDisplay > General, pilih Auto atau Wi-Fi.
+   4. Pastikan aplikasi WiredDisplay di Android sedang terbuka di layar depan.
 
 4. Tips
 -------

@@ -415,6 +415,13 @@ public enum SessionCodec {
         return writer.bytes
     }
 
+    /// A control message whose tag this build does not know, sent by a newer peer.
+    /// After the handshake it is ignored instead of ending the session.
+    public static func hasUnknownControlTag(_ bytes: [UInt8]) -> Bool {
+        guard let rawTag = bytes.first else { return false }
+        return ControlTag(rawValue: rawTag) == nil
+    }
+
     public static func decodeControl(_ bytes: [UInt8]) throws -> ControlMessage {
         var reader = WireReader(bytes)
         let rawTag = try reader.u8()

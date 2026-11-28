@@ -66,7 +66,7 @@ final class VideoView: UIView, UIPointerInteractionDelegate, UIGestureRecognizer
     }
     private var refreshPacer: CADisplayLink?
 
-    // MARK: Metal renderer (D-040, experimental)
+    // MARK: Metal renderer (D-040, the default)
 
     let metalRenderer = MetalVideoRenderer()
     static let metalRendererKey = "metalRenderer"

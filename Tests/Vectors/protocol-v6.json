@@ -7,7 +7,8 @@
     "Pairing code: first 8 HKDF bytes as a big-endian UNSIGNED 64-bit integer, modulo 1000000, six digits, shown as 'ddd ddd'. In these vectors a signed 64-bit modulo gives a different, negative result.",
     "AES-256-GCM nonce = stream byte, 0, 0, 0, sequence (u64 BE). AAD = the 36-byte header as sent (authenticated flag set, payloadLength = plaintext + 16). Wire payload = ciphertext || 16-byte tag.",
     "Our own authHello always goes in the clear as control sequence 0.",
-    "Ed25519 signatures from CryptoKit may be randomized; only verify them, never compare them to these bytes."
+    "Ed25519 signatures from CryptoKit may be randomized; only verify them, never compare them to these bytes.",
+    "A control message with an unknown tag, received after the peer is verified, is ignored (it comes from a newer build). Unknown input tags and unknown tags before verification stay fatal."
   ],
   "keys": {
     "hostIdentitySeed": "cdc1004cf75c95e57756500c593fe5ce7184ecd39a193413dc73319836d6aa75",

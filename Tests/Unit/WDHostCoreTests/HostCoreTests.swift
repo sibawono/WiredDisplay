@@ -160,3 +160,24 @@ final class PipelineMetricsTests: XCTestCase {
         XCTAssertEqual(s.decoderDrops, 1)
     }
 }
+
+/// BUG-02 (audit 2026-11-28): the Security tab reports every part of Install Extras, not the .so alone.
+final class TouchIDSetupTests: XCTestCase {
+    func testStatusNamesWhatIsMissing() {
+        XCTAssertEqual(TouchIDSetup(sudoModule: false, lockScreenPlugin: false, installedKey: nil, iPadKey: "A").status,
+                       .notInstalled)
+        XCTAssertEqual(TouchIDSetup(sudoModule: true, lockScreenPlugin: false, installedKey: "A\n", iPadKey: "A").status,
+                       .partial(missing: [.lockScreenPlugin]))
+        XCTAssertEqual(TouchIDSetup(sudoModule: true, lockScreenPlugin: true, installedKey: "", iPadKey: nil).status,
+                       .partial(missing: [.key]))
+    }
+
+    func testKeyComparison() {
+        XCTAssertEqual(TouchIDSetup(sudoModule: true, lockScreenPlugin: true, installedKey: "A\n", iPadKey: "A").status,
+                       .installed)
+        XCTAssertEqual(TouchIDSetup(sudoModule: true, lockScreenPlugin: true, installedKey: "A", iPadKey: "B").status,
+                       .keyChanged)
+        XCTAssertEqual(TouchIDSetup(sudoModule: true, lockScreenPlugin: true, installedKey: "A", iPadKey: nil).status,
+                       .installed, "no iPad connected: nothing to compare")
+    }
+}

@@ -6,8 +6,8 @@ import VideoToolbox
 import WDVideo
 import WDSession
 
-/// Where decoded video goes: the system display layer (default) or the
-/// experimental Metal path. Thread-safe; called from the session queue.
+/// Where decoded video goes: the Metal path (default) or the system display
+/// layer. Thread-safe; called from the session queue.
 protocol VideoSink: AnyObject, Sendable {
     var isFailed: Bool { get }
     var needsFlush: Bool { get }
@@ -107,7 +107,7 @@ final class SwitchableSink: VideoSink, @unchecked Sendable {
     func takeBacklogEvents() -> (keyframeWanted: Bool, stalls: Int) { current.takeBacklogEvents() }
 }
 
-/// Experimental low-latency path (D-040, after OpenDisplay): decode with
+/// Default low-latency path (D-040, after OpenDisplay): decode with
 /// VTDecompressionSession and draw YUV -> RGB in a Metal shader onto a
 /// CAMetalLayer the moment a frame is ready, newest frame wins. The system
 /// display layer may hold about one extra frame; this path cannot.

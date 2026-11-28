@@ -244,6 +244,19 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
         service = "macos";
     }
 
+    // A remote login (ssh) keeps the password: the iPad sheet cannot say who is asking (audit SEC-03).
+    const char *rhost = NULL;
+    if (pam_get_item(pamh, PAM_RHOST, (const void **)&rhost) == PAM_SUCCESS && rhost && rhost[0] != '\0' &&
+        strcmp(rhost, "localhost") != 0 && strcmp(rhost, "127.0.0.1") != 0 && strcmp(rhost, "::1") != 0) {
+        return PAM_IGNORE;
+    }
+    if (getenv("SSH_CONNECTION") || getenv("SSH_CLIENT")) {
+        return PAM_IGNORE;
+    }
+    const char *tty = NULL;
+    if (pam_get_item(pamh, PAM_TTY, (const void **)&tty) != PAM_SUCCESS || !tty) tty = "";
+    if (strncmp(tty, "/dev/", 5) == 0) tty += 5;
+
     int is_screensaver = (strcmp(service, "screensaver") == 0);
     int fd = connect_bridge(pw->pw_dir, pw->pw_uid, is_screensaver ? 11 : 16);
     if (fd < 0) {
@@ -260,7 +273,11 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     if (is_screensaver) {
         snprintf(reason, sizeof(reason), "Unlock Mac (%s)", username);
     } else {
-        snprintf(reason, sizeof(reason), "Approve %s for %s on Mac", service, username);
+        if (tty[0] != '\0') {
+            snprintf(reason, sizeof(reason), "Approve %s for %s on Mac (%s)", service, username, tty);
+        } else {
+            snprintf(reason, sizeof(reason), "Approve %s for %s on Mac (no terminal)", service, username);
+        }
     }
 
     size_t svc_len = strlen(service);

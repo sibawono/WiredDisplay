@@ -255,7 +255,7 @@ final class VideoEncoder: @unchecked Sendable {
             // visible hitch; the iPad asks for one when it needs it.
             kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration: VideoEncoder.periodicKeyframes ? 2 : 3600,
             kVTCompressionPropertyKey_MaxKeyFrameInterval: VideoEncoder.periodicKeyframes ? 120 : 216_000,
-            // Display P3 primaries only with --color p3 (BUG-033).
+            // Display P3 primaries only with --color p3 (BUG-033; sRGB is the default).
             kVTCompressionPropertyKey_ColorPrimaries: c.displayP3
                 ? kCVImageBufferColorPrimaries_P3_D65 : kCVImageBufferColorPrimaries_ITU_R_709_2,
             // BT.709 transfer, not sRGB: with the sRGB tag the iPad rendered every
@@ -264,9 +264,15 @@ final class VideoEncoder: @unchecked Sendable {
             kVTCompressionPropertyKey_TransferFunction: kCVImageBufferTransferFunction_ITU_R_709_2,
             kVTCompressionPropertyKey_YCbCrMatrix: kCVImageBufferYCbCrMatrix_ITU_R_709_2,
         ]
-        if !full444 {
+        // Low-latency rate control already holds no frames and rejects this key (-12900, measured);
+        // the standard 4:2:0 lane (above 60 fps, or the fallback) takes it.
+        let usesLowLatency = specification[kVTVideoEncoderSpecification_EnableLowLatencyRateControl] != nil
+        if !full444 && !usesLowLatency {
             properties[kVTCompressionPropertyKey_MaxFrameDelayCount] = 0
         }
+        // 4:4:4 10-bit at the panel size took ~29 ms a frame and held Ultra near 36 fps; speed
+        // priority measured 19 ms and 52 fps with the same still-frame picture (audit PERF-01).
+        if full444 { properties[kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality] = true }
         if !full444 { // 4:4:4: the encoder picks HEVC RExt from the source format
             properties[kVTCompressionPropertyKey_ProfileLevel] = c.codec == .hevc
                 ? (c.tenBit ? kVTProfileLevel_HEVC_Main10_AutoLevel : kVTProfileLevel_HEVC_Main_AutoLevel)
@@ -699,7 +705,7 @@ final class VideoEncoder: @unchecked Sendable {
                     defer { outputLock.unlock() }
                     guard self?.epoch == frameEpoch else { return } // superseded lane
                     let sent = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-                    if sent % 300 == 0, sourceAgeAtSubmit.isFinite { // about one sample every 5 s at 60 Hz
+                    if FrameSampling.isSampled(sent), sourceAgeAtSubmit.isFinite {
                         let toSendQueue = Double(sent &- convertStart) / 1e6
                         Log.info(String(format: "frame host %llu: capture->sendQueue %.3f ms; capture->convert %.3f; convert %.3f; encode+pack %.3f",
                                         sent, sourceAgeAtSubmit * 1000 + toSendQueue, sourceAgeAtSubmit * 1000,

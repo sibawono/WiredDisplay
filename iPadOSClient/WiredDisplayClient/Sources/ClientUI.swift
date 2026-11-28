@@ -1,7 +1,15 @@
 import SwiftUI
 
-// Presentation for the iPad app. Pure SwiftUI on plain values (no UIKit, no
+// Presentation for the iPad app. SwiftUI on plain values (UIKit only for font metrics, no
 // session objects), so every state can be rendered and reviewed on its own.
+
+extension Font {
+    /// A design size that follows Dynamic Type, capped at 125 % so the Controls panel keeps its layout.
+    /// At the default text size it is exactly `size`.
+    static func wd(_ size: CGFloat, weight: Font.Weight = .regular) -> Font {
+        .system(size: min(UIFontMetrics.default.scaledValue(for: size), size * 1.25), weight: weight)
+    }
+}
 
 enum Brand {
     // Website studio-dark palette (site.css).
@@ -122,7 +130,7 @@ struct StatusScreen: View {
                                 .foregroundStyle(Brand.text)
                                 .multilineTextAlignment(.center)
                             Text(heroSubtitle)
-                                .font(.system(size: 17))
+                                .font(.wd(17))
                                 .foregroundStyle(Brand.muted)
                                 .multilineTextAlignment(.center)
                                 .frame(maxWidth: 540)
@@ -184,7 +192,7 @@ struct StatusScreen: View {
 
                         if let note {
                             Text(note)
-                                .font(.system(size: 13))
+                                .font(.wd(13))
                                 .foregroundStyle(.orange)
                                 .multilineTextAlignment(.center)
                                 .frame(maxWidth: 600)
@@ -195,8 +203,8 @@ struct StatusScreen: View {
                                 onboardingDone = false
                             }
                         } label: {
-                            Label("Overview", systemImage: "sparkles.rectangle.stack")
-                                .font(.system(size: 14, weight: .medium))
+                            Label("Overview", systemImage: "rectangle.stack")
+                                .font(.wd(14, weight: .medium))
                                 .foregroundStyle(Brand.soft)
                                 .padding(.horizontal, 18)
                                 .padding(.vertical, 10)
@@ -274,7 +282,7 @@ struct StatusScreen: View {
             switch info.stage {
             case .failed:
                 Image(systemName: "exclamationmark.circle.fill")
-                    .font(.system(size: 12))
+                    .font(.wd(12))
                     .foregroundStyle(.red)
             case .connecting, .starting:
                 ProgressView().controlSize(.mini).tint(Brand.signal)
@@ -284,36 +292,36 @@ struct StatusScreen: View {
 
             if info.stage == .connecting {
                 Image(systemName: isConnectingWiFi ? "wifi" : "cable.connector")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.wd(12, weight: .semibold))
                     .foregroundStyle(Brand.signal)
                 Text(connectingPillText)
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.wd(13, weight: .medium))
                     .foregroundStyle(Brand.text)
             } else if info.stage == .waitingForMac {
                 Text("Listening:")
-                    .font(.system(size: 13, weight: .regular))
+                    .font(.wd(13, weight: .regular))
                     .foregroundStyle(Brand.muted)
                 Image(systemName: "cable.connector")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.wd(11, weight: .semibold))
                     .foregroundStyle(Brand.signal)
                 Text("USB-C")
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.wd(13, weight: .medium))
                     .foregroundStyle(Brand.text)
                 Text("·")
                     .foregroundStyle(Brand.muted)
                 Image(systemName: info.wifiConnected ? "wifi" : "wifi.slash")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.wd(11, weight: .semibold))
                     .foregroundStyle(info.wifiConnected ? Brand.signal : Brand.muted)
                 Text(wifiLabel)
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.wd(13, weight: .medium))
                     .foregroundStyle(info.wifiConnected ? Brand.text : Brand.muted)
             } else if info.stage == .starting {
                 Text("Starting listeners…")
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.wd(13, weight: .medium))
                     .foregroundStyle(Brand.muted)
             } else {
                 Text("Listener stopped")
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.wd(13, weight: .medium))
                     .foregroundStyle(.red)
             }
         }
@@ -395,7 +403,7 @@ struct StatusScreen: View {
             StatusCardItem(
                 symbol: "lock.shield",
                 title: "03 · Pair once",
-                detail: "Confirm the 6-digit code on first connection. Video, audio, and input stay encrypted with AES-256-GCM.",
+                detail: "Pair over the USB-C cable once and confirm the 6-digit code; Wi-Fi then works for that Mac. Video, audio, and input stay encrypted with AES-256-GCM.",
                 highlighted: false,
                 badge: "AES-256-GCM"
             ),
@@ -437,7 +445,7 @@ private struct OnboardingView: View {
                             .foregroundStyle(Brand.text)
                             .multilineTextAlignment(.center)
                         Text("Use your iPad as a Retina Mac display over USB-C or encrypted local Wi-Fi.")
-                            .font(.system(size: 17))
+                            .font(.wd(17))
                             .foregroundStyle(Brand.muted)
                             .multilineTextAlignment(.center)
                             .frame(maxWidth: 540)
@@ -481,7 +489,7 @@ private struct OnboardingView: View {
 
                     Button(action: onFinish) {
                         Text("Start Connecting")
-                            .font(.system(size: 16, weight: .semibold))
+                            .font(.wd(16, weight: .semibold))
                             .foregroundStyle(.white)
                             .frame(minWidth: 220, minHeight: 48)
                             .background(Brand.blue, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -525,7 +533,7 @@ private struct OnboardingFeatureCard: View {
                     .foregroundStyle(Brand.text)
                     .fixedSize(horizontal: false, vertical: true)
                 Text(detail)
-                    .font(.system(size: 14, weight: .regular))
+                    .font(.wd(14, weight: .regular))
                     .lineSpacing(3)
                     .foregroundStyle(Brand.muted)
                     .fixedSize(horizontal: false, vertical: true)
@@ -533,7 +541,7 @@ private struct OnboardingFeatureCard: View {
             if square { Spacer(minLength: 0) }
             if let badge, !badge.isEmpty {
                 Text(badge)
-                    .font(.system(size: 11.5, weight: .medium))
+                    .font(.wd(11.5, weight: .medium))
                     .foregroundStyle(highlighted ? Brand.signal : Brand.soft)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -575,10 +583,10 @@ private struct ReplugHint: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("Not connecting yet?")
-                .font(.system(size: 14, weight: .medium))
+                .font(.wd(14, weight: .medium))
                 .foregroundStyle(Brand.text)
             Text("If the Mac restarted, replug the USB-C cable. For Wi-Fi, set Connection to Auto or Wi-Fi in the Mac menu bar.")
-                .font(.system(size: 13))
+                .font(.wd(13))
                 .foregroundStyle(Brand.muted)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -808,7 +816,7 @@ struct ControlsContent: View {
         "4:2:0 while moving, 4:4:4 when still · 10-bit",
         "Lowest latency 4:2:0 · 10-bit",
         "Sharpest 4:4:4 colour · 10-bit",
-        "Full 4:4:4 colour · 8-bit",
+        "High Color: full 4:4:4 colour · 8-bit",
     ]
 
     var body: some View {
@@ -853,7 +861,7 @@ struct ControlsContent: View {
             Spacer(minLength: 0)
             Button(action: close) {
                 Image(systemName: "xmark")
-                    .font(.system(size: 12, weight: .bold))
+                    .font(.wd(12, weight: .bold))
                     .foregroundStyle(.white.opacity(0.75))
                     .frame(width: 28, height: 28)
                     .background(.white.opacity(0.1), in: Circle())
@@ -870,9 +878,9 @@ struct ControlsContent: View {
                 Button { tab = item } label: {
                     VStack(spacing: 4) {
                         Image(systemName: item.symbol)
-                            .font(.system(size: 14, weight: selected ? .semibold : .regular))
+                            .font(.wd(14, weight: selected ? .semibold : .regular))
                         Text(item.title)
-                            .font(.system(size: 10.5, weight: selected ? .semibold : .medium))
+                            .font(.wd(10.5, weight: selected ? .semibold : .medium))
                     }
                     .foregroundStyle(selected ? .white : .white.opacity(0.6))
                     .frame(maxWidth: .infinity)
@@ -1058,9 +1066,9 @@ struct ControlsContent: View {
                         Button { quickAction(action) } label: {
                             VStack(spacing: 5) {
                                 Image(systemName: action.symbol)
-                                    .font(.system(size: 15, weight: .medium))
+                                    .font(.wd(15, weight: .medium))
                                 Text(action.title)
-                                    .font(.system(size: 10.5, weight: .medium))
+                                    .font(.wd(10.5, weight: .medium))
                                     .lineLimit(1)
                             }
                             .foregroundStyle(.white)
@@ -1155,7 +1163,7 @@ struct ControlsContent: View {
             card("Mac \(bioKind.label) Auth") {
                 if let fp = biometricFingerprint {
                     InfoRow(symbol: bioKind.symbol, title: "\(bioKind.label) enrolled", value: String(fp.prefix(8)))
-                    Text("Approve sudo or Mac Lock Screen using \(bioKind.label). Run install-pam.sh on your Mac to link this key.")
+                    Text("Approve sudo or Mac Lock Screen using \(bioKind.label). Run Install Extras on the Mac to link this key.")
                         .font(.caption).foregroundStyle(Brand.secondaryText)
                     Divider().overlay(.white.opacity(0.08))
                     HStack(spacing: 12) {
@@ -1411,7 +1419,7 @@ struct ControlsButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: "slider.horizontal.3")
-                .font(.system(size: 17, weight: .semibold))
+                .font(.wd(17, weight: .semibold))
                 .foregroundStyle(.white)
                 .frame(width: 44, height: 44)
                 .background(.black.opacity(streaming ? 0.25 : 0.45), in: Circle())

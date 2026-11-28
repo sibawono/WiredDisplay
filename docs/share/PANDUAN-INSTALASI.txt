@@ -1,4 +1,4 @@
-WiredDisplay 0.5.6: Panduan Instalasi
+WiredDisplay 0.5.6 (build 16): Panduan Instalasi
 iPad jadi layar Mac lewat kabel USB-C atau Wi-Fi lokal terenkripsi (dengan suara dan input sentuh)
 
 Isi paket
@@ -78,6 +78,9 @@ BAGIAN B: Pasang app Mac (host)
      admin). Sebelumnya ketuk Controls › More › Enroll di iPad saat tersambung.
      Kata sandi Mac tetap berfungsi seperti biasa.
    Untuk melepas keduanya: "Uninstall Extras.command".
+   Sudah memasang Touch ID / Face ID dari 0.5.6 build 15 atau lebih lama?
+   Jalankan "Install Extras.command" sekali lagi: build 16 memakai modul baru
+   (sudo dari SSH tetap memakai kata sandi, iPad menampilkan nama terminal).
    Sudah pernah memasang driver dari versi 0.1.0? Pasang ulang driver ini:
    sejak versi 0.2.0 driver-nya baru.
    Di Google Meet/Zoom pilih Microphone: "iPad Microphone" dan
@@ -180,4 +183,5 @@ Bila tidak tersambung
   dicabut ±10 detik lalu dicolok lagi. Ini perilaku USB-C di macOS, bukan
   kerusakan.
 - Cek kabel (harus kabel data) dan pastikan app di iPad sedang terbuka.
-- App hanya bekerja lewat kabel; tidak ada mode Wi-Fi.
+- Wi-Fi (Connection: Auto atau Wi-Fi di menu Mac) hanya untuk iPad yang sudah
+  dipasangkan lewat kabel USB-C. iPad atau Mac baru harus dipasangkan lewat kabel dulu.

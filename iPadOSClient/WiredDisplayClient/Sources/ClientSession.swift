@@ -95,6 +95,7 @@ final class ClientSession: @unchecked Sendable {
     /// The Mac's hello can arrive before the user confirms pairing.
     private var pendingHostHello: Hello?
     private var outstandingSends = 0
+    private var loggedUnknownControlTags: Set<UInt8> = []
     private var watchdog: DispatchSourceTimer?
     private var running = false
     /// What the user enabled; re-sent to the host on every new connection.
@@ -348,7 +349,8 @@ final class ClientSession: @unchecked Sendable {
                 let fp = SecureChannel.fingerprint(Array(identity.publicKey.rawRepresentation))
                 txt["id"] = String(fp.prefix(16))
             }
-            created.service = NWListener.Service(name: hello.deviceName.isEmpty ? "iPad" : hello.deviceName,
+            // A generic name: the device name (often the owner's) is not broadcast on every network.
+            created.service = NWListener.Service(name: "WiredDisplay",
                                                  type: "_wireddisplay._tcp", domain: nil, txtRecord: txt)
             created.stateUpdateHandler = { [weak self, weak created] state in
                 guard let self, let created, self.wifiListener === created else { return }
@@ -433,6 +435,7 @@ final class ClientSession: @unchecked Sendable {
         format = nil
         formatSets = []
         outstandingSends = 0
+        loggedUnknownControlTags = []
         clockOffset = nil
         offsetSamples = []
         transitSamples = []
@@ -554,6 +557,11 @@ final class ClientSession: @unchecked Sendable {
             ClientLog.write("Mac authenticated: paired key \(peer.fingerprint)")
             return becomeTrusted(peer, on: current)
         }
+        // First-time pairing needs the cable: on Wi-Fi anyone on the network could ask (audit SEC-01).
+        guard activeIsUSB else {
+            ClientLog.write("unknown Mac \(peer.fingerprint) over Wi-Fi refused: pair over USB-C first")
+            return endConnection(reason: "A new Mac pairs over the USB-C cable once; then Wi-Fi works for it", sendBye: false)
+        }
         ClientLog.write("unknown Mac \(peer.fingerprint): asking the user (code \(peer.pairingCode))")
         pendingPeer = peer
         ui { $0.pairingCode = peer.pairingCode }
@@ -573,6 +581,12 @@ final class ClientSession: @unchecked Sendable {
     private func handle(_ frame: Frame, on current: NWConnection) throws {
         switch frame.header.stream {
         case .control:
+            if SessionCodec.hasUnknownControlTag(frame.payload) {
+                if loggedUnknownControlTags.insert(frame.payload[0]).inserted {
+                    ClientLog.write("ignoring control message \(frame.payload[0]) from the Mac (a newer Mac app?)")
+                }
+                return
+            }
             switch try SessionCodec.decodeControl(frame.payload) {
             case .hello(let host):
                 guard peerHello == nil, pendingHostHello == nil, host.role == .host else {
@@ -669,7 +683,7 @@ final class ClientSession: @unchecked Sendable {
             guard trustedPeer != nil else { throw WireError.invalidValue("audio before pairing") }
             speakerSink.push(try AudioPacket.decode(frame.payload, expectedChannels: SessionConstants.speakerChannels))
             speakerPackets += 1
-            if speakerPackets == 1 || speakerPackets % 500 == 0 {
+            if speakerPackets == 1 || speakerPackets % 6000 == 0 { // about every 30 s
                 ClientLog.write("speaker packets received \(speakerPackets), jitter \(speakerSink.stats)")
             }
         case .input, .microphone, .camera:
@@ -837,7 +851,7 @@ final class ClientSession: @unchecked Sendable {
         do {
             let time = CMTime(value: CMTimeValue(timestamp), timescale: 1_000_000_000)
             let sample = try SampleBuffers.sampleBuffer(fromAnnexB: annexB, parsed: parsed, format: format, presentationTime: time)
-            if timestamp % 300 == 0, let offset = clockOffset { // about one sample every 5 s at 60 Hz
+            if FrameSampling.isSampled(timestamp), let offset = clockOffset {
                 let hostNow = Int64(bitPattern: clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) &+ offset
                 let transit = Double(hostNow &- Int64(bitPattern: timestamp)) / 1e6
                 CMSetAttachment(sample, key: "WiredDisplayTransitMS" as CFString,

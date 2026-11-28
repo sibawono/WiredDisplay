@@ -212,11 +212,12 @@ final class PamBridgeServer: @unchecked Sendable {
         _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
         _ = setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
 
-        // Only accept root (PAM in sudo/screensaver) or our own user UID.
+        // Root only: the PAM module (sudo, screensaver) and the privileged AuthPlugin run as root.
+        // A user process could otherwise raise the iPad's Touch ID sheet with its own text (audit SEC-02).
         var euid: uid_t = 0
         var egid: gid_t = 0
-        guard getpeereid(fd, &euid, &egid) == 0, euid == 0 || euid == getuid() else {
-            Log.warn("pam: rejected unauthorized peer uid=\(euid)")
+        guard getpeereid(fd, &euid, &egid) == 0, euid == 0 else {
+            Log.warn("pam: refused a request from uid \(euid) (only root may ask)")
             return
         }
 

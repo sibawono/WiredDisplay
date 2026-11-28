@@ -165,6 +165,10 @@ public final class SecureChannel: @unchecked Sendable {
             let opened = Frame(header: header, payload: plaintext)
 
             if header.stream == .control {
+                if SessionCodec.hasUnknownControlTag(plaintext) {
+                    guard verifiedPeer != nil else { throw Error.notVerified(header.stream) }
+                    return .message(opened)
+                }
                 switch try SessionCodec.decodeControl(plaintext) {
                 case .authHello:
                     throw Error.unexpectedAuthHello

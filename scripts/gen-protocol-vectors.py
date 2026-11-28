@@ -233,6 +233,7 @@ def build():
             "(authenticated flag set, payloadLength = plaintext + 16). Wire payload = ciphertext || 16-byte tag.",
             "Our own authHello always goes in the clear as control sequence 0.",
             "Ed25519 signatures from CryptoKit may be randomized; only verify them, never compare them to these bytes.",
+            "A control message with an unknown tag, received after the peer is verified, is ignored (it comes from a newer build). Unknown input tags and unknown tags before verification stay fatal.",
         ],
         "keys": {
             "hostIdentitySeed": hx(seed("host identity")),

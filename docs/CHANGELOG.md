@@ -1575,3 +1575,82 @@ During scrolling, sampled medians were 0.05 ms capture-delivery-to-conversion, 4
 - The Touch ID note, `install.mac.4` and `audio.note` now point to Install Extras. The iPad Controls caption no longer names a version.
 - Checked at 1440 × 900 and 375 × 812 with no overflow. The identifier scan found only the site's domain.
 - Deployed as Cloudflare Pages 94e7d429. The live CSS matches the build, and both download links return 200.
+
+## CHANGE ID: P1-098 — Audit 2026-11-28 (report only, no code change)
+
+- New `docs/AUDIT_2026-11-28.md`: prioritised findings for v0.5.6 with file and line, evidence from the host and iPad logs, the proposed fix and its risk; an antislop UI audit (contrast computed); a verification rule for every fix; a ranked feature list.
+- Top items: PERF-01 (Ultra 4:4:4 10-bit holds 25-32 fps in motion; capture to send queue p50 27-35 ms), BUG-01 (an unknown control tag ends the session, seen as a 6-session loop on version skew), SEC-01 (the iPad accepts first-time pairing over Wi-Fi), SEC-02 (any user process can raise the iPad's Touch ID sheet).
+- **VERIFIED:** `swift test` 199/199 (no code changed). **NOT RUN:** A/B measurements of the proposed fixes; Android client audit.
+
+## CHANGE ID: P1-099 — A newer peer's control message no longer ends the session (audit BUG-01)
+
+- `SessionCodec.hasUnknownControlTag`; `SecureChannel` passes an unknown control tag on once the peer is verified (still refused before). The host and the iPad ignore it and log the tag once per session. Unknown input tags stay fatal.
+- Android client (`SecureChannel.kt`, `ClientSession.kt`) and the protocol vector notes (`gen-protocol-vectors.py`, `protocol-v6.json`) follow the same rule.
+- **WHY:** 28 Nov 13:17, six sessions in 27 s ended with `unknownTag(22)` when the iPad was newer than the host.
+- **VERIFIED:** 2 new tests (pass after verification, refused before). `swift test` 204/204. Android `testDebugUnitTest` passed (offline, Studio JBR). **NOT RUN:** a live old/new pair (needs an old build on one side).
+
+## CHANGE ID: P1-100 — New pairing only over USB-C; generic Bonjour name (audit SEC-01)
+
+- Host: an unknown iPad over Wi-Fi is refused ("a new iPad must pair over USB-C first") instead of raising a pairing alert. iPad: an unknown Mac over Wi-Fi is refused with the same advice. Paired devices connect over Wi-Fi as before.
+- The iPad advertises `_wireddisplay._tcp` as "WiredDisplay" instead of its device name. The TXT `id` is unchanged (the host keys per-iPad settings on it).
+- Onboarding step 03 and the guide say to pair over the cable once.
+- **VERIFIED:** builds; USB-C pairing and reconnect unchanged on hardware. **NOT RUN:** a second, unpaired Mac or iPad on Wi-Fi.
+
+## CHANGE ID: P1-101 — The Touch ID bridge answers root only (audit SEC-02)
+
+- `PamBridgeServer` accepted the user's own processes, so any app could raise the iPad's Touch ID / Face ID sheet with its own text. Now only euid 0 (the PAM module and the privileged AuthPlugin) is served.
+- **VERIFIED:** a request from a user process (uid 502) was refused and logged; the iPad showed nothing. **NOT RUN:** `sudo`, the Lock Screen and an admin dialog with the iPad (the owner's check; the password always remains as fallback).
+
+## CHANGE ID: P1-102 — PAM module and AuthPlugin hardening (audit SEC-03, SEC-04)
+
+- `pam_wireddisplay.so`: a remote login (`PAM_RHOST`, or `SSH_CONNECTION` / `SSH_CLIENT`) keeps the password; the iPad sheet names the terminal ("… on Mac (ttys003)" or "(no terminal)").
+- `WiredDisplayAuth.bundle`: admin approvals only for the console user; one atomic state decides between `SetResult` and deactivation/destroy, so no result reaches a deactivated mechanism.
+- **VERIFIED:** both build with `-Wall -Wextra -Werror` clean and ad-hoc sign. The owner installed them with `install-pam.sh --prebuilt` (installed binaries hash-identical to the build) and reported `sudo`, the Lock Screen and an admin dialog all working with the iPad. The host log shows no refused request; it has no `lockscreen`/`admin` session line after 17:22, so those two rest on the owner's report.
+
+## CHANGE ID: P1-103 — Touch ID status and setup text match Install Extras (audit BUG-02)
+
+- New `TouchIDSetup` (WDHostCore): the Security tab reports the sudo module, the Lock Screen plugin and this user's key, names what is missing, and says when the iPad's key changed since installing.
+- The stale "Copy Setup Command" (`sudo scripts/install-pam.sh`, which exists only in a source checkout) is gone; the Mac and the iPad point to Install Extras.
+- **VERIFIED:** 2 new tests; on this Mac the installed key equals the iPad's key, so the panel reads "Installed".
+
+## CHANGE ID: P1-104 — No duplicate controllers from two threads (audit BUG-03)
+
+- `HostFleet.add` checks and appends under one lock; the watcher thread and the menu could each add an unbound Wi-Fi controller.
+- **VERIFIED:** build; one controller per device after five host restarts and two preset changes.
+
+## CHANGE ID: P1-105 — Ultra (4:4:4 10-bit) from ~36 to ~50 fps in motion (audit PERF-01)
+
+- `kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality` on the 4:4:4 lane only.
+- **A/B on this Mac and iPad** (90 s of scripted scrolling text and a moving gradient on the iPad display, Ultra, 80 Mbit/s, USB-C):
+
+  | Variant | Encode p50 / p99 | Encoded fps | Replaced before encode | iPad presented | Capture to send queue p50 |
+  |---|---|---|---|---|---|
+  | A: 0.5.6 | 28.9 / 30.1 ms | 36.1 | 39 % | 36.1 fps | 40.1 ms |
+  | B0: other fixes only | 29.3 / 30.4 ms | 35.3 | 41 % | 35.0 fps | 39.2 ms |
+  | B1: flush only at burst end | 29.1 / 56.2 ms | 35.7 | 40 % | 36.0 fps | 43.4 ms (rejected) |
+  | B2: speed priority | 19.3 / 20.7 ms | 52.0 | 12 % | 52.0 fps | 27.5 ms |
+  | B2, repeat | 20.0 / 21.0 ms | 49.7 | 16 % | 49.7 fps | 29.7 ms |
+
+- **Picture:** a still text frame captured on the iPad matches the Mac reference equally (PSNR 35.66 dB with and without), and B0 vs B2 on the iPad differ by PSNR 52.2 dB. In motion the 80 Mbit/s budget is shared by ~47 % more frames (avg 275 → 184 KB per frame).
+- iPad enqueued-to-glass is unchanged (p50 ~30 ms): the iPad keeps up at 50 fps.
+
+## CHANGE ID: P1-106 — Encoder warning and log sampling (audit PERF-03, LOG-01)
+
+- `MaxFrameDelayCount` is no longer set on lanes using low-latency rate control, which reject it (-12900) and hold no frames. Pro and Balanced after the change: 57-59 fps, encode p50 13.7-14.1 ms, no warning.
+- `FrameSampling` (WDSession) replaces `nanos % 300`, which sampled 1 frame in 36 on Apple silicon's clock: per-frame latency lines are now ~1 in 300 on both sides, still on the same frames. The iPad's speaker-packet line is every ~30 s instead of 2.5 s.
+- **VERIFIED:** 1 new test (rate on a simulated 24 MHz clock).
+
+## CHANGE ID: P1-107 — UI and copy (audit UI-01 to UI-06, CMT-01, BUG-04)
+
+- Mac panel: the "On" pill uses primary text with a green dot (was 1.9:1 in light mode); the off switch has a 3:1 edge; "Follows the iPad's refresh rate" and "The pointer moves at once" replace unmeasured numbers; the default state reads "Waiting for the iPad"; above 100 % the Mac speaker level notes that loud sound can distort.
+- iPad: text up to 17 pt follows Dynamic Type, capped at 125 % (identical at the default size); "High Color" named in the preset detail; Overview icon without sparkles; "Metal (experimental)" and stale comments corrected.
+- **BUG-04 corrected:** measured offline, `outputVolume` 1.5 does raise the level (peak 0.25 → 0.375), so the 150 % setting works; only the caption was added.
+- **VERIFIED:** live panel render in light and dark; iPad Release build. **NOT RUN:** the iPad Controls panel at large text sizes.
+
+## CHANGE ID: P1-108 — 0.5.6 build 16: the audit fixes join release 0.5.6
+
+**WHY (owner):** "jadikan satu dengan build 0.5.6 saja"; chosen: keep 0.5.6, build 16, replace the v0.5.6 assets.
+
+- `CFBundleVersion` 16 in `build-host-app.sh`, `CURRENT_PROJECT_VERSION` 16 in the iPad project. Contents: P1-099 to P1-107.
+- The guide (`docs/share/PANDUAN-INSTALASI.txt`) and the DMG's README and guide (`build-dmg.sh`) now say a new device pairs over USB-C first, and that Touch ID users rerun Install Extras for the new modules.
+- **VERIFIED:** `swift test` 204/204; DMG and IPA report 0.5.6 (16); the DMG app and modules are ad-hoc signed (no team); the DMG carries the new PAM module and AuthPlugin; the identifier scan of the unpacked DMG and IPA found nothing. The build-15 artifacts are kept in `dist/old-0.5.6-build15/`.

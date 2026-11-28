@@ -26,7 +26,7 @@ struct PanelSnapshot {
         var approved: Bool
     }
 
-    var stateText = "Waiting for the iPad on USB"
+    var stateText = "Waiting for the iPad"
     var stateColor: Color = .orange
     var connectedFor: String?
     /// Other iPads streaming at the same time (D-041).
@@ -55,7 +55,7 @@ struct PanelSnapshot {
     var bothSpeakersBalance: Double = 1.0
     var paired: [Paired] = []
     var connectionCode: String?
-    var pamInstalled = false
+    var touchID = TouchIDSetup(sudoModule: false, lockScreenPlugin: false, installedKey: nil, iPadKey: nil)
     var pamAllowWiFi = false
     var pamEnrolledKeyFingerprint: String?
     var openAtLogin = false
@@ -90,7 +90,6 @@ struct PanelActions {
     var openAccessibility: () -> Void = {}
     var openScreenRecording: () -> Void = {}
     var forgetPaired: () -> Void = {}
-    var copyPamSetupCommand: () -> Void = {}
     var setPamAllowWiFi: (Bool) -> Void = { _ in }
     var showLog: () -> Void = {}
     var quit: () -> Void = {}
@@ -305,13 +304,13 @@ struct StatusPanelView: View {
             }
             Card {
                 ToggleLine(title: "Match the iPad's refresh rate",
-                           detail: s.matchRefresh ? "Up to 120 Hz on iPad Pro (ProMotion); 60 Hz on other iPads"
+                           detail: s.matchRefresh ? "Follows the iPad's refresh rate, up to its maximum"
                                : "Always 60 Hz (less work for the Mac)",
                            isOn: Binding(get: { s.matchRefresh },
                                          set: { model.snapshot.matchRefresh = $0; model.actions.setMatchRefresh($0) }))
                 CardDivider()
                 ToggleLine(title: "Draw the cursor on the iPad",
-                           detail: s.localCursor ? "The pointer moves with ~1 ms delay instead of waiting for the video"
+                           detail: s.localCursor ? "The pointer moves at once instead of waiting for the video"
                                : "The cursor is part of the video (as before)",
                            isOn: Binding(get: { s.localCursor },
                                          set: { model.snapshot.localCursor = $0; model.actions.setLocalCursor($0) }))
@@ -412,7 +411,7 @@ struct StatusPanelView: View {
                             .frame(height: NativeSlider.sliderHeight + 2 * NativeSlider.overflow)
                             .padding(.horizontal, -NativeSlider.overflow)
                             .frame(height: NativeSlider.sliderHeight)
-                        Text("Balance the Mac speaker against the iPad speaker.")
+                        Text(s.bothSpeakersBalance > 1.0 ? "Above 100 % the Mac speaker is boosted; very loud sound can distort." : "Balance the Mac speaker against the iPad speaker.")
                             .font(.system(size: 10.5)).foregroundStyle(Color.caption)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -434,6 +433,15 @@ struct StatusPanelView: View {
                 }
             }
             LinkRow(title: "Sound Settings…", symbol: "arrow.up.forward.app", action: model.actions.openSoundSettings)
+        }
+    }
+
+    private static func touchIDTitle(_ status: TouchIDSetup.Status) -> String {
+        switch status {
+        case .notInstalled: return "Not installed"
+        case .partial(let missing): return "Missing: " + missing.map(\.rawValue).joined(separator: ", ")
+        case .keyChanged: return "The iPad's key changed: run Install Extras again"
+        case .installed: return "Installed"
         }
     }
 
@@ -469,12 +477,12 @@ struct StatusPanelView: View {
             }
             Card {
                 Text("iPad Touch ID / Face ID for Mac").font(.system(size: 11, weight: .semibold))
-                StatusLine(symbol: s.pamInstalled ? "touchid" : "lock.shield",
-                           title: s.pamInstalled ? "PAM module installed" : "Not installed",
+                StatusLine(symbol: s.touchID.status == .installed ? "touchid" : "lock.shield",
+                           title: Self.touchIDTitle(s.touchID.status),
                            detail: s.pamEnrolledKeyFingerprint.map {
-                               "Enrolled key \($0) · \(s.pamAllowWiFi ? "USB-C + Wi-Fi" : "USB-C only")"
-                           } ?? "Approve sudo & Lock Screen using iPad Touch ID or Face ID",
-                           on: s.pamInstalled)
+                               "iPad key \($0) · \(s.pamAllowWiFi ? "USB-C + Wi-Fi" : "USB-C only")"
+                           } ?? "Approve sudo, the Lock Screen and admin dialogs with the iPad",
+                           on: s.touchID.status == .installed)
                 CardDivider()
                 ToggleLine(title: "Allow over encrypted Wi-Fi",
                            detail: s.pamAllowWiFi
@@ -483,12 +491,9 @@ struct StatusPanelView: View {
                            isOn: Binding(get: { s.pamAllowWiFi },
                                          set: { model.snapshot.pamAllowWiFi = $0; model.actions.setPamAllowWiFi($0) }))
                 CardDivider()
-                Button(action: model.actions.copyPamSetupCommand) {
-                    Label(s.pamInstalled ? "Copy Re-enroll Command" : "Copy Setup Command", systemImage: "doc.on.doc")
-                        .font(.system(size: 12))
-                }
-                .buttonStyle(.bordered)
-                Text("Enroll a key on the iPad (Controls › More), then run the copied sudo command in Terminal.")
+                Text(s.touchID.status == .installed
+                     ? "After re-enrolling on the iPad, run Install Extras from the WiredDisplay disk image again."
+                     : "Enroll a key on the iPad (Controls › More), then run Install Extras from the WiredDisplay disk image.")
                     .font(.system(size: 10.5)).foregroundStyle(Color.caption)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -643,11 +648,15 @@ private struct StatusLine: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 8)
-            Text(on ? "On" : "Off")
-                .font(.system(size: 11, weight: .semibold))
-                .padding(.horizontal, 8).padding(.vertical, 3)
-                .foregroundStyle(on ? Color.green : .secondary)
-                .background(Capsule().fill(on ? Color.green.opacity(0.18) : Color(nsColor: .quaternarySystemFill)))
+            // Primary text with a green dot: green text on its tint was 1.9:1 in light mode.
+            HStack(spacing: 4) {
+                if on { Circle().fill(Color.green).frame(width: 6, height: 6) }
+                Text(on ? "On" : "Off")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(on ? Color.primary : .secondary)
+            }
+            .padding(.horizontal, 8).padding(.vertical, 3)
+            .background(Capsule().fill(on ? Color.green.opacity(0.18) : Color(nsColor: .quaternarySystemFill)))
         }
     }
 }
@@ -812,6 +821,8 @@ private struct KitSwitch: View {
         ZStack(alignment: .leading) {
             Capsule()
                 .fill(isOn ? Color(nsColor: .controlAccentColor) : Color.primary.opacity(0.1))
+                // The off track needs a 3:1 edge against the panel (WCAG 1.4.11).
+                .overlay(Capsule().strokeBorder(Color.primary.opacity(isOn ? 0 : 0.5), lineWidth: 1))
                 .frame(width: track.width, height: track.height)
             knobView
                 .frame(width: pressed ? lens.width : knob.width, height: pressed ? lens.height : knob.height)

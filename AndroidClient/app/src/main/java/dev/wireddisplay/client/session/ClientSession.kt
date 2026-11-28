@@ -764,7 +764,13 @@ class ClientSession(
     private fun handleFrame(frame: Frame, transport: ActiveTransport) {
         when (frame.header.stream) {
             StreamType.CONTROL -> {
-                when (val msg = SessionCodec.decodeControl(frame.payload)) {
+                val msg = try {
+                    SessionCodec.decodeControl(frame.payload)
+                } catch (e: WireError.UnknownTag) {
+                    Log.i(TAG, "ignoring control message ${e.tag} from the Mac (a newer Mac app?)")
+                    return
+                }
+                when (msg) {
                     is ControlMessage.HelloMsg -> {
                         if (peerHello != null || pendingHostHello != null || msg.hello.role != PeerRole.HOST) {
                             throw WireError.InvalidValue("unexpected hello")

@@ -14,13 +14,13 @@ final class AppModel {
     private(set) var session: ClientSession?
     private var sink: SwitchableSink?
 
-    /// Experimental Metal renderer (D-040), remembered.
+    /// Metal renderer (D-040, on by default), remembered.
     func setMetalRenderer(_ on: Bool) {
         UserDefaults.standard.set(on, forKey: VideoView.metalRendererKey)
         let usable = on && videoView.metalRenderer != nil
         videoView.usesMetal = usable
         sink?.select(metal: usable)
-        ClientLog.write("renderer: \(usable ? "Metal (experimental)" : "system display layer")")
+        ClientLog.write("renderer: \(usable ? "Metal" : "system display layer")")
     }
     /// Diagnostics: the E-05 loopback echo on 127.0.0.1:9000, so cable
     /// throughput can be measured with `wd-usbmux-probe echo` without swapping

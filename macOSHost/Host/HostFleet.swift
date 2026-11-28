@@ -167,6 +167,8 @@ final class HostFleet: @unchecked Sendable {
         }
     }
 
+    /// Adds a controller unless one for `serial` (or another unbound one) already exists.
+    /// Check and append happen under one lock: the watcher thread and the main thread both add (audit BUG-03).
     private func add(serial: String?) {
         let controller = HostController(options: options, deviceSerial: serial, audioRouter: audioRouter,
                                         confirmPairing: confirmPairing) { _ in }
@@ -194,7 +196,12 @@ final class HostFleet: @unchecked Sendable {
                 session.resolve(PamBridgeServer.Response(status: status, signature: signature))
             }
         }
-        lock.withLock { $0.controllers.append(controller) }
+        let appended: Bool = lock.withLock {
+            guard !$0.controllers.contains(where: { $0.deviceSerial == serial }) else { return false }
+            $0.controllers.append(controller)
+            return true
+        }
+        guard appended else { return }
         if let serial {
             Log.info("fleet: serving cabled device \(serial.prefix(8))… (\(controllers.count) total)")
         } else {

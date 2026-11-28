@@ -49,6 +49,8 @@ typedef struct {
     AuthorizationEngineRef engine;
     int is_admin;
     _Atomic int deactivating;
+    /// 0 = open, 1 = deactivated, 2 = result sent: exactly one of Deactivate and SetResult wins.
+    _Atomic int finished;
     _Atomic int bridge_fd;
     _Atomic int refcount;
 } WDMechanism;
@@ -293,6 +295,13 @@ static int is_user_in_admin_group(const char *username, gid_t primary_gid) {
     return 0;
 }
 
+// Admin approvals are for the person at the Mac: a requesting app can pre-fill another
+// username in the context, so it must be the console user (audit SEC-04).
+static int is_console_user(uid_t uid) {
+    struct stat cst;
+    return stat("/dev/console", &cst) == 0 && cst.st_uid != 0 && cst.st_uid == uid;
+}
+
 static void *unlock_worker(void *arg) {
     WDMechanism *m = (WDMechanism *)arg;
     char username[65] = {0};
@@ -302,6 +311,7 @@ static void *unlock_worker(void *arg) {
     uint8_t pubkey[WD_PUBKEY_LEN];
 
     if (resolve_console_user(m, username, &uid, &gid, home_dir) != 0 ||
+        (m->is_admin && !is_console_user(uid)) ||
         (m->is_admin && !is_user_in_admin_group(username, gid)) ||
         load_enrolled_pubkey(username, pubkey) != 0) {
         // Not enrolled (or not admin for admin mechanism): stay passive until deactivated.
@@ -385,7 +395,9 @@ static void *unlock_worker(void *arg) {
             msg[moff++] = 0;
             memcpy(msg + moff, nonce, WD_NONCE_LEN); moff += WD_NONCE_LEN;
 
-            if (verify_p256_signature(pubkey, msg, moff, sig, sig_len)) {
+            int open_state = 0;
+            if (verify_p256_signature(pubkey, msg, moff, sig, sig_len) &&
+                atomic_compare_exchange_strong(&m->finished, &open_state, 2)) {
                 if (m->is_admin) {
                     AuthorizationValue userVal = { usr_len + 1, username };
                     m->plugin->callbacks->SetContextValue(m->engine, kAuthorizationEnvironmentUsername,
@@ -419,6 +431,7 @@ static OSStatus MechanismCreate(AuthorizationPluginRef inPlugin,
     m->engine = inEngine;
     m->is_admin = (mechanismId && strcmp(mechanismId, "admin") == 0) ? 1 : 0;
     atomic_init(&m->deactivating, 0);
+    atomic_init(&m->finished, 0);
     atomic_init(&m->bridge_fd, -1);
     atomic_init(&m->refcount, 1);
     *outMechanism = m;
@@ -443,6 +456,8 @@ static OSStatus MechanismInvoke(AuthorizationMechanismRef inMechanism) {
 
 static OSStatus MechanismDeactivate(AuthorizationMechanismRef inMechanism) {
     WDMechanism *m = (WDMechanism *)inMechanism;
+    int open_state = 0;
+    atomic_compare_exchange_strong(&m->finished, &open_state, 1);
     atomic_store(&m->deactivating, 1);
     int fd = atomic_exchange(&m->bridge_fd, -1);
     if (fd >= 0) {
@@ -453,6 +468,8 @@ static OSStatus MechanismDeactivate(AuthorizationMechanismRef inMechanism) {
 
 static OSStatus MechanismDestroy(AuthorizationMechanismRef inMechanism) {
     WDMechanism *m = (WDMechanism *)inMechanism;
+    int open_state = 0;
+    atomic_compare_exchange_strong(&m->finished, &open_state, 1);
     atomic_store(&m->deactivating, 1);
     int fd = atomic_exchange(&m->bridge_fd, -1);
     if (fd >= 0) {

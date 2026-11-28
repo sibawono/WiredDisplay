@@ -177,7 +177,14 @@ class SecureChannel(
         )
         val opened = Frame(openedHeader, plaintext)
         if (openedHeader.stream == StreamType.CONTROL) {
-            when (val msg = SessionCodec.decodeControl(plaintext)) {
+            // A newer peer's unknown control message passes once verified (audit BUG-01).
+            val msg = try {
+                SessionCodec.decodeControl(plaintext)
+            } catch (_: WireError.UnknownTag) {
+                if (verifiedPeer == null) throw ChannelError.NotVerified(openedHeader.stream)
+                return@synchronized Incoming.Message(opened)
+            }
+            when (msg) {
                 is ControlMessage.AuthHelloMsg -> throw ChannelError.UnexpectedAuthHello
                 is ControlMessage.AuthProof -> return@synchronized Incoming.Verified(verify(msg.signature))
                 is ControlMessage.Ping, is ControlMessage.Pong, is ControlMessage.Bye ->

@@ -137,6 +137,35 @@ final class SecureChannelTests: XCTestCase {
         }
     }
 
+    /// BUG-01 (audit 2026-11-28): a control message from a newer peer is passed on, not fatal.
+    func testUnknownControlTagFromNewerPeerPassesAfterVerification() throws {
+        XCTAssertTrue(SessionCodec.hasUnknownControlTag([200, 1, 2]))
+        XCTAssertFalse(SessionCodec.hasUnknownControlTag(SessionCodec.encode(.ping(1))))
+        XCTAssertFalse(SessionCodec.hasUnknownControlTag([]))
+        XCTAssertThrowsError(try SessionCodec.decodeControl([200, 1, 2]))
+
+        let (host, client) = try handshake()
+        try host.send(.control, [200, 1, 2])
+        try host.flush(to: client)
+        XCTAssertEqual(client.messages.last?.payload, [200, 1, 2])
+        try host.send(.control, SessionCodec.encode(.ping(9)))
+        try host.flush(to: client)
+        XCTAssertEqual(try SessionCodec.decodeControl(try XCTUnwrap(client.messages.last).payload), .ping(9))
+    }
+
+    func testUnknownControlTagBeforeVerificationIsRejected() throws {
+        let host = End(.host, session: 1), client = End(.client, session: 2)
+        try host.sendHello()
+        try client.sendHello()
+        try host.flush(to: client)
+        try client.flush(to: host)
+        host.outbox = []                      // the client never verifies the host
+        try host.send(.control, [200])
+        XCTAssertThrowsError(try host.flush(to: client)) {
+            XCTAssertEqual($0 as? SecureChannel.Error, .notVerified(.control))
+        }
+    }
+
     func testImpostorWithStolenPublicKeyIsRejected() throws {
         // The attacker announces the real iPad's public identity key but only
         // holds its own private key.

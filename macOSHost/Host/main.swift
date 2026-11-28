@@ -268,9 +268,14 @@ final class StatusMenu: NSObject {
         s.bothSpeakersBalance = HostController.bothSpeakersBalance
         s.paired = controller.trust.peers.map { .init(name: $0.name, model: $0.model, key: String($0.fingerprint.prefix(8))) }
         if status.iPadName != nil { s.connectionCode = controller.connectionCode.withLock { $0 } }
-        s.pamInstalled = FileManager.default.fileExists(atPath: "/usr/local/lib/pam/pam_wireddisplay.so")
+        let bioKey = controller.biometricPublicKey
+        s.touchID = TouchIDSetup(
+            sudoModule: FileManager.default.fileExists(atPath: "/usr/local/lib/pam/pam_wireddisplay.so"),
+            lockScreenPlugin: FileManager.default.fileExists(atPath: "/Library/Security/SecurityAgentPlugins/WiredDisplayAuth.bundle"),
+            installedKey: try? String(contentsOfFile: "/Library/Application Support/WiredDisplay/pam_keys/\(NSUserName()).pub", encoding: .utf8),
+            iPadKey: bioKey.map { Data($0).base64EncodedString() })
         s.pamAllowWiFi = UserDefaults.standard.bool(forKey: HostFleet.pamAllowWiFiKey)
-        if let bioKey = controller.biometricPublicKey {
+        if let bioKey {
             s.pamEnrolledKeyFingerprint = String(SecureChannel.fingerprint(bioKey).prefix(8))
         }
         s.openAtLogin = LoginItem.isEnabled
@@ -345,11 +350,6 @@ final class StatusMenu: NSObject {
         a.openAccessibility = { Self.open("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") }
         a.openScreenRecording = { Self.open("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") }
         a.forgetPaired = { [weak self] in self?.forgetPaired() }
-        a.copyPamSetupCommand = {
-            let pb = NSPasteboard.general
-            pb.clearContents()
-            pb.setString("sudo scripts/install-pam.sh", forType: .string)
-        }
         a.setPamAllowWiFi = { [weak self] allow in
             fleet.setPamAllowWiFi(allow)
             self?.refresh()
