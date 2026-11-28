@@ -13,13 +13,33 @@ if [[ "${EUID}" -ne 0 ]]; then
 fi
 
 WITH_SCREENSAVER=1
-for arg in "$@"; do
-    case "$arg" in
+PREBUILT=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
         --with-screensaver) WITH_SCREENSAVER=1 ;;
         --sudo-only) WITH_SCREENSAVER=0 ;;
-        *) echo "unknown option: $arg" >&2; exit 1 ;;
+        # Use pam_wireddisplay.so and WiredDisplayAuth.bundle from DIR (the DMG's
+        # "Install Extras" does this), so the Mac needs neither clang nor python3.
+        --prebuilt) PREBUILT="${2:?--prebuilt needs a directory}"; shift ;;
+        *) echo "unknown option: $1" >&2; exit 1 ;;
     esac
+    shift
 done
+
+PB=/usr/libexec/PlistBuddy
+# Prints the index of NAME in the plist's :rule array; fails if absent.
+rule_index() {
+    local file="$1" name="$2" i=0 value
+    while value=$("${PB}" -c "Print :rule:${i}" "${file}" 2>/dev/null); do
+        [[ "${value}" == "${name}" ]] && { echo "${i}"; return 0; }
+        i=$((i + 1))
+    done
+    return 1
+}
+# True when the plist is class "rule" with a non-empty :rule array.
+is_rule_array() {
+    [[ "$("${PB}" -c "Print :class" "$1" 2>/dev/null)" == "rule" ]] && "${PB}" -c "Print :rule:0" "$1" >/dev/null 2>&1
+}
 
 TARGET_USER="${SUDO_USER:-$(stat -f%Su /dev/console)}"
 if [[ -z "${TARGET_USER}" || "${TARGET_USER}" == "root" ]]; then
@@ -29,9 +49,6 @@ fi
 TARGET_HOME=$(dscl . -read "/Users/${TARGET_USER}" NFSHomeDirectory | awk '{print $2}')
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SRC="${REPO_ROOT}/MacVirtualDevices/PamModule/pam_wireddisplay.c"
-AUTH_SRC="${REPO_ROOT}/MacVirtualDevices/AuthPlugin/WiredDisplayAuth.c"
-AUTH_PLIST="${REPO_ROOT}/MacVirtualDevices/AuthPlugin/Info.plist"
 INSTALL_DIR="/Library/Application Support/WiredDisplay"
 KEY_DIR="${INSTALL_DIR}/pam_keys"
 PAM_DIR="/usr/local/lib/pam"
@@ -68,14 +85,19 @@ chown root:wheel "${INSTALL_DIR}" "${KEY_DIR}" "${PAM_DIR}"
 chmod 755 "${INSTALL_DIR}" "${KEY_DIR}" "${PAM_DIR}"
 rm -f "${OLD_PAM_SO}"
 
-TMP_SO="$(mktemp -d)/pam_wireddisplay.so"
-trap 'rm -rf "$(dirname "${TMP_SO}")"' EXIT
-
-echo "Building pam_wireddisplay.so..."
-clang -shared -fPIC -O2 -Wall -Wextra -arch arm64 \
-    -framework Security -framework CoreFoundation -lpam \
-    "${SRC}" -o "${TMP_SO}"
-codesign --force --sign - "${TMP_SO}"
+TMP_BUILD_DIR="$(mktemp -d)"
+trap 'rm -rf "${TMP_BUILD_DIR}"' EXIT
+if [[ -n "${PREBUILT}" ]]; then
+    MODULES="${PREBUILT}"
+else
+    echo "Building the Touch ID / Face ID modules..."
+    MODULES="${TMP_BUILD_DIR}/modules"
+    OUT="${MODULES}" "${REPO_ROOT}/scripts/build-pam-modules.sh" >/dev/null
+fi
+TMP_SO="${MODULES}/pam_wireddisplay.so"
+for f in "${TMP_SO}" "${MODULES}/WiredDisplayAuth.bundle"; do
+    [[ -e "${f}" ]] || { echo "error: missing ${f}" >&2; exit 1; }
+done
 
 install -o root -g wheel -m 755 "${TMP_SO}" "${PAM_SO}"
 install -o root -g wheel -m 644 "${CACHED_KEY}" "${KEY_FILE}"
@@ -131,15 +153,7 @@ if [[ -f "/etc/pam.d/screensaver" ]] && grep -Fq "pam_wireddisplay.so" "/etc/pam
 fi
 
 if [[ "${WITH_SCREENSAVER}" -eq 1 ]]; then
-    echo "Building WiredDisplayAuth.bundle for macOS Lock Screen..."
-    TMP_BUILD_DIR="$(dirname "${TMP_SO}")"
-    TMP_BUNDLE="${TMP_BUILD_DIR}/WiredDisplayAuth.bundle"
-    mkdir -p "${TMP_BUNDLE}/Contents/MacOS"
-    cp "${AUTH_PLIST}" "${TMP_BUNDLE}/Contents/Info.plist"
-    clang -bundle -fPIC -O2 -Wall -Wextra -arch arm64 \
-        -framework Security -framework CoreFoundation \
-        "${AUTH_SRC}" -o "${TMP_BUNDLE}/Contents/MacOS/WiredDisplayAuth"
-    codesign --force --sign - "${TMP_BUNDLE}"
+    TMP_BUNDLE="${MODULES}/WiredDisplayAuth.bundle"
 
     mkdir -p "/Library/Security/SecurityAgentPlugins"
     rm -rf "${AUTH_BUNDLE_DIR}"
@@ -180,20 +194,13 @@ EOF
     SS_CURRENT="${TMP_BUILD_DIR}/ss_current.plist"
     SS_UPDATED="${TMP_BUILD_DIR}/ss_updated.plist"
     security authorizationdb read system.login.screensaver > "${SS_CURRENT}" 2>/dev/null
-    python3 - "${SS_CURRENT}" "${SS_UPDATED}" "${AUTH_RULE_NAME}" <<'PYEOF'
-import plistlib, sys
-src, dst, rule_name = sys.argv[1], sys.argv[2], sys.argv[3]
-with open(src, "rb") as f:
-    data = plistlib.load(f)
-if data.get("class") != "rule" or not isinstance(data.get("rule"), list):
-    sys.stderr.write("error: unexpected system.login.screensaver structure; refusing to modify\n")
-    sys.exit(1)
-if rule_name not in data["rule"]:
-    data["rule"].insert(0, rule_name)
-data.setdefault("k-of-n", 1)
-with open(dst, "wb") as f:
-    plistlib.dump(data, f)
-PYEOF
+    if ! is_rule_array "${SS_CURRENT}"; then
+        echo "error: unexpected system.login.screensaver structure; refusing to modify" >&2
+        exit 1
+    fi
+    cp "${SS_CURRENT}" "${SS_UPDATED}"
+    rule_index "${SS_UPDATED}" "${AUTH_RULE_NAME}" >/dev/null || "${PB}" -c "Add :rule:0 string ${AUTH_RULE_NAME}" "${SS_UPDATED}"
+    "${PB}" -c "Print :k-of-n" "${SS_UPDATED}" >/dev/null 2>&1 || "${PB}" -c "Add :k-of-n integer 1" "${SS_UPDATED}"
     security authorizationdb write system.login.screensaver < "${SS_UPDATED}" 2>/dev/null
     echo "Registered ${AUTH_RULE_NAME} in system.login.screensaver (parallel k-of-n: 1)"
 
@@ -231,14 +238,7 @@ EOF
         if ! security authorizationdb read "${right}" > "${CUR_PLIST}" 2>/dev/null; then
             continue
         fi
-        if python3 - "${CUR_PLIST}" "${ADMIN_RULE_NAME}" <<'PYEOF'
-import plistlib, sys
-with open(sys.argv[1], "rb") as f:
-    data = plistlib.load(f)
-rules = data.get("rule")
-sys.exit(0 if (data.get("class") == "rule" and isinstance(rules, list) and sys.argv[2] in rules) else 1)
-PYEOF
-        then
+        if is_rule_array "${CUR_PLIST}" && rule_index "${CUR_PLIST}" "${ADMIN_RULE_NAME}" >/dev/null; then
             continue
         fi
         BACKUP_FILE="${AUTHDB_BACKUP_DIR}/${right}.plist"
@@ -281,4 +281,4 @@ if [[ "${WITH_SCREENSAVER}" -eq 1 ]]; then
     echo "  Test Lock Screen:   Control+Command+Q -> press Enter -> Touch ID on iPad"
     echo "  Test Admin Dialog:  Unlock a System Settings lock or install a .pkg -> Touch ID on iPad"
 fi
-echo "  To remove later:    sudo scripts/uninstall-pam.sh"
+echo "  To remove later:    Uninstall Extras.command in the DMG, or sudo scripts/uninstall-pam.sh"

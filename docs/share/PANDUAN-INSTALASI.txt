@@ -1,9 +1,9 @@
-WiredDisplay 0.5.5: Panduan Instalasi
+WiredDisplay 0.5.6: Panduan Instalasi
 iPad jadi layar Mac lewat kabel USB-C atau Wi-Fi lokal terenkripsi (dengan suara dan input sentuh)
 
 Isi paket
-- WiredDisplay-0.5.5.dmg   → app untuk Mac (host)
-- WiredDisplay-0.5.5.ipa   → app untuk iPad (dipasang lewat AltStore atau SideStore)
+- WiredDisplay-0.5.6.dmg   → app untuk Mac (host)
+- WiredDisplay-0.5.6.ipa   → app untuk iPad (dipasang lewat AltStore atau SideStore)
 - PANDUAN-INSTALASI.txt    → file ini
 
 Yang dibutuhkan
@@ -33,7 +33,7 @@ BAGIAN A: Pasang app iPad lewat AltStore atau SideStore
 5. Nyalakan Developer Mode: Settings › Privacy & Security › Developer Mode → On.
    iPad akan restart; setelah menyala, konfirmasi "Turn On".
 
-6. Kirim file WiredDisplay-0.5.5.ipa ke iPad (AirDrop, atau simpan di app Files).
+6. Kirim file WiredDisplay-0.5.6.ipa ke iPad (AirDrop, atau simpan di app Files).
    Buka AltStore › My Apps › tombol + di kiri atas → pilih file .ipa itu.
    Tunggu sampai WiredDisplay muncul di layar utama.
    (Alternatif: pasang lewat SideStore jika kamu memakai SideStore.)
@@ -52,7 +52,7 @@ Perpanjangan 7 hari (penting)
 
 BAGIAN B: Pasang app Mac (host)
 
-1. Buka WiredDisplay-0.5.5.dmg. Seret WiredDisplayHost ke folder Applications.
+1. Buka WiredDisplay-0.5.6.dmg. Seret WiredDisplayHost ke folder Applications.
 
 2. Buka WiredDisplayHost. Karena app ini tidak dinotarisasi Apple, macOS akan
    menolak saat pertama dibuka. Buka System Settings › Privacy & Security,
@@ -69,10 +69,15 @@ BAGIAN B: Pasang app Mac (host)
    Setelah memberi izin Screen Recording, keluar lalu buka lagi app-nya bila
    diminta.
 
-5. Opsional, suara: buka folder "Audio Driver" di DMG, klik dua kali
-   "Install Audio Driver.command" (minta kata sandi admin Mac kamu). Setelah itu
-   "iPad Speaker" dan "iPad Microphone" muncul di System Settings › Sound.
-   Untuk menghapus: "Uninstall Audio Driver.command".
+5. Opsional, suara dan Touch ID / Face ID: di DMG klik dua kali
+   "Install Extras.command". Ia menanyakan dua hal, lalu meminta kata sandi
+   admin Mac sekali:
+   - Perangkat audio: "iPad Speaker" dan "iPad Microphone" muncul di
+     System Settings › Sound.
+   - Buka Mac dengan Touch ID / Face ID di iPad (sudo, Lock Screen, dialog
+     admin). Sebelumnya ketuk Controls › More › Enroll di iPad saat tersambung.
+     Kata sandi Mac tetap berfungsi seperti biasa.
+   Untuk melepas keduanya: "Uninstall Extras.command".
    Sudah pernah memasang driver dari versi 0.1.0? Pasang ulang driver ini:
    sejak versi 0.2.0 driver-nya baru.
    Di Google Meet/Zoom pilih Microphone: "iPad Microphone" dan

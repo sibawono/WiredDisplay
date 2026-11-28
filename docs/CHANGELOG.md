@@ -1507,3 +1507,53 @@ During scrolling, sampled medians were 0.05 ms capture-delivery-to-conversion, 4
 - Deployed on the owner's yes (Cloudflare Pages 97b98cf8). `/` and `/id/` return 200 and `/en/` returns 301. The live CSS matches the build, and both download links return 200.
 
 **NOT DONE:** the iPad Controls captures on the site (`ipad-ctl-*.webp`, from 0.5.3) do not show 0.5.5's sticky ⌘ ⌃ ⌥ ⇧ bar on the Soft Keyboard.
+
+## CHANGE ID: P1-095 — Website: Touch ID & Face ID section, iPad Controls captures from 0.5.5 (website only)
+
+- **New section "07 Touch ID & Face ID" (EN/ID).** It is placed after Sleep/Lock, and the later chapters are renumbered (08–11).
+  - Uses: `sudo`, the Lock Screen and admin dialogs.
+  - "How it stays safe", from P1-088 and P1-089: the key is in the Secure Enclave; the password is never stored; the Mac verifies the signature itself; each request carries a nonce bound to its service; only biometry is accepted, not the passcode; USB‑C by default, with Wi‑Fi as a separate switch.
+  - A note says the feature is optional, installed with `install-pam.sh` from source, and that some System Settings panes still ask for the password.
+- **Icons.** They are Apple's own SF Symbols `touchid` and `faceid`, rendered from macOS (owner's request). The website README records the source and the licence limit.
+- **iPad Controls gallery.** It now shows the 0.5.5 tabs Display, Audio, Input and More. The old "Keyboard" slide is replaced by More, which shows "Touch ID enrolled".
+  - The captures came from the owner's iPad Air 13″ (M2), with `devicectl capture screenshot` in a loop.
+  - Blurred: the Mac name (header and Paired Macs), the key and pairing IDs, and the desktop behind the panel.
+  - OCR of the exported slides reads the rest of the panel but no name or ID.
+- **VERIFIED:**
+  - 1440 × 900 and 375 × 812 with no overflow; no em dashes; the identifier scan of `dist` found only the site's own domain.
+  - Deployed on the owner's "Deploy" (Cloudflare Pages 9cb7b398). The live CSS matches the build and the live images are byte-identical.
+
+## CHANGE ID: P1-096 — One installer and one uninstaller for the extras (audio driver + Touch ID / Face ID); 0.5.6 (build 15) prepared
+
+**WHY (owner):** "untuk driver audio dan pam script, di release dmg bisa ngga dibuatin dalam bentuk 1 installer aja", "sekalian sama uninstallernya".
+
+**DMG:** the root now has "Install Extras.command" and "Uninstall Extras.command". The payload sits in a hidden `.extras/` folder: `WiredDisplayAudio.driver`, `pam_wireddisplay.so`, `WiredDisplayAuth.bundle`, `install-pam.sh` and `uninstall-pam.sh`. The old "Audio Driver" folder is gone.
+- **Install Extras:**
+  - It asks "audio devices? [Y/n]" and "Touch ID / Face ID? [y/N]", then for the Mac password once.
+  - Touch ID / Face ID is skipped, with the enrolment steps shown, when the iPad has not enrolled a key yet.
+- **Uninstall Extras:**
+  - It detects which extras are installed, lists them and asks for confirmation.
+  - It removes the driver and restarts coreaudiod, then runs `uninstall-pam.sh`, which restores the original authorizationdb rules.
+  - The app itself stays.
+
+**SCRIPTS:**
+- New `scripts/build-pam-modules.sh`: builds and ad-hoc signs both modules. It is used by build-dmg.sh and by install-pam.sh when run from source.
+- `install-pam.sh` has a new `--prebuilt DIR` option.
+- `install-pam.sh` and `uninstall-pam.sh` no longer use python3; plist edits use `/usr/libexec/PlistBuddy`. The Mac therefore needs neither clang nor python3, both of which require the Xcode Command Line Tools.
+
+**VERSION:** 0.5.6 (15) in `build-host-app.sh` and the iPad project. The guide and the DMG README describe the new installer.
+
+**BUILD FIX:** 75 untracked Finder/iCloud conflict copies ("… 2.*") broke the host build: `WDAoaUSB 2.c` caused duplicate symbols. 73 were byte-identical to their originals; the other 2 were pre-edit copies of the PAM scripts. All 75 were moved, not deleted, to `~/Documents/WiredDisplay-duplicates-backup-2026-11-28/`, keeping their paths.
+
+**VERIFIED:**
+- `swift test` 199/199.
+- DMG and IPA report 0.5.6 (15). The DMG app and the modules are ad-hoc signed, and the identifier scan of both artifacts found nothing.
+- The PlistBuddy helpers were tested on read-only copies of system.login.screensaver (find, delete, insert, k-of-n).
+- Dry runs from the mounted DMG: "n/n" installs nothing, and the uninstaller lists both extras and stops on "n".
+- **Unintended live run:** a dry run answering "n/y" was meant to stop at the password prompt. `sudo -v` passed without one (cached credentials or the iPad's Touch ID), so the installer reinstalled Touch ID / Face ID on this Mac from the DMG's prebuilt modules.
+  - Read-back afterwards shows the same state as before: the .so and the bundle are root:wheel and ad-hoc signed; `sudo_local` has one entry; system.login.screensaver has the unlock rule first with the original rules kept; the admin rights are wrapped as before.
+  - This broke the "agents never run sudo" rule and was reported to the owner.
+
+**NOT DONE:**
+- The owner's own check of `sudo` and the Lock Screen with the 0.5.6 modules.
+- Publishing 0.5.6 and updating the website; both wait for the owner's yes.

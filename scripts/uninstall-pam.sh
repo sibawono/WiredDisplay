@@ -44,23 +44,25 @@ ADMIN_RIGHTS=(
     "authenticate-admin-nonshared"
 )
 
+PB=/usr/libexec/PlistBuddy
+# Prints the index of NAME in the plist's :rule array; fails if absent.
+rule_index() {
+    local file="$1" name="$2" i=0 value
+    while value=$("${PB}" -c "Print :rule:${i}" "${file}" 2>/dev/null); do
+        [[ "${value}" == "${name}" ]] && { echo "${i}"; return 0; }
+        i=$((i + 1))
+    done
+    return 1
+}
+
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TMP_DIR}"' EXIT
 if security authorizationdb read system.login.screensaver > "${TMP_DIR}/ss.plist" 2>/dev/null; then
-    if python3 - "${TMP_DIR}/ss.plist" "${TMP_DIR}/ss_clean.plist" "${AUTH_RULE_NAME}" <<'PYEOF'
-import plistlib, sys
-src, dst, rule_name = sys.argv[1], sys.argv[2], sys.argv[3]
-with open(src, "rb") as f:
-    data = plistlib.load(f)
-rules = data.get("rule")
-if isinstance(rules, list) and rule_name in rules:
-    data["rule"] = [r for r in rules if r != rule_name]
-    with open(dst, "wb") as f:
-        plistlib.dump(data, f)
-    sys.exit(0)
-sys.exit(2)
-PYEOF
-    then
+    if rule_index "${TMP_DIR}/ss.plist" "${AUTH_RULE_NAME}" >/dev/null; then
+        cp "${TMP_DIR}/ss.plist" "${TMP_DIR}/ss_clean.plist"
+        while IDX=$(rule_index "${TMP_DIR}/ss_clean.plist" "${AUTH_RULE_NAME}"); do
+            "${PB}" -c "Delete :rule:${IDX}" "${TMP_DIR}/ss_clean.plist"
+        done
         security authorizationdb write system.login.screensaver < "${TMP_DIR}/ss_clean.plist" 2>/dev/null
         echo "Removed ${AUTH_RULE_NAME} from system.login.screensaver"
     fi
