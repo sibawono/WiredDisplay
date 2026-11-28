@@ -64,8 +64,10 @@ With every release, update the website to that release in the same step (owner: 
 
 Unreleased work on `main` stays off the site. Deploy only on the owner's yes.
 
-## State (2026-11-26)
-- v0.5.4 (build 13) is built and ready for release.
+## State (2026-11-28)
+- v0.5.5 (build 14) is released on GitHub (Latest) and the website shows 0.5.5. GitHub `main` (public) matches local `main` minus `docs/evidence`.
+- 0.5.5 adds (P1-081 to P1-093): iPad Touch ID/Face ID for `sudo`, Lock Screen and admin dialogs (PAM + AuthorizationPlugin, opt-in via `scripts/install-pam.sh`); capture→send queue ~9.5 ms at 4:4:4 10-bit; Ultra 1-frame lookahead removed; Metal freeze fix; session-scoped decode limits with Reset; 19 stability fixes; oversized-frame recovery; Balanced 4:4:4 warm-up; iPad onboarding/home screens; Android client (not released as an APK).
+- The SideStore Connect workflow is disabled on GitHub (`disabled_manually`), so releases are not sent to SideStore automatically.
 - 0.5.4 adds (P1-079 to P1-080): hybrid USB-C + encrypted local Wi-Fi (`NWFramedConnection`, Bonjour `_wireddisplay._tcp`, `SecureChannel` AES-256-GCM with mandatory SAS pairing on Wi-Fi, live Connection picker `USB-C` / `Auto` / `Wi-Fi` in General tab); adaptive bitrate controller (`AdaptiveBitrateController`); macOS 26.1/27 HiDPI physical size floor, in-place rotation, and poisoned serial retry; single-pass Annex-B encoding, live bitrate updates, and drop-replay timer; dynamic Display P3 `CAMetalLayer` colorspace (BUG-033); fix blank screen on reconnect (`clearToBlack()` render pass) and live transport status badge.
 - 0.5.3 adds (P1-067 to P1-077): SideStore Connect; RT-safe audio FIFOs & lock-free HAL timestamps; Both Speakers (Mac + iPad) with sync delay & balance; Apple Pencil direct click/drag, 240 Hz strokes, palm rejection, pressure & double-tap/squeeze; Magic Keyboard global shortcuts fixes & remaps; redesigned 4-tab iPad Controls panel (Display Space, Quality, Brightness, Mac Volume & Mute, 3×2 Quick Actions, confirmed Sleep Mac, On-Screen Soft Keyboard, Live Stats HUD); GPU/encode pipeline overlap; audio dropout smoothing; PLW-06 idle-sleep fix.
 - 0.5.2 adds (P1-057 to P1-063): More/Most Space when the iPad is the only screen (D-043); background audio lifecycle on the iPad; GPU 4:4:4 conversion; the `WDHostCore` module; CI; the publish scripts; UI contrast fixes; the movable, idle-fading Controls button with its own panel.

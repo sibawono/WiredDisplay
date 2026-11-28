@@ -1483,3 +1483,27 @@ During scrolling, sampled medians were 0.05 ms capture-delivery-to-conversion, 4
 - Report p99 for host encode and iPad presentation. Label the iPad's estimated transport segment from the host send queue.
 
 **PHYSICAL A/B:** One controlled USB-C run per variant on the iPad Air M2. The first Balanced transition's peak 4:4:4 encode time was 28.1 ms with the control and 11.6 ms with the candidate. The candidate spent 56.9 ms warming the encoder at startup. During motion, the median capture-to-send-queue latency went from 15.6 to 16.1 ms and median encode cadence went from 59.8 to 59.7 fps. The Ultra warm-up experiment did not consistently improve frame times, so it was excluded. End-to-end presentation was not measured because the iPad log pull failed.
+
+## CHANGE ID: P1-094 — Release 0.5.5 (build 14) and website 0.5.5
+
+**CONTENTS:** P1-081 to P1-093.
+
+**RELEASE:** https://github.com/sibawono/WiredDisplay/releases/tag/v0.5.5 (Latest, 2026-11-28).
+- Assets: WiredDisplay-0.5.5.dmg (1,313,657 B), WiredDisplay-0.5.5.ipa (847,884 B), PANDUAN-INSTALASI.txt.
+- The assets are the `dist/` builds made right after commit 53f7819. Both report 0.5.5 (14), and the DMG app is ad-hoc signed with no team. The identifier scan over the unpacked IPA and DMG found nothing.
+- The SideStore Connect workflow did not run, because it is disabled on GitHub (`disabled_manually`).
+
+**SCREENSHOTS:** `docs/images/host-{display,input,audio,general}.png` were re-rendered with `--render-panel-live` from the released DMG's app, with sample data. General shows "WiredDisplay 0.5.5". The sizes are unchanged from 0.5.4.
+
+**WEBSITE (separate repository):**
+- `VERSION = "0.5.5"` and `RELEASED = "2026-11-28"`.
+- The badge reads "Version 0.5.5, released 28 November 2026". The downloads are listed as 1.3 MB and 848 KB.
+- "New in 0.5.5" (EN/ID) has three cards:
+  - Touch ID/Face ID unlock, marked optional, with the System Settings caveat;
+  - about half the delay: 16–19 → ~9.5 ms, and the Ultra 110–123 ms delay removed;
+  - a picture that recovers on its own: no freeze, session-scoped limits with Reset, oversized-frame recovery.
+- The panel screenshots come from the 0.5.5 render, and there is a new `.ico-lock` icon.
+- Checked at 1440 × 900 and 375 × 812, with no overflow and no em dashes. The identifier scan found only the site's own domain.
+- Deployed on the owner's yes (Cloudflare Pages 97b98cf8). `/` and `/id/` return 200 and `/en/` returns 301. The live CSS matches the build, and both download links return 200.
+
+**NOT DONE:** the iPad Controls captures on the site (`ipad-ctl-*.webp`, from 0.5.3) do not show 0.5.5's sticky ⌘ ⌃ ⌥ ⇧ bar on the Soft Keyboard.
