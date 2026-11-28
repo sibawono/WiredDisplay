@@ -188,6 +188,12 @@ final class FrameParserTests: XCTestCase {
         XCTAssertThrowsError(try FrameHeader.decode(bytes)) {
             XCTAssertEqual($0 as? FrameError, .unknownFlags(1))
         }
+        // Camera stream carries H.264/HEVC frames and allows the keyframe flag.
+        let camFrame = try Frame(stream: .camera, flags: [.keyframe], sessionID: 1, sequence: 0,
+                                 timestampNanos: 123, payload: [0, 0, 0, 1, 0x65])
+        let decoded = try FrameHeader.decode(try camFrame.encoded())
+        XCTAssertEqual(decoded.stream, .camera)
+        XCTAssertTrue(decoded.flags.contains(.keyframe))
     }
 
     /// A caller that never drains must hit the bound instead of growing forever.

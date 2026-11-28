@@ -56,6 +56,10 @@ final class ConnectionModel {
     /// Mac default output volume (0...1) and mute state.
     var macVolume: Float = 0.7
     var macMuted = false
+    /// iPad front camera (FaceTime / Center Stage) webcam state.
+    var cameraOn = false
+    var cameraCenterStage = true
+    var cameraCenterStageSupported = false
     /// Non-nil while the Mac is at the Lock Screen waiting for Touch ID / Face ID unlock.
     var pendingUnlock: PendingUnlock?
 }
@@ -100,10 +104,18 @@ final class ClientSession: @unchecked Sendable {
     private var running = false
     /// What the user enabled; re-sent to the host on every new connection.
     private var audioRoute = (speaker: false, microphone: false)
+    private var cameraState = (enabled: false, centerStage: true)
+    /// Main queue: Mac requested camera on/off or Center Stage change.
+    var onCameraStateRequest: ((_ enabled: Bool, _ centerStage: Bool) -> Void)?
+    /// Any queue: Mac requested an immediate camera IDR keyframe.
+    var onCameraKeyframeRequest: (() -> Void)?
     /// False while the app is in the background with audio running (D-018).
     private var videoActive = true
     /// Active Lock Screen challenge ID (for restoring the Unlock pill if user cancels Touch ID while still locked).
     private var activeLockscreenID: UInt32?
+    /// Cooldown for auto-triggering Touch ID on `admin` challenges so a repeated/stale
+    /// macOS admin mechanism cannot spam modal prompts on the iPad.
+    private var lastAdminAutoPromptUptime: TimeInterval = -.infinity
     private let speakerSink: AudioJitterBuffer
     private var speakerPackets = 0
     private let presentMeter = FrameRateMeter()
@@ -222,6 +234,25 @@ final class ClientSession: @unchecked Sendable {
             // Bounded: never let microphone audio pile up behind a slow link.
             guard outstandingSends <= 64 else { return }
             send(stream: .microphone, payload: packet.encoded(), on: connection)
+        }
+    }
+
+    func setCameraState(enabled: Bool, centerStage: Bool) {
+        queue.async { [self] in
+            cameraState = (enabled, centerStage)
+            guard let connection, peerHello != nil else { return }
+            send(stream: .control, payload: SessionCodec.encode(.cameraState(enabled: enabled, centerStage: centerStage)),
+                 on: connection)
+        }
+    }
+
+    func sendCameraFrame(_ annexB: [UInt8], keyframe: Bool, timestampNanos: UInt64) {
+        queue.async { [self] in
+            guard let connection, peerHello != nil, cameraState.enabled else { return }
+            // Drop non-keyframes if the link is congested so display/input stay responsive.
+            if !keyframe && outstandingSends > 16 { return }
+            guard outstandingSends <= 32 else { return }
+            send(stream: .camera, payload: annexB, keyframe: keyframe, timestampNanos: timestampNanos, on: connection)
         }
     }
 
@@ -638,6 +669,15 @@ final class ClientSession: @unchecked Sendable {
                     let pending = ConnectionModel.PendingUnlock(
                         requestID: requestID, service: service, username: username, reason: reason, nonce: nonce
                     )
+                    if service == "admin" {
+                        let now = ProcessInfo.processInfo.systemUptime
+                        if now - lastAdminAutoPromptUptime < 15.0 {
+                            // Recent admin prompt already shown or dismissed: show the non-intrusive pill instead.
+                            ui { $0.pendingUnlock = pending }
+                            break
+                        }
+                        lastAdminAutoPromptUptime = now
+                    }
                     // macOS invokes WiredDisplayAuth when submitting the Lock Screen or opening an Admin dialog,
                     // so trigger the native Touch ID / Face ID sheet right away (no extra tap needed).
                     triggerLockscreenSign(pending)
@@ -661,6 +701,11 @@ final class ClientSession: @unchecked Sendable {
                                   on: current)
                     }
                 }
+            case .cameraState(let enabled, let centerStage):
+                let notify = onCameraStateRequest
+                DispatchQueue.main.async { notify?(enabled, centerStage) }
+            case .cameraRequestKeyframe:
+                onCameraKeyframeRequest?()
             case .pong, .requestKeyframe, .audioRoute, .videoActive, .decodeFailed, .panelSize, .sleepMac, .authResponse, .biometricPublicKey:
                 break
             case .authHello, .authProof:
@@ -741,6 +786,10 @@ final class ClientSession: @unchecked Sendable {
 
     /// Dismisses the fallback Retry Touch ID / Face ID banner without unlocking.
     func dismissPendingUnlock() {
+        queue.async { [self] in
+            activeLockscreenID = nil
+            lastAdminAutoPromptUptime = ProcessInfo.processInfo.systemUptime
+        }
         ui { $0.pendingUnlock = nil }
     }
 
@@ -782,6 +831,10 @@ final class ClientSession: @unchecked Sendable {
         send(stream: .control, payload: SessionCodec.encode(.audioRoute(speaker: audioRoute.speaker,
                                                                          microphone: audioRoute.microphone)),
              on: current)
+        if cameraState.enabled {
+            send(stream: .control, payload: SessionCodec.encode(.cameraState(enabled: true, centerStage: cameraState.centerStage)),
+                 on: current)
+        }
         if !videoActive {
             send(stream: .control, payload: SessionCodec.encode(.videoActive(false)), on: current)
         }
@@ -914,8 +967,8 @@ final class ClientSession: @unchecked Sendable {
         send(stream: .control, payload: SessionCodec.encode(.requestKeyframe), on: current)
     }
 
-    private func send(stream: StreamType, payload: [UInt8], on current: NWConnection) {
-        guard let wire = try? framer.frame(stream, payload: payload) else { return }
+    private func send(stream: StreamType, payload: [UInt8], keyframe: Bool = false, timestampNanos: UInt64? = nil, on current: NWConnection) {
+        guard let wire = try? framer.frame(stream, payload: payload, keyframe: keyframe, timestampNanos: timestampNanos) else { return }
         outstandingSends += 1
         current.send(content: Data(wire), completion: .contentProcessed { [weak self] error in
             // Already delivered on `self.queue` (via `incoming.start(queue: queue)`).

@@ -408,8 +408,10 @@ static void *unlock_worker(void *arg) {
                 return NULL;
             }
         }
-        // Cancelled or failed: wait briefly and re-arm with a fresh nonce so the user can retry.
-        usleep(500000);
+        // Cancelled or failed verification: do not spam Touch ID in a tight loop;
+        // stay passive until macOS deactivates this mechanism (Mac password still works).
+        while (!atomic_load(&m->deactivating)) usleep(250000);
+        break;
     }
 
     mech_release(m);

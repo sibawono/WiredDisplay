@@ -761,12 +761,13 @@ enum QuickAction: String, CaseIterable, Identifiable {
 
 struct ControlsContent: View {
     enum Tab: String, CaseIterable, Identifiable {
-        case display, audio, input, more
+        case display, audio, camera, input, more
         var id: String { rawValue }
         var title: String {
             switch self {
             case .display: return "Display"
             case .audio: return "Audio"
+            case .camera: return "Camera"
             case .input: return "Input"
             case .more: return "More"
             }
@@ -775,6 +776,7 @@ struct ControlsContent: View {
             switch self {
             case .display: return "display"
             case .audio: return "speaker.wave.2"
+            case .camera: return "video"
             case .input: return "pencil.and.scribble"
             case .more: return "gearshape"
             }
@@ -788,6 +790,9 @@ struct ControlsContent: View {
     @Binding var showStatsHUD: Bool
     @Binding var speaker: Bool
     @Binding var microphone: Bool
+    @Binding var camera: Bool
+    @Binding var cameraCenterStage: Bool
+    var cameraCenterStageSupported: Bool = false
     @Binding var macVolume: Double
     @Binding var macMuted: Bool
     @Binding var smoothGradients: Bool
@@ -834,6 +839,7 @@ struct ControlsContent: View {
                     switch tab {
                     case .display: displayTab
                     case .audio: audioTab
+                    case .camera: cameraTab
                     case .input: inputTab
                     case .more: moreTab
                     }
@@ -881,6 +887,8 @@ struct ControlsContent: View {
                             .font(.wd(14, weight: selected ? .semibold : .regular))
                         Text(item.title)
                             .font(.wd(10.5, weight: selected ? .semibold : .medium))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.85)
                     }
                     .foregroundStyle(selected ? .white : .white.opacity(0.6))
                     .frame(maxWidth: .infinity)
@@ -1033,6 +1041,39 @@ struct ControlsContent: View {
             card {
                 Label("Tip: turn on “Play on Mac speakers too” in the Mac menu bar to use both speakers together with sync & balance.",
                       systemImage: "hifispeaker.2")
+                    .font(.caption)
+                    .foregroundStyle(Brand.secondaryText)
+            }
+        }
+    }
+
+    private var cameraTab: some View {
+        Group {
+            card("iPad Camera") {
+                ToggleRow(symbol: "video.fill", title: "iPad camera to Mac",
+                          detail: "Sends front camera (1080p) as a Mac webcam.", isOn: $camera)
+                if camera {
+                    Label("Live: choose “OBS Virtual Camera” on the Mac", systemImage: "camera.metering.center.weighted")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.green)
+                        .padding(.leading, 34)
+                    if cameraCenterStageSupported {
+                        Divider().overlay(.white.opacity(0.08))
+                        ToggleRow(symbol: "person.and.background.dotted", title: "Center Stage",
+                                  detail: "Automatically keeps you framed as you move.", isOn: $cameraCenterStage)
+                    }
+                }
+                if let error = summary.lastError, !error.isEmpty {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 2)
+                }
+            }
+            card {
+                Label("Select “OBS Virtual Camera” in Google Meet, Zoom, Teams, or FaceTime on the Mac. OBS Studio does not need to stay open.",
+                      systemImage: "video.badge.checkmark")
                     .font(.caption)
                     .foregroundStyle(Brand.secondaryText)
             }

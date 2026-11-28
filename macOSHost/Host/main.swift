@@ -180,6 +180,8 @@ final class StatusMenu: NSObject {
     }
 
     private func panelShown() {
+        fleet?.cameraBridge.refreshAvailability()
+        refresh()
         let window = popover.window
         let screen = window?.screen
         Log.info("panel shown: \(window?.frame ?? .zero) on \(screen?.localizedName ?? "no screen"), visible \(screen?.visibleFrame ?? .zero)")
@@ -214,6 +216,10 @@ final class StatusMenu: NSObject {
             waiting.bothSpeakers = HostController.bothSpeakers
             waiting.bothSpeakersDelayMs = HostController.bothSpeakersDelayMs
             waiting.bothSpeakersBalance = HostController.bothSpeakersBalance
+            if let camStatus = fleet?.cameraBridge.status {
+                waiting.cameraAvailability = camStatus.availability
+                waiting.cameraError = camStatus.lastError
+            }
             waiting.version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
             model.snapshot = waiting
             return
@@ -259,6 +265,13 @@ final class StatusMenu: NSObject {
         s.screenRecording = CGPreflightScreenCaptureAccess()
         s.speaker = status.speaker
         s.microphone = status.microphone
+        let camStatus = controller.cameraBridge.status
+        s.cameraEnabled = status.camera
+        s.cameraCenterStage = status.cameraCenterStage
+        s.cameraAvailability = camStatus.availability
+        s.cameraFPS = camStatus.fps
+        s.cameraError = camStatus.lastError
+        s.cameraConnected = status.iPadName != nil
         s.autoSwitchAudio = controller.audioRouter.isEnabled
         s.matchRefresh = controller.refreshFollowsIPad
         s.localCursor = controller.localCursor
@@ -345,6 +358,13 @@ final class StatusMenu: NSObject {
         a.setBothSpeakers = { fleet.setBothSpeakers($0) }
         a.setBothSpeakersDelayMs = { fleet.setBothSpeakersDelayMs($0) }
         a.setBothSpeakersBalance = { fleet.setBothSpeakersBalance($0) }
+        a.setCamera = { [weak self] enabled, centerStage in
+            fleet.setCamera(enabled: enabled, centerStage: centerStage)
+            self?.refresh()
+        }
+        a.openOBS = {
+            NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/OBS.app"))
+        }
         a.openDisplaySettings = { Self.open("x-apple.systempreferences:com.apple.Displays-Settings.extension") }
         a.openSoundSettings = { Self.open("x-apple.systempreferences:com.apple.Sound-Settings.extension") }
         a.openAccessibility = { Self.open("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") }

@@ -321,6 +321,20 @@ final class AudioProtocolTests: XCTestCase {
         XCTAssertThrowsError(try SessionCodec.decodeControl([8, 2]), "videoActive must be 0/1")
     }
 
+    func testCameraControlMessagesRoundTrip() throws {
+        for message: ControlMessage in [
+            .cameraState(enabled: false, centerStage: false),
+            .cameraState(enabled: true, centerStage: false),
+            .cameraState(enabled: false, centerStage: true),
+            .cameraState(enabled: true, centerStage: true),
+            .cameraRequestKeyframe,
+        ] {
+            XCTAssertEqual(try SessionCodec.decodeControl(SessionCodec.encode(message)), message)
+        }
+        XCTAssertThrowsError(try SessionCodec.decodeControl([23, 4]), "unknown cameraState bit")
+        XCTAssertThrowsError(try SessionCodec.decodeControl([24, 0]), "cameraRequestKeyframe has no payload")
+    }
+
     func testAudioPacketRoundTripAndBounds() throws {
         let packet = AudioPacket(channels: 2, samples: [0, -1, .max, .min, 1234, -1234])
         XCTAssertEqual(try AudioPacket.decode(packet.encoded(), expectedChannels: 2), packet)

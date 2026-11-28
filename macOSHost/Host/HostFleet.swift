@@ -15,8 +15,13 @@ final class HostFleet: @unchecked Sendable {
     private let currentOptions: OSAllocatedUnfairLock<HostController.Options>
     var options: HostController.Options { currentOptions.withLock { $0 } }
     let audioRouter = AudioRouter()
+    let cameraBridge = CameraBridge()
     private var pamBridge: PamBridgeServer?
     private let activeLockscreen = OSAllocatedUnfairLock<PamBridgeServer.LockscreenSession?>(initialState: nil)
+    /// Suppresses rapid re-arm loops (e.g. a stale `WiredDisplayAuth:admin` mechanism in `authorizationhost`
+    /// reconnecting every 500 ms and spamming Touch ID prompts on the iPad).
+    private let adminLoopGuard = OSAllocatedUnfairLock<(lastEndedAt: TimeInterval, suppressedUntil: TimeInterval)>(
+        initialState: (0, 0))
     private let confirmPairing: @Sendable (SecureChannel.Peer) -> Bool
     private let lock = OSAllocatedUnfairLock(initialState: (controllers: [HostController](), states: [ObjectIdentifier: HostController.State]()))
     private let stopping = OSAllocatedUnfairLock(initialState: false)
@@ -57,6 +62,12 @@ final class HostFleet: @unchecked Sendable {
 
     func start() {
         audioRouter.start()
+        cameraBridge.onStatusChange = { [weak self] _ in
+            self?.changed()
+        }
+        cameraBridge.onNeedKeyframe = { [weak self] in
+            self?.focus?.requestCameraKeyframe()
+        }
         let bridge = PamBridgeServer(
             handler: { [weak self] request in
                 guard let self else { return PamBridgeServer.Response(status: 2, signature: []) }
@@ -70,6 +81,21 @@ final class HostFleet: @unchecked Sendable {
             },
             onLockscreenStart: { [weak self] session in
                 guard let self else { return }
+                let now = ProcessInfo.processInfo.systemUptime
+                if session.service == "admin" {
+                    let suppressed: Bool = self.adminLoopGuard.withLock { guardState in
+                        if now < guardState.suppressedUntil { return true }
+                        if guardState.lastEndedAt > 0 && (now - guardState.lastEndedAt) < 5.0 {
+                            guardState.suppressedUntil = now + 30.0
+                            return true
+                        }
+                        return false
+                    }
+                    if suppressed {
+                        Log.warn("pam: suppressed rapid repeated admin session #\(session.requestID) (cooldown active)")
+                        return
+                    }
+                }
                 self.activeLockscreen.withLock { $0 = session }
                 let allowWiFi = self.pamAllowWiFi
                 for controller in self.controllers {
@@ -81,12 +107,17 @@ final class HostFleet: @unchecked Sendable {
             },
             onLockscreenEnd: { [weak self] requestID in
                 guard let self else { return }
-                let cleared: Bool = self.activeLockscreen.withLock { current in
-                    guard current?.requestID == requestID else { return false }
+                let endedService: String? = self.activeLockscreen.withLock { current in
+                    guard current?.requestID == requestID else { return nil }
+                    let svc = current?.service
                     current = nil
-                    return true
+                    return svc
                 }
-                if cleared {
+                if endedService == "admin" {
+                    let now = ProcessInfo.processInfo.systemUptime
+                    self.adminLoopGuard.withLock { $0.lastEndedAt = now }
+                }
+                if endedService != nil {
                     for controller in self.controllers {
                         controller.clearLockscreenChallenge()
                     }
@@ -171,7 +202,9 @@ final class HostFleet: @unchecked Sendable {
     /// Check and append happen under one lock: the watcher thread and the main thread both add (audit BUG-03).
     private func add(serial: String?) {
         let controller = HostController(options: options, deviceSerial: serial, audioRouter: audioRouter,
+                                        cameraBridge: cameraBridge,
                                         confirmPairing: confirmPairing) { _ in }
+        controller.onCameraStateChange = { [weak self] in self?.changed() }
         // The state closure above cannot see the controller; record states and notify here.
         controller.onStateRecorded = { [weak self, weak controller] state in
             guard let self, let controller else { return }
@@ -184,7 +217,8 @@ final class HostFleet: @unchecked Sendable {
             self.changed()
         }
         controller.onSessionReady = { [weak self] readyController in
-            guard let self, let session = self.activeLockscreen.withLock({ $0 }) else { return }
+            guard let self, let session = self.activeLockscreen.withLock({ $0 }),
+                  session.service == "lockscreen" else { return }
             readyController.pushLockscreenChallenge(
                 requestID: session.requestID, service: session.service, username: session.username,
                 reason: session.reason, nonce: session.nonce, allowWiFi: self.pamAllowWiFi
@@ -290,6 +324,11 @@ final class HostFleet: @unchecked Sendable {
         let clamped = min(max(balance, 0), HostController.maxBothSpeakersBalance)
         UserDefaults.standard.set(clamped, forKey: HostController.bothSpeakersBalanceKey)
         controllers.forEach { $0.updateBothSpeakers() }
+    }
+
+    func setCamera(enabled: Bool, centerStage: Bool) {
+        focus?.setCamera(enabled: enabled, centerStage: centerStage)
+        changed()
     }
 
     /// Opt-in or opt-out a specific USB-C Android device for AOA accessory mode.

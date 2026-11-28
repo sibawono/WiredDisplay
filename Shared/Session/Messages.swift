@@ -164,6 +164,11 @@ public enum ControlMessage: Sendable, Equatable {
     case authResponse(requestID: UInt32, status: UInt8, signature: [UInt8])
     /// Client -> host: 65-byte uncompressed X9.63 ECDSA P-256 public key from iPad Secure Enclave.
     case biometricPublicKey([UInt8])
+    /// Bidirectional: iPad front camera (FaceTime / Center Stage) state.
+    /// Host -> client requests start/stop and Center Stage mode; client -> host reports actual state.
+    case cameraState(enabled: Bool, centerStage: Bool)
+    /// Host -> client: request an immediate IDR keyframe on the camera stream.
+    case cameraRequestKeyframe
 }
 
 /// Canonical message format signed by the iPad Secure Enclave and verified by `pam_wireddisplay.so`.
@@ -296,7 +301,7 @@ public enum InputEvent: Sendable, Equatable {
 
 public enum SessionCodec {
     private enum ControlTag: UInt8 {
-        case hello = 1, streamConfig, requestKeyframe, ping, pong, bye, audioRoute, videoActive, authHello, authProof, decodeFailed, brightness, cursor, cursorImage, panelSize, displaySpace, qualityPreset, volume, sleepMac, authChallenge, authResponse, biometricPublicKey
+        case hello = 1, streamConfig, requestKeyframe, ping, pong, bye, audioRoute, videoActive, authHello, authProof, decodeFailed, brightness, cursor, cursorImage, panelSize, displaySpace, qualityPreset, volume, sleepMac, authChallenge, authResponse, biometricPublicKey, cameraState, cameraRequestKeyframe
     }
 
     private enum InputTag: UInt8 {
@@ -394,6 +399,11 @@ public enum SessionCodec {
             writer.u8(ControlTag.biometricPublicKey.rawValue)
             writer.u16(UInt16(clamping: key.count))
             writer.raw(key)
+        case .cameraState(let enabled, let centerStage):
+            writer.u8(ControlTag.cameraState.rawValue)
+            writer.u8((enabled ? 1 : 0) | (centerStage ? 2 : 0))
+        case .cameraRequestKeyframe:
+            writer.u8(ControlTag.cameraRequestKeyframe.rawValue)
         case .cursorImage(let image):
             writer.u8(ControlTag.cursorImage.rawValue)
             writer.f32(image.width)
@@ -536,6 +546,12 @@ public enum SessionCodec {
                 throw WireError.invalidValue("biometricPublicKey length \(keyLen)")
             }
             message = .biometricPublicKey(try reader.raw(count: keyLen))
+        case .cameraState:
+            let bits = try reader.u8()
+            guard bits & ~3 == 0 else { throw WireError.invalidValue("cameraState bits \(bits)") }
+            message = .cameraState(enabled: bits & 1 != 0, centerStage: bits & 2 != 0)
+        case .cameraRequestKeyframe:
+            message = .cameraRequestKeyframe
         case .cursorImage:
             let width = try reader.f32(), height = try reader.f32()
             let hotX = try reader.f32(), hotY = try reader.f32()

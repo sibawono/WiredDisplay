@@ -14,6 +14,7 @@
 		B10000000000000000000012 /* ClientSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000002 /* ClientSession.swift */; };
 		B10000000000000000000013 /* VideoView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000003 /* VideoView.swift */; };
 		B10000000000000000000014 /* ClientAudio.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000004 /* ClientAudio.swift */; };
+		B100000000000000000000C2 /* ClientCamera.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100000000000000000000C1 /* ClientCamera.swift */; };
 		B10000000000000000000015 /* ClientLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000005 /* ClientLog.swift */; };
 		B10000000000000000000016 /* EchoServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000006 /* EchoServer.swift */; };
 		B10000000000000000000017 /* EventLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000007 /* EventLog.swift */; };
@@ -32,6 +33,7 @@
 		B10000000000000000000002 /* ClientSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClientSession.swift; sourceTree = "<group>"; };
 		B10000000000000000000003 /* VideoView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoView.swift; sourceTree = "<group>"; };
 		B10000000000000000000004 /* ClientAudio.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClientAudio.swift; sourceTree = "<group>"; };
+		B100000000000000000000C1 /* ClientCamera.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClientCamera.swift; sourceTree = "<group>"; };
 		B10000000000000000000005 /* ClientLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClientLog.swift; sourceTree = "<group>"; };
 		B10000000000000000000006 /* EchoServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = EchoServer.swift; path = ../TransportProbe/Sources/EchoServer.swift; sourceTree = SOURCE_ROOT; };
 		B10000000000000000000007 /* EventLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = EventLog.swift; path = ../TransportProbe/Sources/EventLog.swift; sourceTree = SOURCE_ROOT; };
@@ -73,6 +75,7 @@
 				B10000000000000000000002 /* ClientSession.swift */,
 				B10000000000000000000003 /* VideoView.swift */,
 				B10000000000000000000004 /* ClientAudio.swift */,
+				B100000000000000000000C1 /* ClientCamera.swift */,
 				B10000000000000000000005 /* ClientLog.swift */,
 				B10000000000000000000006 /* EchoServer.swift */,
 				B10000000000000000000007 /* EventLog.swift */,
@@ -167,6 +170,7 @@
 				B10000000000000000000012 /* ClientSession.swift in Sources */,
 				B10000000000000000000013 /* VideoView.swift in Sources */,
 				B10000000000000000000014 /* ClientAudio.swift in Sources */,
+				B100000000000000000000C2 /* ClientCamera.swift in Sources */,
 				B10000000000000000000015 /* ClientLog.swift in Sources */,
 				B10000000000000000000016 /* EchoServer.swift in Sources */,
 				B10000000000000000000017 /* EventLog.swift in Sources */,
@@ -210,7 +214,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 16;
+				CURRENT_PROJECT_VERSION = 17;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = WiredDisplay;
@@ -235,7 +239,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 16;
+				CURRENT_PROJECT_VERSION = 17;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = WiredDisplay;

@@ -11,6 +11,7 @@ final class AppModel {
     let connection = ConnectionModel()
     let videoView = VideoView(frame: .zero)
     let audio = ClientAudio()
+    let camera = ClientCamera()
     private(set) var session: ClientSession?
     private var sink: SwitchableSink?
 
@@ -64,6 +65,23 @@ final class AppModel {
             videoView.onInput = { [weak session] event in session?.send(event) }
             audio.onMicrophone = { [weak session] packet in session?.sendMicrophone(packet) }
             audio.onError = { [weak self] message in self?.connection.lastError = message }
+            camera.onFrame = { [weak session] annexB, isKeyframe, ts in
+                session?.sendCameraFrame(annexB, keyframe: isKeyframe, timestampNanos: ts)
+            }
+            camera.onError = { [weak self] message in self?.connection.lastError = message }
+            camera.onStateChange = { [weak self, weak session] enabled, centerStage, supported in
+                guard let self else { return }
+                connection.cameraOn = enabled
+                connection.cameraCenterStage = centerStage
+                connection.cameraCenterStageSupported = supported
+                session?.setCameraState(enabled: enabled, centerStage: centerStage)
+            }
+            session.onCameraStateRequest = { [weak self] enabled, centerStage in
+                self?.setCamera(enabled: enabled, centerStage: centerStage)
+            }
+            session.onCameraKeyframeRequest = { [weak camera] in
+                camera?.requestKeyframe()
+            }
             audio.onStateChange = { [weak self, weak session] speaker, microphone in
                 guard let self else { return }
                 connection.speakerOn = speaker
@@ -121,6 +139,8 @@ final class AppModel {
         inBackground = true
         // Gate Metal GPU commits synchronously before entering background (especially when background audio keeps the process alive).
         videoView.metalRenderer?.setBackgrounded(true)
+        // iPadOS suspends camera capture in the background; stop cleanly and tell the Mac.
+        camera.stop()
         if audio.isActive {
             session?.setVideoActive(false)
         } else {
@@ -222,6 +242,27 @@ final class AppModel {
             } else {
                 connection.lastError = "Microphone permission denied (Settings › Privacy & Security › Microphone)"
                 connection.microphoneOn = false
+            }
+        }
+    }
+
+    func setCamera(enabled: Bool, centerStage: Bool? = nil) {
+        let cs = centerStage ?? connection.cameraCenterStage
+        connection.cameraCenterStage = cs
+        guard enabled else {
+            connection.cameraOn = false
+            camera.apply(enabled: false, centerStage: cs)
+            session?.setCameraState(enabled: false, centerStage: cs)
+            return
+        }
+        connection.lastError = nil
+        Task { @MainActor in
+            if await ClientCamera.requestCameraPermission() {
+                camera.apply(enabled: true, centerStage: cs)
+            } else {
+                connection.lastError = "Camera permission denied (Settings › Privacy & Security › Camera)"
+                connection.cameraOn = false
+                session?.setCameraState(enabled: false, centerStage: cs)
             }
         }
     }
@@ -567,6 +608,10 @@ struct ControlsPanel: View {
             speaker: Binding(get: { connection.speakerOn },
                              set: { app.setAudio(speaker: $0, microphone: connection.microphoneOn) }),
             microphone: Binding(get: { connection.microphoneOn }, set: { app.setMicrophone($0) }),
+            camera: Binding(get: { connection.cameraOn }, set: { app.setCamera(enabled: $0) }),
+            cameraCenterStage: Binding(get: { connection.cameraCenterStage },
+                                       set: { app.setCamera(enabled: connection.cameraOn, centerStage: $0) }),
+            cameraCenterStageSupported: connection.cameraCenterStageSupported,
             macVolume: Binding(
                 get: { Double(connection.macVolume) },
                 set: {

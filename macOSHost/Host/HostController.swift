@@ -276,12 +276,14 @@ final class HostController: @unchecked Sendable {
     private var video: VideoPipeline?
 
     init(options: Options, deviceSerial: String? = nil, audioRouter: AudioRouter = AudioRouter(),
+         cameraBridge: CameraBridge = CameraBridge(),
          confirmPairing: @escaping @Sendable (SecureChannel.Peer) -> Bool,
          onState: @escaping @Sendable (State) -> Void) {
         self.options = options
         self.transportModeLock = OSAllocatedUnfairLock(initialState: options.transportMode)
         self.deviceSerial = deviceSerial
         self.audioRouter = audioRouter
+        self.cameraBridge = cameraBridge
         self.confirmPairing = confirmPairing
         self.stateHandler = onState
         inputEnabled = OSAllocatedUnfairLock(initialState: options.allowInput)
@@ -310,6 +312,8 @@ final class HostController: @unchecked Sendable {
         var encoding: String?
         var speaker = false
         var microphone = false
+        var camera = false
+        var cameraCenterStage = true
         var activeTransport: ActiveTransportKind?
         var streamingSince: Date?
     }
@@ -590,6 +594,7 @@ final class HostController: @unchecked Sendable {
     /// Headphones in, iPad out (D-034). Shared by every iPad's controller;
     /// the fleet starts it.
     let audioRouter: AudioRouter
+    let cameraBridge: CameraBridge
     /// The one cabled device this controller serves (several iPads, D-041);
     /// nil = any (single-iPad behaviour).
     let deviceSerial: String?
@@ -1406,7 +1411,14 @@ final class HostController: @unchecked Sendable {
                 self.pendingControl = []
                 if ownsAudio { audioRouter.iPadRoute(speaker: false, microphone: false) }
                 releaseAudio()
-                sessionStatus.withLock { $0.speaker = false; $0.microphone = false }
+                let hadCamera = sessionStatus.withLock { s -> Bool in
+                    let prev = s.camera
+                    s.speaker = false
+                    s.microphone = false
+                    s.camera = false
+                    return prev
+                }
+                if hadCamera { cameraBridge.stop() }
             }
             activeUSBSerialLock.withLock { $0 = nil }
             biometricKeyLock.withLock { $0 = nil }
@@ -1919,7 +1931,14 @@ final class HostController: @unchecked Sendable {
                 guard trusted, peerHello != nil else { return }
                 let packet = try AudioPacket.decode(frame.payload, expectedChannels: SessionConstants.microphoneChannels)
                 audio?.pushMicrophone(packet)
-            case .video, .speaker, .camera:
+            case .camera:
+                guard trusted, peerHello != nil else { return }
+                cameraBridge.decodeAndPush(
+                    payload: frame.payload,
+                    isKeyframe: frame.header.flags.contains(.keyframe),
+                    timestampNanos: frame.header.timestampNanos
+                )
+            case .video, .speaker:
                 socket.close("protocol error: unexpected \(frame.header.stream) stream from client")
             }
         } catch {
@@ -2056,6 +2075,20 @@ final class HostController: @unchecked Sendable {
             Log.info("pam: received iPad biometric public key (fingerprint \(SecureChannel.fingerprint(key)))")
         case .authChallenge:
             socket.close("protocol error: unexpected authChallenge from client")
+        case .cameraState(let enabled, let centerStage):
+            sessionStatus.withLock {
+                $0.camera = enabled
+                $0.cameraCenterStage = centerStage
+            }
+            Log.info("camera state from iPad: enabled \(enabled), centerStage \(centerStage)")
+            if enabled {
+                cameraBridge.start()
+            } else {
+                cameraBridge.stop()
+            }
+            onCameraStateChange?()
+        case .cameraRequestKeyframe:
+            break
         case .videoActive(let active):
             guard let hello = peerHello else { return }
             Log.info("iPad video \(active ? "resumed" : "paused (app in background)")")
@@ -2070,6 +2103,34 @@ final class HostController: @unchecked Sendable {
                     onState(.audioOnly(hello.deviceName))
                 }
             }
+        }
+    }
+
+    /// Main queue: iPad camera enabled/Center Stage state changed.
+    var onCameraStateChange: (@Sendable () -> Void)?
+
+    func setCamera(enabled: Bool, centerStage: Bool) {
+        queue.async { [self] in
+            if enabled {
+                cameraBridge.start()
+            } else {
+                cameraBridge.stop()
+            }
+            sessionStatus.withLock {
+                $0.camera = enabled
+                $0.cameraCenterStage = centerStage
+            }
+            if let socket, !socket.isClosed, trusted {
+                send(.cameraState(enabled: enabled, centerStage: centerStage), on: socket)
+            }
+            onCameraStateChange?()
+        }
+    }
+
+    func requestCameraKeyframe() {
+        queue.async { [self] in
+            guard let socket, !socket.isClosed, trusted else { return }
+            send(.cameraRequestKeyframe, on: socket)
         }
     }
 

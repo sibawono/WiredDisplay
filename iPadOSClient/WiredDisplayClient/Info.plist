@@ -8,6 +8,8 @@
 	<array>
 		<string>audio</string>
 	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>WiredDisplay uses the front camera so your iPad can act as a webcam for your Mac.</string>
 	<key>NSFaceIDUsageDescription</key>
 	<string>WiredDisplay uses Face ID to approve Mac authentication requests such as sudo and unlocking your Mac.</string>
 	<key>NSLocalNetworkUsageDescription</key>

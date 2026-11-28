@@ -46,6 +46,12 @@ struct PanelSnapshot {
     var screenRecording = false
     var speaker = false
     var microphone = false
+    var cameraEnabled = false
+    var cameraCenterStage = true
+    var cameraAvailability: CameraBridge.Availability = .obsNotInstalled
+    var cameraFPS = 0
+    var cameraError: String?
+    var cameraConnected = false
     var autoSwitchAudio = true
     var matchRefresh = true
     var localCursor = true
@@ -85,6 +91,8 @@ struct PanelActions {
     var setBothSpeakers: (Bool) -> Void = { _ in }
     var setBothSpeakersDelayMs: (Double) -> Void = { _ in }
     var setBothSpeakersBalance: (Double) -> Void = { _ in }
+    var setCamera: (Bool, Bool) -> Void = { _, _ in }
+    var openOBS: () -> Void = {}
     var openDisplaySettings: () -> Void = {}
     var openSoundSettings: () -> Void = {}
     var openAccessibility: () -> Void = {}
@@ -98,13 +106,14 @@ struct PanelActions {
 @MainActor
 final class PanelModel: ObservableObject {
     enum Tab: String, CaseIterable, Identifiable {
-        case display, input, audio, security, general
+        case display, input, audio, camera, security, general
         var id: String { rawValue }
         var symbol: String {
             switch self {
             case .display: return "display"
             case .input: return "keyboard"
             case .audio: return "speaker.wave.2"
+            case .camera: return "video"
             case .security: return "lock.shield"
             case .general: return "gearshape"
             }
@@ -114,6 +123,7 @@ final class PanelModel: ObservableObject {
             case .display: return "Display"
             case .input: return "Input"
             case .audio: return "Audio"
+            case .camera: return "Camera"
             case .security: return "Security"
             case .general: return "General"
             }
@@ -213,6 +223,7 @@ struct StatusPanelView: View {
         case .display: displayTab
         case .input: inputTab
         case .audio: audioTab
+        case .camera: cameraTab
         case .security: securityTab
         case .general: generalTab
         }
@@ -433,6 +444,69 @@ struct StatusPanelView: View {
                 }
             }
             LinkRow(title: "Sound Settings…", symbol: "arrow.up.forward.app", action: model.actions.openSoundSettings)
+        }
+    }
+
+    private var cameraTab: some View {
+        VStack(spacing: 8) {
+            Card {
+                switch s.cameraAvailability {
+                case .ready(let deviceName):
+                    ToggleLine(
+                        title: "Use iPad as Mac webcam",
+                        detail: s.cameraEnabled
+                            ? (s.cameraFPS > 0
+                                ? "Live · \(deviceName) (\(s.cameraFPS) fps)"
+                                : "Starting · select “\(deviceName)” in Meet or Zoom")
+                            : (s.cameraConnected
+                                ? "Streams the iPad front camera (1080p) to this Mac"
+                                : "Connect an iPad to enable the camera"),
+                        isOn: Binding(
+                            get: { s.cameraEnabled },
+                            set: { on in
+                                model.snapshot.cameraEnabled = on
+                                model.actions.setCamera(on, s.cameraCenterStage)
+                            }
+                        )
+                    )
+                    .disabled(!s.cameraConnected && !s.cameraEnabled)
+                    if s.cameraEnabled {
+                        CardDivider()
+                        ToggleLine(
+                            title: "Center Stage",
+                            detail: "Keeps you centered in frame as you move",
+                            isOn: Binding(
+                                get: { s.cameraCenterStage },
+                                set: { cs in
+                                    model.snapshot.cameraCenterStage = cs
+                                    model.actions.setCamera(s.cameraEnabled, cs)
+                                }
+                            )
+                        )
+                    }
+                    if let err = s.cameraError, !err.isEmpty {
+                        CardDivider()
+                        Text(err)
+                            .font(.system(size: 10.5)).foregroundStyle(Color.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                case .obsInstalledNotActivated:
+                    StatusLine(symbol: "video.slash", title: "Activate OBS Virtual Camera once",
+                               detail: "Open OBS Studio, click Start Virtual Camera once, then quit OBS.", on: false)
+                    Button("Open OBS Studio", action: model.actions.openOBS)
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                case .obsNotInstalled:
+                    StatusLine(symbol: "video.slash", title: "OBS Virtual Camera needed",
+                               detail: "Install OBS Studio and click Start Virtual Camera once. OBS does not need to stay open.", on: false)
+                }
+            }
+            Card {
+                Text("How to use in video calls").font(.system(size: 11, weight: .semibold))
+                Text("Select “OBS Virtual Camera” in Google Meet, Zoom, Teams, or FaceTime. OBS Studio does not need to stay open.")
+                    .font(.system(size: 11)).foregroundStyle(Color.caption)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 

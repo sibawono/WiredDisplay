@@ -124,7 +124,9 @@ public struct FrameHeader: Equatable, Sendable {
 
     private static func validate(stream: StreamType, flags: FrameFlags, payloadLength: UInt32) throws {
         guard flags.isSubset(of: FrameFlags.known) else { throw FrameError.unknownFlags(flags.rawValue) }
-        guard !flags.contains(.keyframe) || stream == .video else { throw FrameError.unknownFlags(flags.rawValue) }
+        guard !flags.contains(.keyframe) || stream == .video || stream == .camera else {
+            throw FrameError.unknownFlags(flags.rawValue)
+        }
         guard payloadLength <= stream.maxPayloadLength else {
             throw FrameError.payloadTooLarge(stream: stream, length: payloadLength)
         }
