@@ -1557,3 +1557,21 @@ During scrolling, sampled medians were 0.05 ms capture-delivery-to-conversion, 4
 **NOT DONE:**
 - The owner's own check of `sudo` and the Lock Screen with the 0.5.6 modules.
 - Publishing 0.5.6 and updating the website; both wait for the owner's yes.
+
+## CHANGE ID: P1-097 — Release 0.5.6 (build 15) and website 0.5.6
+
+**CONTENTS:** P1-096 (and the website work in P1-095).
+
+**RELEASE:** https://github.com/sibawono/WiredDisplay/releases/tag/v0.5.6 (Latest, 2026-11-28), approved by the owner with "Ya, rilis 0.5.6".
+- Assets: WiredDisplay-0.5.6.dmg (1,329,611 B), WiredDisplay-0.5.6.ipa (847,883 B), PANDUAN-INSTALASI.txt.
+- Code commit 0014128 was published as public 261dc81.
+- Before the release the owner checked `sudo -k && sudo -v`: it passed without the Mac password, so the iPad approved it with the 0.5.6 modules.
+
+**SCREENSHOTS:** `docs/images/host-*.png` were re-rendered from the released DMG's app (General shows "WiredDisplay 0.5.6"). The sizes are unchanged.
+
+**WEBSITE:**
+- `VERSION = "0.5.6"`. The badge reads "Version 0.5.6, released 28 November 2026", and the downloads are listed as 1.3 MB and 848 KB.
+- "New in 0.5.6" (EN/ID): one installer for the extras, one uninstaller, and no developer tools needed.
+- The Touch ID note, `install.mac.4` and `audio.note` now point to Install Extras. The iPad Controls caption no longer names a version.
+- Checked at 1440 × 900 and 375 × 812 with no overflow. The identifier scan found only the site's domain.
+- Deployed as Cloudflare Pages 94e7d429. The live CSS matches the build, and both download links return 200.
